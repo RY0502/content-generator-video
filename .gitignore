@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+output/
+assets/characters/
+assets/environments/
+.DS_Store
+get-youtube-token.js
+prompt.txt
+temp_script.json
