@@ -15,6 +15,111 @@ export interface ProductionScriptInspection {
   issues: string[];
 }
 
+/**
+ * Typed boundary error used by media preflights. Tool wrappers may safely turn
+ * this error into an actionable agent result; unrelated audio, filesystem, and
+ * provider errors must continue to propagate.
+ */
+export class ProductionScriptContractError extends Error {
+  readonly inspection: ProductionScriptInspection;
+
+  constructor(
+    inspection: ProductionScriptInspection,
+    prefix = "Persisted episode script violates the production contract",
+  ) {
+    super(`${prefix}: ${inspection.issues.join(" | ")}`);
+    this.name = "ProductionScriptContractError";
+    this.inspection = inspection;
+  }
+}
+
+export interface AgnesSubmissionEvidence {
+  status: string;
+  attemptCount: number;
+  providerTaskId: string | null;
+  providerReceipt: unknown | null;
+  submittedAt: string | null;
+}
+
+export type ProductionScriptReadinessStatus =
+  | "ready"
+  | "repair_required"
+  | "repair_blocked";
+
+export interface ProductionScriptReadiness {
+  status: ProductionScriptReadinessStatus;
+  pass: boolean;
+  sceneCount: number;
+  totalSpokenWords: number;
+  issueCount: number;
+  /** A bounded sample keeps the agent context useful even for many bad scenes. */
+  issues: string[];
+  omittedIssueCount: number;
+  agnesSubmissionStarted: boolean;
+  startedAssetCount: number;
+  canReplaceScript: boolean;
+  nextAction: string;
+}
+
+const MAX_REPORTED_SCRIPT_ISSUES = 12;
+
+/** Mirrors the durable script-replacement guard in SeriesState. */
+export function hasStartedAgnesSubmission(row: AgnesSubmissionEvidence): boolean {
+  return row.attemptCount > 0
+    || row.providerTaskId !== null
+    || row.providerReceipt !== null
+    || row.submittedAt !== null
+    || row.status !== "pending";
+}
+
+/**
+ * Produces the same concise, non-mutating verdict for get_next_episode and the
+ * Agnes phase tools. A script is repairable only before any provider work has
+ * begun; this preserves accepted receipts across reruns.
+ */
+export function productionScriptReadiness(
+  inspection: ProductionScriptInspection,
+  agnesRows: readonly AgnesSubmissionEvidence[],
+): ProductionScriptReadiness {
+  const startedAssetCount = agnesRows.filter(hasStartedAgnesSubmission).length;
+  const agnesSubmissionStarted = startedAssetCount > 0;
+  const status: ProductionScriptReadinessStatus = inspection.pass
+    ? "ready"
+    : agnesSubmissionStarted
+      ? "repair_blocked"
+      : "repair_required";
+  const issues = inspection.issues.slice(0, MAX_REPORTED_SCRIPT_ISSUES);
+
+  return {
+    status,
+    pass: inspection.pass,
+    sceneCount: inspection.sceneCount,
+    totalSpokenWords: inspection.totalSpokenWords,
+    issueCount: inspection.issues.length,
+    issues,
+    omittedIssueCount: Math.max(0, inspection.issues.length - issues.length),
+    agnesSubmissionStarted,
+    startedAssetCount,
+    canReplaceScript: !agnesSubmissionStarted,
+    nextAction: status === "ready"
+      ? "Continue from the episode's persisted stage."
+      : status === "repair_required"
+        ? "Resume the durable draft by episodeId with refine_episode_script; pass only its compact draft revision when one is reported. Continue only when it returns status=ready and persisted=true, then regenerate exact-text narration audio before retrying Agnes. Never retransmit scriptJson through refinement or update_episode_status."
+        : "Stop this run and report that the invalid script is locked by durable Agnes submission evidence; do not replace the script or submit any additional asset.",
+  };
+}
+
+export function inspectProductionScriptReadiness(
+  value: unknown,
+  mainCharacterNames: readonly string[],
+  agnesRows: readonly AgnesSubmissionEvidence[],
+): ProductionScriptReadiness {
+  return productionScriptReadiness(
+    inspectProductionScript(value, mainCharacterNames),
+    agnesRows,
+  );
+}
+
 function parseJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
   try {

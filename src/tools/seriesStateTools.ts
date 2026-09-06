@@ -5,7 +5,75 @@ import {
   KEY_ART_TITLE_MAX_SPOKEN_WORDS,
   canonicalizeKeyArtTitle,
 } from "../services/keyArtTitleContract.js";
-import { SERIES_EPISODE_COUNT, SeriesState } from "../state/seriesState.js";
+import {
+  inspectProductionScriptReadiness,
+} from "../services/productionScriptContract.js";
+import { getEpisodeScriptChunkAuthoringProgress } from "./scriptRefinementTool.js";
+import {
+  SERIES_EPISODE_COUNT,
+  EpisodeAudioReadinessError,
+  SeriesState,
+  type EpisodeScriptDraftValidation,
+} from "../state/seriesState.js";
+
+const INVALID_STATUS_UPDATE = Symbol("invalid-status-update");
+
+type InvalidStatusUpdate = {
+  readonly [INVALID_STATUS_UPDATE]: true;
+  readonly episodeId?: number;
+  readonly invalidPaths: string[];
+  readonly omittedIssueCount: number;
+};
+
+function isInvalidStatusUpdate(value: unknown): value is InvalidStatusUpdate {
+  return Boolean(value)
+    && typeof value === "object"
+    && (value as Partial<InvalidStatusUpdate>)[INVALID_STATUS_UPDATE] === true;
+}
+
+function publicDraftValidation(
+  validation: EpisodeScriptDraftValidation | null,
+  options: { authoringInProgress?: boolean } = {},
+): unknown {
+  if (!validation) return validation;
+  const { repairEvidence, ...summary } = validation;
+  if (options.authoringInProgress) {
+    return {
+      ...summary,
+      requiredAction: "continue_authoring",
+    };
+  }
+  if (!repairEvidence) {
+    const onlyDiscardedLegacyTimingIssue = !validation.pass
+      && validation.omittedIssueCount === 0
+      && validation.issues.length > 0
+      && validation.issues.every((issue) =>
+        /^Measured total narration was\s+[\d.]+\s+seconds/iu.test(issue)
+      );
+    return {
+      ...summary,
+      requiredAction: validation.pass || onlyDiscardedLegacyTimingIssue
+        ? "refine"
+        : "reauthor_complete_script",
+    };
+  }
+  const durationExceededSceneCount = repairEvidence.durationExceededScenes?.length ?? 0;
+  return {
+    ...summary,
+    requiredAction: validation.pass
+      ? "refine"
+      : durationExceededSceneCount > 0
+        ? "resume_narration_repair"
+        : "reauthor_complete_script",
+    durableTimingEvidence: {
+      durationExceededSceneCount,
+      hasMeasuredTotalNarrationSeconds:
+        repairEvidence.measuredTotalNarrationSeconds !== undefined,
+      measuredNarrationSceneCount:
+        repairEvidence.measuredNarrationSceneCount,
+    },
+  };
+}
 
 /**
  * Deep-agent tools exposing the durable series/episode state (Turso/libSQL-backed,
@@ -65,19 +133,6 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
     });
   };
 
-  const parseJsonObjectInput = (value: unknown) => {
-    if (typeof value !== "string") {
-      return value;
-    }
-
-    const parsedValue = tryParseJson(value);
-    if (parsedValue !== undefined) {
-      return parsedValue;
-    }
-
-    return value;
-  };
-
   const canonicalTitleSchema = (kind: "series" | "episode") => z.string().transform(
     (value, context) => {
       try {
@@ -122,8 +177,9 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
   const getOrCreateSeries = new DynamicStructuredTool({
     name: "get_or_create_series",
     description:
-      "Looks up the series by concept name, creating it (with its character/environment roster and " +
-      "episode formula) if it doesn't exist yet. The concept name is the spoken series title and must have at most " +
+      "Looks up the series by concept name. On a rerun, send conceptName only and it returns the stored roster. " +
+      "Only when status=needs_definition, call it again with the complete fixed character/environment rosters and " +
+      "episode formula to create the series. The concept name is the spoken series title and must have at most " +
       `${KEY_ART_TITLE_MAX_RAW_CHARACTERS} characters and ${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words. ` +
       "Always call this first. Returns { seriesId, characters, environments }.",
     schema: z.object({
@@ -131,25 +187,57 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
       characters: z
         .preprocess(
           parseJsonArrayInput,
-          z.array(z.object({ name: z.string(), description: z.string() }))
+          z.array(z.object({ name: z.string(), description: z.string() })).optional()
         )
-        .describe("Fixed character roster with verbatim visual descriptions. Can be JSON string or array."),
+        .describe("Complete fixed character roster for first creation only. Can be JSON string or array."),
       environments: z
         .preprocess(
           parseJsonArrayInput,
-          z.array(z.object({ name: z.string(), description: z.string() }))
+          z.array(z.object({ name: z.string(), description: z.string() })).optional()
         )
-        .describe("Fixed location roster with verbatim visual descriptions. Can be JSON string or array."),
+        .describe("Complete fixed location roster for first creation only. Can be JSON string or array."),
       episodeFormula: z
         .string()
-        .default(
-          "Approved preschool story patterns: classic 8-beat teamwork rescue, repeated-attempt problem solving, " +
-            "gentle mystery/clue trail, journey/quest, celebration/preparation, or character-feeling growth. " +
-            "If the user requests a specific formula, use that exactly; otherwise choose the best-fit pattern for each episode and vary across the series."
-        )
-        .describe("The approved episode pattern guidance text for this series."),
+        .trim()
+        .min(1)
+        .optional()
+        .describe("The complete approved episode-pattern guidance for first creation only."),
     }),
     func: async ({ conceptName, characters, environments, episodeFormula }) => {
+      const existingSeriesId = await seriesState.findSeriesIdByConceptName(conceptName);
+      if (existingSeriesId !== null) {
+        const [storedCharacters, storedEnvironments] = await Promise.all([
+          seriesState.getSeriesCharacters(existingSeriesId),
+          seriesState.getSeriesEnvironments(existingSeriesId),
+        ]);
+        return JSON.stringify({
+          seriesId: existingSeriesId,
+          characters: storedCharacters,
+          environments: storedEnvironments,
+        });
+      }
+
+      const missingFields = [
+        ...(characters === undefined ? ["characters"] : []),
+        ...(environments === undefined ? ["environments"] : []),
+        ...(episodeFormula === undefined ? ["episodeFormula"] : []),
+      ];
+      if (
+        characters === undefined
+        || environments === undefined
+        || episodeFormula === undefined
+      ) {
+        return JSON.stringify({
+          status: "needs_definition",
+          persisted: false,
+          conceptName,
+          missingFields,
+          retryThisInvocation: true,
+          nextAction:
+            "Call get_or_create_series once more with conceptName plus the complete characters, environments, and episodeFormula definition.",
+        });
+      }
+
       const seriesId = await seriesState.getOrCreateSeries(conceptName, characters, environments, episodeFormula);
       const storedCharacters =
         typeof seriesState.getSeriesCharacters === "function"
@@ -170,19 +258,29 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
   const bulkInsertEpisodes = new DynamicStructuredTool({
     name: "bulk_insert_episode_list",
     description:
-      `Validates and atomically inserts exactly ${SERIES_EPISODE_COUNT} episodes numbered 1-${SERIES_EPISODE_COUNT}, ` +
+      "On a rerun, send seriesId only to verify the stored season. If status=manifest_required, call it again with " +
+      `exactly ${SERIES_EPISODE_COUNT} episodes numbered 1-${SERIES_EPISODE_COUNT}; it validates and atomically inserts them. ` +
       `each with a non-empty title (at most ${KEY_ART_TITLE_MAX_RAW_CHARACTERS} characters and ` +
-      `${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words) and premise. On later calls it verifies that the stored season is ` +
-      "complete and valid without overwriting it.",
+      `${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words) and premise. Stored seasons are never overwritten.`,
     schema: z.object({
       seriesId: z.number().int().positive(),
       episodes: z.preprocess(
         normalizeEpisodesInput,
-        seasonEpisodeListSchema,
+        seasonEpisodeListSchema.optional(),
       ),
     }),
     func: async ({ seriesId, episodes }) => {
-      await seriesState.bulkInsertEpisodesIfEmpty(seriesId, episodes);
+      const manifestStatus = await seriesState.bulkInsertEpisodesIfEmpty(seriesId, episodes);
+      if (manifestStatus === "manifest_required") {
+        return JSON.stringify({
+          status: "manifest_required",
+          persisted: false,
+          seriesId,
+          retryThisInvocation: true,
+          nextAction:
+            `Call bulk_insert_episode_list once more with seriesId and the complete ${SERIES_EPISODE_COUNT}-episode manifest.`,
+        });
+      }
       return JSON.stringify({ status: "ok" });
     },
   });
@@ -190,34 +288,235 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
   const getNextEpisode = new DynamicStructuredTool({
     name: "get_next_episode",
     description:
-      "Returns a discriminated episode-availability result. kind=ready includes the lowest-numbered " +
-      "resumable episode. kind=daily_limit means today's episode was already uploaded; stop immediately " +
-      "and repeat its exact message: 'Only 1 episode per day can be generated.' kind=series_complete, " +
-      "kind=no_episodes, and kind=series_missing are also terminal for this invocation. Never start media " +
-      "work unless kind=ready, and resume from the returned episode's durable status instead of restarting.",
+      "Returns the next resumable episode and a compact resumeAction. Obey that action exactly. " +
+      "daily_limit, series_complete, no_episodes, series_missing, and resumeAction=stop end the invocation. " +
+      "The production script stays in Turso; this receipt never retransmits it.",
     schema: z.object({ seriesId: z.number().int().positive() }),
     func: async ({ seriesId }) => {
       const availability = await seriesState.getNextEpisodeAvailability(seriesId);
-      return JSON.stringify(availability);
+      if (availability.kind !== "ready") return JSON.stringify(availability);
+
+      const [characters, agnesRows, privateDraft] = await Promise.all([
+        seriesState.getSeriesCharacters(seriesId),
+        seriesState.listAgnesSceneGenerations(
+          seriesId,
+          availability.episode.episodeNumber,
+        ),
+        typeof seriesState.getEpisodeScriptDraft === "function"
+          ? seriesState.getEpisodeScriptDraft(availability.episode.id)
+          : Promise.resolve(null),
+      ]);
+      const scriptValidation = inspectProductionScriptReadiness(
+        availability.episode.scriptJson,
+        characters.map((character) => character.name),
+        agnesRows,
+      );
+      const scriptAuthoringProgress = privateDraft
+        ? getEpisodeScriptChunkAuthoringProgress(
+            privateDraft.scriptJson,
+            privateDraft.validation,
+          )
+        : null;
+      const scriptDraft = privateDraft
+        ? {
+            episodeId: privateDraft.episodeId,
+            revision: privateDraft.revision,
+            contentDigest: privateDraft.contentDigest,
+            validation: publicDraftValidation(privateDraft.validation, {
+              authoringInProgress: scriptAuthoringProgress?.status === "in_progress",
+            }),
+            ...(scriptAuthoringProgress === null
+              ? {}
+              : { authoringProgress: scriptAuthoringProgress }),
+            createdAt: privateDraft.createdAt,
+            updatedAt: privateDraft.updatedAt,
+          }
+        : null;
+      const initialScriptRequired = availability.episode.scriptJson == null
+        && scriptDraft === null
+        && !scriptValidation.agnesSubmissionStarted;
+      let resumeAction: "stop" | "repair_script" | "script_and_audio" | "script_authoring" | "audio_repair" | "agnes" | "youtube_upload";
+      let audioValidation: unknown = null;
+      let assemblyValidation: unknown = null;
+      if (scriptValidation.status === "repair_blocked") {
+        resumeAction = "stop";
+      } else if (
+        scriptAuthoringProgress?.status === "in_progress"
+        && !scriptValidation.agnesSubmissionStarted
+      ) {
+        // A bounded prefix is already durable. Resume from its exact next
+        // range instead of regenerating portraits or retransmitting the full
+        // accumulated script through the model/tool boundary.
+        resumeAction = "script_authoring";
+      } else if (initialScriptRequired) {
+        // A brand-new episode has nothing to repair yet. Route it through the
+        // authoring path so the model creates and stages its first complete
+        // script instead of asking refine_episode_script for a missing draft.
+        resumeAction = "script_and_audio";
+      } else if (scriptValidation.status === "repair_required") {
+        resumeAction = "repair_script";
+      } else if (scriptDraft !== null && !scriptValidation.agnesSubmissionStarted) {
+        // An unfinished private revision wins before any provider claim. This
+        // is what lets a later run resume capped narration repair or full
+        // re-authoring instead of repeatedly auditing the older production
+        // script merely because its episode stage still says audio.
+        resumeAction = "repair_script";
+      } else if (
+        ["audio", "assembly"].includes(availability.episode.status) ||
+        scriptValidation.agnesSubmissionStarted
+      ) {
+        // Durable provider evidence is more authoritative than a stale or
+        // pessimistically-written episode stage. Once a claim exists, never
+        // fall back through script/character/audio generation merely because
+        // an earlier run left the coarse episode status as pending/failed.
+        try {
+          const readyAudio = await seriesState.assertEpisodeAudioReady(availability.episode.id);
+          if (scriptValidation.agnesSubmissionStarted) {
+            await seriesState.assertEpisodeKeyArtAudioReady(
+              seriesId,
+              availability.episode.episodeNumber,
+            );
+          }
+          audioValidation = { status: "ready", ...readyAudio };
+          const completedAssemblyReceipt = typeof seriesState.listEpisodeVideoOutputs === "function"
+            ? (await seriesState.listEpisodeVideoOutputs(
+                seriesId,
+                availability.episode.episodeNumber,
+              )).some((output) =>
+                output.variant === "agnes_text"
+                && output.status === "completed"
+                && Boolean(output.outputPath)
+              )
+            : false;
+          if (availability.episode.status === "assembly" || completedAssemblyReceipt) {
+            try {
+              await seriesState.assertEpisodeReadyForDone(availability.episode.id);
+              assemblyValidation = { status: "ready" };
+              resumeAction = "youtube_upload";
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              assemblyValidation = {
+                status: "repair_required",
+                message: message.length <= 300 ? message : `${message.slice(0, 297)}...`,
+              };
+              // Re-entering the idempotent Agnes/download path also repairs a
+              // missing normalized input before assembly is attempted again.
+              resumeAction = "agnes";
+            }
+          } else {
+            resumeAction = "agnes";
+          }
+        } catch (error) {
+          if (!(error instanceof EpisodeAudioReadinessError)) throw error;
+          const locked = scriptValidation.agnesSubmissionStarted;
+          const message = error.message.length <= 300
+            ? error.message
+            : `${error.message.slice(0, 297)}...`;
+          audioValidation = {
+            status: locked ? "repair_blocked" : "repair_required",
+            reason: error.reason,
+            ...(error.sceneNumber === undefined ? {} : { sceneNumber: error.sceneNumber }),
+            ...(error.assetKind === undefined ? {} : { assetKind: error.assetKind }),
+            ...(error.durationSeconds === undefined
+              ? {}
+              : { durationSeconds: error.durationSeconds }),
+            ...(error.totalDurationSeconds === undefined
+              ? {}
+              : { totalDurationSeconds: error.totalDurationSeconds }),
+            message,
+          };
+          resumeAction = locked ? "stop" : "audio_repair";
+        }
+      } else {
+        resumeAction = "script_and_audio";
+      }
+      // The production tools read the canonical script directly from Turso.
+      // Returning it on every resume duplicated tens of thousands of
+      // characters into the agent context even when the next action was only
+      // Agnes verification or YouTube upload.
+      const { scriptJson: _scriptJson, ...episodeReceipt } = availability.episode;
+      return JSON.stringify({
+        ...availability,
+        episode: episodeReceipt,
+        resumeAction,
+        scriptValidation: initialScriptRequired
+          ? {
+              status: "not_started",
+              pass: false,
+              sceneCount: 0,
+              nextAction:
+                "Plan the complete episode, then call write_episode_script_chunk with operation=start and scenes 1-8 as real arrays/objects, never an encoded scriptJson string.",
+            }
+          : scriptAuthoringProgress?.status === "in_progress"
+            ? {
+                status: "authoring_in_progress",
+                pass: false,
+                sceneCount: scriptAuthoringProgress.completedSceneCount,
+                targetSceneCount: scriptAuthoringProgress.targetSceneCount,
+                nextAction:
+                  `Obey resumeAction=script_authoring and append only scenes ` +
+                  `${scriptAuthoringProgress.nextSceneNumber}-${scriptAuthoringProgress.nextSceneEnd} ` +
+                  `to draft revision ${privateDraft!.revision}. Do not call refinement yet.`,
+              }
+          : scriptValidation,
+        scriptDraft,
+        ...(audioValidation === null ? {} : { audioValidation }),
+        ...(assemblyValidation === null ? {} : { assemblyValidation }),
+      });
     },
+  });
+
+  const updateEpisodeStatusSchema = z.object({
+    episodeId: z.number().int().positive(),
+    status: z.enum(["pending", "audio", "assembly", "failed"]),
+    outputPath: z.string().optional(),
+  }).strict().catch(({ error, input }) => {
+    const raw = input && typeof input === "object" && !Array.isArray(input)
+      ? input as Record<string, unknown>
+      : {};
+    const paths = [...new Set(error.issues.map((issue) => issue.path.join(".") || "input"))];
+    return {
+      [INVALID_STATUS_UPDATE]: true,
+      episodeId: Number.isSafeInteger(raw.episodeId) && Number(raw.episodeId) > 0
+        ? Number(raw.episodeId)
+        : undefined,
+      invalidPaths: paths.slice(0, 8),
+      omittedIssueCount: Math.max(0, paths.length - 8),
+    } as unknown as {
+      episodeId: number;
+      status: "pending" | "audio" | "assembly" | "failed";
+      outputPath?: string;
+    };
   });
 
   const updateEpisodeStatus = new DynamicStructuredTool({
     name: "update_episode_status",
     description:
-      "Persists an episode's resumable stage (pending/script/audio/assembly/failed), plus a validated " +
-      "production script or assembled output path when applicable. New scripts must contain 40-60 sequential " +
-      "one-audio/one-video scenes that satisfy the shared narration contract. The terminal done transition is " +
+      "Persists only an episode's lightweight resumable stage (pending/audio/assembly/failed) and optional " +
+      "assembled output path. It never accepts or persists script content: write_episode_script_chunk and " +
+      "refine_episode_script exclusively own draft storage, validation, and promotion to the production script. " +
+      "The terminal done transition is " +
       "intentionally unavailable here: upload_to_youtube records the durable receipt, marks done, and cleans " +
       "per-episode Agnes tracking after a successful upload.",
-    schema: z.object({
-      episodeId: z.number(),
-      status: z.enum(["pending", "script", "audio", "assembly", "failed"]),
-      scriptJson: z.preprocess(parseJsonObjectInput, z.unknown()).optional(),
-      outputPath: z.string().optional(),
-    }),
-    func: async ({ episodeId, status, scriptJson, outputPath }) => {
-      await seriesState.updateEpisodeStatus(episodeId, status, { scriptJson, outputPath });
+    schema: updateEpisodeStatusSchema,
+    func: async (input) => {
+      if (isInvalidStatusUpdate(input)) {
+        return JSON.stringify({
+          status: "invalid_input",
+          updated: false,
+          ...(input.episodeId === undefined ? {} : { episodeId: input.episodeId }),
+          invalidPaths: input.invalidPaths,
+          omittedIssueCount: input.omittedIssueCount,
+          retryThisInvocation: false,
+          message:
+            "update_episode_status accepts only episodeId, status=pending|audio|assembly|failed, and optional outputPath. Script content must never be sent to this tool.",
+          nextAction:
+            "Use write_episode_script_chunk for bounded script authoring, then refine_episode_script with only its compact episode/revision reference.",
+        });
+      }
+
+      const { episodeId, status, outputPath } = input;
+      await seriesState.updateEpisodeStatus(episodeId, status, { outputPath });
       return JSON.stringify({ status: "ok" });
     },
   });

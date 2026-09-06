@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG } from "../config.js";
-import { SeriesState } from "../state/seriesState.js";
+import {
+  canonicalEpisodeScriptJson,
+  EpisodeAudioReadinessError,
+  SeriesState,
+} from "../state/seriesState.js";
 import {
   AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
   AGNES_SERIES_KEY_ART_TRACKING_SCENE,
@@ -73,6 +77,50 @@ afterEach(async () => {
 });
 
 describe("SeriesState Agnes persistence", () => {
+  it("classifies a missing narration artifact as a typed recoverable audio failure", async () => {
+    const state = await createStateWithEpisode();
+    const previousOutputDir = CONFIG.outputDir;
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "audio-readiness-missing-"));
+    (CONFIG as { outputDir: string }).outputDir = outputDir;
+
+    try {
+      await state.updateEpisodeStatus(1, "script", { scriptJson: productionScript() });
+      const failure = await state.assertEpisodeAudioReady(1).catch((error) => error);
+
+      expect(failure).toBeInstanceOf(EpisodeAudioReadinessError);
+      expect(failure).toMatchObject({
+        reason: "artifact_missing_or_stale",
+        sceneNumber: 1,
+      });
+    } finally {
+      (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
+    }
+  });
+
+  it("classifies missing locked key-art title audio without regenerating it", async () => {
+    const state = await createStateWithEpisode();
+    const previousOutputDir = CONFIG.outputDir;
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "key-art-audio-readiness-missing-"));
+    (CONFIG as { outputDir: string }).outputDir = outputDir;
+
+    try {
+      await state.updateEpisodeStatus(1, "script", { scriptJson: productionScript() });
+      const client = (state as unknown as {
+        client: { execute(sql: string): Promise<unknown> };
+      }).client;
+      await client.execute("UPDATE episodes SET title = 'Test Episode' WHERE id = 1");
+      const failure = await state.assertEpisodeKeyArtAudioReady(1, 2).catch((error) => error);
+
+      expect(failure).toBeInstanceOf(EpisodeAudioReadinessError);
+      expect(failure).toMatchObject({
+        reason: "artifact_missing_or_stale",
+        assetKind: "series_key_art",
+      });
+    } finally {
+      (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
+    }
+  });
+
   it("lazily adds request identity columns to an already-created Agnes table", async () => {
     const state = await createStateWithEpisode();
     const client = (state as unknown as { client: { execute(sql: string): Promise<{ rows: any[] }> } }).client;
@@ -108,6 +156,184 @@ describe("SeriesState Agnes persistence", () => {
     const names = columns.rows.map((row) => String(row.name));
     expect(names).toContain("request_digest");
     expect(names).toContain("attempt_count");
+
+    const episodeColumns = await client.execute("PRAGMA table_info('episodes')");
+    const episodeColumnNames = episodeColumns.rows.map((row) => String(row.name));
+    expect(episodeColumnNames).toEqual(expect.arrayContaining([
+      "audio_revision",
+      "audio_mutation_token",
+      "audio_mutation_scene_number",
+      "audio_mutation_expires_at_ms",
+    ]));
+  });
+
+  it("leases narration mutations, advances revisions on commit, and fences expired owners", async () => {
+    const state = await createStateWithEpisode();
+    const nowMs = Date.now();
+    const identity = {
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 3,
+      leaseToken: "tts-owner-1",
+    };
+
+    const competingBegins = await Promise.all([
+      state.beginEpisodeNarrationAudioMutation({
+        ...identity,
+        leaseExpiresAtMs: nowMs + 60_000,
+        nowMs,
+      }),
+      state.beginEpisodeNarrationAudioMutation({
+        ...identity,
+        leaseToken: "tts-owner-2",
+        leaseExpiresAtMs: nowMs + 60_000,
+        nowMs,
+      }),
+    ]);
+    expect(competingBegins.filter((result) => result.acquired)).toHaveLength(1);
+    const acquired = competingBegins.find((result) => result.acquired);
+    const blocked = competingBegins.find((result) => !result.acquired);
+    expect(acquired).toMatchObject({ acquired: true, audioRevision: 0, startedAssetCount: 0 });
+    expect(blocked).toMatchObject({
+      acquired: false,
+      reason: "mutation_in_progress",
+      startedAssetCount: 0,
+    });
+
+    const owner = acquired === competingBegins[0]
+      ? identity
+      : { ...identity, leaseToken: "tts-owner-2" };
+    await expect(state.getEpisodeAudioRevisionForAgnes(1, 2, nowMs + 1))
+      .rejects.toThrow("Narration audio mutation is in progress");
+    expect(await state.renewEpisodeNarrationAudioMutation({
+      ...owner,
+      leaseExpiresAtMs: nowMs + 120_000,
+      nowMs: nowMs + 1,
+    })).toBe(true);
+    expect(await state.renewEpisodeNarrationAudioMutation({
+      ...owner,
+      leaseToken: "wrong-owner",
+      leaseExpiresAtMs: nowMs + 120_000,
+      nowMs: nowMs + 1,
+    })).toBe(false);
+    expect(await state.completeEpisodeNarrationAudioMutation(owner)).toBe(true);
+    expect(await state.completeEpisodeNarrationAudioMutation(owner)).toBe(false);
+    expect(await state.getEpisodeAudioRevisionForAgnes(1, 2, nowMs + 2)).toBe(1);
+
+    const expiring = await state.beginEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "expired-owner",
+      leaseExpiresAtMs: nowMs + 20,
+      nowMs: nowMs + 10,
+    });
+    expect(expiring).toMatchObject({ acquired: true, audioRevision: 1 });
+    expect(await state.getEpisodeAudioRevisionForAgnes(1, 2, nowMs + 21)).toBe(2);
+    expect(await state.getEpisodeAudioRevisionForAgnes(1, 2, nowMs + 22)).toBe(2);
+    expect(await state.completeEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "expired-owner",
+    })).toBe(false);
+
+    const aborting = await state.beginEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "abort-owner",
+      leaseExpiresAtMs: nowMs + 120_000,
+      nowMs: nowMs + 30,
+    });
+    expect(aborting).toMatchObject({ acquired: true, audioRevision: 2 });
+    expect(await state.abortEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "wrong-owner",
+    })).toBe(false);
+    expect(await state.abortEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "abort-owner",
+    })).toBe(true);
+    expect(await state.getEpisodeAudioRevisionForAgnes(1, 2, nowMs + 31)).toBe(2);
+
+    const client = (state as unknown as {
+      client: { execute(sql: string): Promise<unknown> };
+    }).client;
+    await client.execute("UPDATE episodes SET status = 'done' WHERE series_id = 1 AND episode_number = 2");
+    expect(await state.beginEpisodeNarrationAudioMutation({
+      ...identity,
+      leaseToken: "post-completion-owner",
+      leaseExpiresAtMs: nowMs + 120_000,
+      nowMs: nowMs + 40,
+    })).toMatchObject({
+      acquired: false,
+      reason: "episode_complete",
+      startedAssetCount: 0,
+    });
+  });
+
+  it("makes Agnes claims CAS on a stable audio revision with no active mutation", async () => {
+    const state = await createStateWithEpisode();
+    const episodeScript = productionScript();
+    await state.updateEpisodeStatus(1, "script", { scriptJson: episodeScript });
+    const common = {
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text" as const,
+      prompt: "Animate the revision-fenced meadow scene.",
+      requestDigest: "revision-fenced-digest",
+      expectedEpisodeScriptJson: canonicalEpisodeScriptJson(episodeScript),
+      seed: 44,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+    };
+    await state.upsertAgnesSceneGeneration({
+      ...common,
+      status: "pending",
+      attemptCount: 0,
+    });
+
+    const nowMs = Date.now();
+    const lease = {
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      leaseToken: "active-tts",
+    };
+    expect(await state.beginEpisodeNarrationAudioMutation({
+      ...lease,
+      leaseExpiresAtMs: nowMs + 60_000,
+      nowMs,
+    })).toMatchObject({ acquired: true, audioRevision: 0 });
+
+    const blockedByLease = await state.claimAgnesSceneSubmission({
+      ...common,
+      expectedEpisodeAudioRevision: 0,
+      providerReceipt: { state: "submitting", claimToken: "blocked-by-lease" },
+    }, 0);
+    expect(blockedByLease).toMatchObject({ claimed: false, reason: "conflict" });
+
+    expect(await state.completeEpisodeNarrationAudioMutation(lease)).toBe(true);
+    const blockedByRevision = await state.claimAgnesSceneSubmission({
+      ...common,
+      expectedEpisodeAudioRevision: 0,
+      providerReceipt: { state: "submitting", claimToken: "blocked-by-revision" },
+    }, 0);
+    expect(blockedByRevision).toMatchObject({ claimed: false, reason: "conflict" });
+
+    const claimed = await state.claimAgnesSceneSubmission({
+      ...common,
+      expectedEpisodeAudioRevision: 1,
+      providerReceipt: { state: "submitting", claimToken: "current-revision" },
+    }, 0);
+    expect(claimed).toMatchObject({ claimed: true, row: { attemptCount: 1 } });
+
+    expect(await state.beginEpisodeNarrationAudioMutation({
+      ...lease,
+      leaseToken: "too-late-tts",
+      leaseExpiresAtMs: nowMs + 120_000,
+      nowMs: nowMs + 1,
+    })).toMatchObject({
+      acquired: false,
+      reason: "agnes_started",
+      startedAssetCount: 1,
+    });
   });
 
   it("lazily creates tables and preserves a task receipt across status upserts", async () => {
@@ -161,6 +387,8 @@ describe("SeriesState Agnes persistence", () => {
 
   it("does not let stale provider or download updates regress a completed scene", async () => {
     const state = await createStateWithEpisode();
+    const episodeScript = productionScript();
+    await state.updateEpisodeStatus(1, "script", { scriptJson: episodeScript });
     await state.upsertAgnesSceneGeneration({
       seriesId: 1,
       episodeNumber: 2,
@@ -223,13 +451,19 @@ describe("SeriesState Agnes persistence", () => {
       variant: "text",
       prompt: "A stale resubmission intent.",
       requestDigest: "accepted-digest",
+      expectedEpisodeScriptJson: canonicalEpisodeScriptJson(episodeScript),
+      expectedEpisodeAudioRevision: 0,
       seed: 777,
       requestedDurationSeconds: 7.5,
       providerDurationSeconds: 8,
       providerReceipt: { state: "submitting", claimToken: "stale-claim" },
     }, 2);
     expect(staleClaim.claimed).toBe(false);
-    expect(staleClaim.row.status).toBe("completed");
+    expect(staleClaim).toMatchObject({
+      claimed: false,
+      reason: "conflict",
+      row: { status: "completed" },
+    });
 
     const staleReset = await state.resetAgnesSceneGenerationForRequest({
       seriesId: 1,
@@ -318,6 +552,8 @@ describe("SeriesState Agnes persistence", () => {
 
   it("atomically claims one POST intent and CAS-resets a proven-safe stale request", async () => {
     const state = await createStateWithEpisode();
+    const episodeScript = productionScript();
+    await state.updateEpisodeStatus(1, "script", { scriptJson: episodeScript });
     const claimInput = {
       seriesId: 1,
       episodeNumber: 2,
@@ -325,6 +561,8 @@ describe("SeriesState Agnes persistence", () => {
       variant: "text" as const,
       prompt: "Animate the meadow scene.",
       requestDigest: "digest-old",
+      expectedEpisodeScriptJson: canonicalEpisodeScriptJson(episodeScript),
+      expectedEpisodeAudioRevision: 0,
       seed: 44,
       requestedDurationSeconds: 6,
       providerDurationSeconds: 6,
@@ -334,14 +572,23 @@ describe("SeriesState Agnes persistence", () => {
       },
     };
 
+    // Request preparation is deliberately separate from the outbound POST
+    // claim. Claims may update this exact row, but must never insert one.
+    await state.upsertAgnesSceneGeneration({
+      ...claimInput,
+      status: "pending",
+      attemptCount: 0,
+      providerReceipt: null,
+    });
+
     const claims = await Promise.all([
       state.claimAgnesSceneSubmission(claimInput, 0),
       state.claimAgnesSceneSubmission(claimInput, 0),
     ]);
     expect(claims.filter((claim) => claim.claimed)).toHaveLength(1);
-    expect(claims.every((claim) => claim.row.attemptCount === 1)).toBe(true);
-    expect(claims.every((claim) => claim.row.requestDigest === "digest-old")).toBe(true);
-    expect(claims.every((claim) => Boolean(claim.row.submittedAt))).toBe(true);
+    expect(claims.every((claim) => claim.row?.attemptCount === 1)).toBe(true);
+    expect(claims.every((claim) => claim.row?.requestDigest === "digest-old")).toBe(true);
+    expect(claims.every((claim) => Boolean(claim.row?.submittedAt))).toBe(true);
 
     const secondClaimInput = {
       ...claimInput,
@@ -355,12 +602,16 @@ describe("SeriesState Agnes persistence", () => {
     };
     const secondClaim = await state.claimAgnesSceneSubmission(secondClaimInput, 1);
     expect(secondClaim.claimed).toBe(true);
+    if (!secondClaim.claimed) throw new Error("Expected the second Agnes POST claim to succeed.");
     expect(secondClaim.row.attemptCount).toBe(2);
     expect(secondClaim.row.providerReceipt).toEqual(secondClaimInput.providerReceipt);
 
     const staleSecondClaim = await state.claimAgnesSceneSubmission(secondClaimInput, 1);
-    expect(staleSecondClaim.claimed).toBe(false);
-    expect(staleSecondClaim.row.attemptCount).toBe(2);
+    expect(staleSecondClaim).toMatchObject({
+      claimed: false,
+      reason: "conflict",
+      row: { attemptCount: 2 },
+    });
 
     const reset = await state.resetAgnesSceneGenerationForRequest({
       seriesId: 1,
@@ -396,6 +647,107 @@ describe("SeriesState Agnes persistence", () => {
     });
     expect(staleReset.reset).toBe(false);
     expect(staleReset.row.requestDigest).toBe("digest-new");
+  });
+
+  it("does not recreate a prepared request deleted before its POST claim", async () => {
+    const state = await createStateWithEpisode();
+    const episodeScript = productionScript();
+    await state.updateEpisodeStatus(1, "script", { scriptJson: episodeScript });
+    const input = {
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text" as const,
+      prompt: "Animate the original meadow scene.",
+      requestDigest: "original-script-digest",
+      expectedEpisodeScriptJson: canonicalEpisodeScriptJson(episodeScript),
+      expectedEpisodeAudioRevision: 0,
+      seed: 44,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+    };
+    await state.upsertAgnesSceneGeneration({
+      ...input,
+      status: "pending",
+      attemptCount: 0,
+    });
+
+    const client = (state as unknown as {
+      client: { execute(statement: string | { sql: string; args: unknown[] }): Promise<unknown> };
+    }).client;
+    // This models atomic script promotion invalidating a not-yet-started row
+    // after preparation but before the invocation obtains its POST claim.
+    await client.execute({
+      sql: `DELETE FROM agnes_scene_generations
+            WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?`,
+      args: [input.seriesId, input.episodeNumber, input.sceneNumber, input.variant],
+    });
+
+    const claim = await state.claimAgnesSceneSubmission({
+      ...input,
+      providerReceipt: {
+        version: 1,
+        attempts: [{ state: "submitting", claimToken: "stale-script-claim" }],
+      },
+    }, 0);
+
+    expect(claim).toEqual({ claimed: false, reason: "missing", row: null });
+    expect(await state.getAgnesSceneGeneration(1, 2, 1, "text")).toBeNull();
+  });
+
+  it("refuses a stale request materialized after the production script changes", async () => {
+    const state = await createStateWithEpisode();
+    const oldScript = productionScript();
+    await state.updateEpisodeStatus(1, "script", { scriptJson: oldScript });
+    const oldScriptSnapshot = canonicalEpisodeScriptJson(oldScript);
+
+    // Promotion wins before the stale invocation's initial materialization.
+    const currentScript = structuredClone(oldScript);
+    currentScript.scenes[0]!.action =
+      "Pip places the berry beside the clubhouse during a new distinct visible beat.";
+    await state.updateEpisodeStatus(1, "script", { scriptJson: currentScript });
+    await state.upsertAgnesSceneGeneration({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      status: "pending",
+      prompt: "The stale invocation's original meadow prompt.",
+      requestDigest: "stale-materialized-digest",
+      attemptCount: 0,
+      seed: 44,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+    });
+
+    const claim = await state.claimAgnesSceneSubmission({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      prompt: "The stale invocation's original meadow prompt.",
+      requestDigest: "stale-materialized-digest",
+      expectedEpisodeScriptJson: oldScriptSnapshot,
+      expectedEpisodeAudioRevision: 0,
+      seed: 44,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+      providerReceipt: {
+        version: 1,
+        attempts: [{ state: "submitting", claimToken: "stale-after-promotion" }],
+      },
+    }, 0);
+
+    expect(claim).toMatchObject({
+      claimed: false,
+      reason: "conflict",
+      row: {
+        requestDigest: "stale-materialized-digest",
+        attemptCount: 0,
+        providerReceipt: null,
+      },
+    });
+    expect((await state.getEpisodeByNumber(1, 2))?.scriptJson).toEqual(currentScript);
   });
 
   it("compares scripts semantically and blocks real replacement after Agnes starts", async () => {
@@ -461,6 +813,17 @@ describe("SeriesState Agnes persistence", () => {
       attemptCount: 1,
       providerTaskId: "task-1",
     });
+  });
+
+  it("rejects the scriptJson persistence bypass on non-script status updates", async () => {
+    const state = await createStateWithEpisode();
+    const invalidReplacement = { scenes: [] };
+
+    await expect(
+      state.updateEpisodeStatus(1, "audio", { scriptJson: invalidReplacement }),
+    ).rejects.toThrow("scriptJson may only be persisted with status=script");
+
+    expect((await state.getEpisodeByNumber(1, 2))?.scriptJson).toBeNull();
   });
 
   async function prepareProductionEpisode(
@@ -725,9 +1088,23 @@ describe("SeriesState Agnes persistence", () => {
 
       const client = (state as unknown as {
         client: {
+          execute: (statement: string | { sql: string; args: unknown[] }) => Promise<any>;
           batch: (...args: any[]) => Promise<any>;
         };
       }).client;
+      // Simulate a private draft left by an older/in-flight authoring build.
+      // The public API correctly refuses creating one after Agnes has started,
+      // while final upload cleanup must still remove any pre-existing row.
+      await client.execute({
+        sql: `INSERT INTO episode_script_drafts
+                (episode_id, revision, script_digest, draft_json)
+              VALUES (?, 1, ?, ?)`,
+        args: [
+          1,
+          "0".repeat(64),
+          JSON.stringify({ title: "Private authoring draft", scenes: [] }),
+        ],
+      });
       const originalBatch = client.batch.bind(client);
       client.batch = async () => {
         throw new Error("simulated cleanup transaction outage");
@@ -746,6 +1123,7 @@ describe("SeriesState Agnes persistence", () => {
         videoId: "youtube-123",
       });
       expect((await state.getEpisodeByNumber(1, 2))?.uploadedAt).toBeNull();
+      expect(await state.getEpisodeScriptDraft(1)).not.toBeNull();
 
       // Simulate retrying local finalization after midnight. The first durable
       // outbox time, not recovery time, must remain the episode completion day.
@@ -775,6 +1153,7 @@ describe("SeriesState Agnes persistence", () => {
       });
       expect(await state.listAgnesSceneGenerations(1, 2)).toEqual([]);
       expect(await state.listEpisodeVideoOutputs(1, 2)).toEqual([]);
+      expect(await state.getEpisodeScriptDraft(1)).toBeNull();
       expect(await state.getKeyArt(1, "series", null)).toBeNull();
       expect(await state.getCharacterSheet(1, "Pip")).not.toBeNull();
       expect(await state.getYoutubeUploadReceipt(1, 2)).toBeNull();

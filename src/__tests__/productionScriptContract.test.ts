@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { inspectProductionScript } from "../services/productionScriptContract.js";
+import {
+  ProductionScriptContractError,
+  hasStartedAgnesSubmission,
+  inspectProductionScript,
+  productionScriptReadiness,
+} from "../services/productionScriptContract.js";
 
 function productionScript() {
   const narration =
@@ -68,5 +73,39 @@ describe("productionScriptContract", () => {
     const result = inspectProductionScript(script, ["Pip the Ant"]);
     expect(result.pass).toBe(false);
     expect(result.issues.join(" ")).toContain("duplicates the complete narration/action beat");
+  });
+
+  it("returns repair_required only before durable Agnes work begins", () => {
+    const inspection = inspectProductionScript({ scenes: [] }, ["Pip the Ant"]);
+    const untouched = {
+      status: "pending",
+      attemptCount: 0,
+      providerTaskId: null,
+      providerReceipt: null,
+      submittedAt: null,
+    };
+    const claimed = { ...untouched, attemptCount: 1 };
+
+    expect(hasStartedAgnesSubmission(untouched)).toBe(false);
+    expect(hasStartedAgnesSubmission(claimed)).toBe(true);
+    expect(productionScriptReadiness(inspection, [untouched])).toMatchObject({
+      status: "repair_required",
+      canReplaceScript: true,
+      agnesSubmissionStarted: false,
+    });
+    expect(productionScriptReadiness(inspection, [claimed])).toMatchObject({
+      status: "repair_blocked",
+      canReplaceScript: false,
+      agnesSubmissionStarted: true,
+    });
+  });
+
+  it("carries deterministic inspection details in its typed media-boundary error", () => {
+    const inspection = inspectProductionScript({ scenes: [] }, ["Pip the Ant"]);
+    const error = new ProductionScriptContractError(inspection);
+
+    expect(error).toBeInstanceOf(ProductionScriptContractError);
+    expect(error.inspection).toBe(inspection);
+    expect(error.message).toContain("Persisted episode script violates the production contract");
   });
 });

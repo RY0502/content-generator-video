@@ -57,6 +57,7 @@ describe("SeriesState blank database bootstrap", () => {
       "agnes_account_rate_state",
       "agnes_scene_generations",
       "character_sheets",
+      "episode_script_drafts",
       "episode_video_outputs",
       "episodes",
       "key_art",
@@ -151,6 +152,7 @@ describe("SeriesState blank database bootstrap", () => {
       "agnes_account_rate_state",
       "agnes_scene_generations",
       "character_sheets",
+      "episode_script_drafts",
       "episode_video_outputs",
       "episodes",
       "key_art",
@@ -185,7 +187,9 @@ describe("SeriesState blank database bootstrap", () => {
 
   it("canonicalizes new titles and resolves a trim-equivalent series without duplicating it", async () => {
     const state = createBlankState();
+    expect(await state.findSeriesIdByConceptName("Trimmed Stories")).toBeNull();
     const seriesId = await state.getOrCreateSeries("  Trimmed Stories  ", [], [], "Formula");
+    expect(await state.findSeriesIdByConceptName("  Trimmed Stories  ")).toBe(seriesId);
     expect(await state.getOrCreateSeries("Trimmed Stories", [], [], "Formula"))
       .toBe(seriesId);
 
@@ -243,8 +247,10 @@ describe("SeriesState blank database bootstrap", () => {
     const seriesId = await state.getOrCreateSeries("Complete Season", [], [], "Formula");
     const season = buildSeason();
 
-    await state.bulkInsertEpisodesIfEmpty(seriesId, season);
-    await state.bulkInsertEpisodesIfEmpty(seriesId, season);
+    expect(await state.bulkInsertEpisodesIfEmpty(seriesId)).toBe("manifest_required");
+    expect(await state.bulkInsertEpisodesIfEmpty(seriesId, season)).toBe("inserted");
+    expect(await state.bulkInsertEpisodesIfEmpty(seriesId)).toBe("verified");
+    expect(await state.bulkInsertEpisodesIfEmpty(seriesId, season)).toBe("verified");
 
     const rows = await stateClient(state).execute({
       sql: `SELECT episode_number, title, premise

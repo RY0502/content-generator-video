@@ -1,13 +1,17 @@
 import { createClient, type Client } from "@libsql/client";
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { CONFIG } from "../config.js";
 import {
+  DEFAULT_PRODUCTION_MAX_SCENES,
   NARRATION_MAX_AUDIO_SECONDS,
 } from "../services/narrationContract.js";
-import { inspectProductionScript } from "../services/productionScriptContract.js";
+import {
+  inspectProductionScript,
+  ProductionScriptContractError,
+} from "../services/productionScriptContract.js";
 import { canonicalizeKeyArtTitle } from "../services/keyArtTitleContract.js";
 import {
   AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
@@ -82,6 +86,196 @@ export interface EpisodeRow {
   completionLocalDate: string | null;
 }
 
+export interface BeginEpisodeNarrationAudioMutationInput {
+  seriesId: number;
+  episodeNumber: number;
+  sceneNumber: number;
+  leaseToken: string;
+  leaseExpiresAtMs: number;
+  nowMs?: number;
+}
+
+export interface EpisodeNarrationAudioMutationIdentity {
+  seriesId: number;
+  episodeNumber: number;
+  sceneNumber: number;
+  leaseToken: string;
+}
+
+export interface RenewEpisodeNarrationAudioMutationInput
+  extends EpisodeNarrationAudioMutationIdentity {
+  leaseExpiresAtMs: number;
+  nowMs?: number;
+}
+
+export type BeginEpisodeNarrationAudioMutationResult =
+  | {
+      acquired: true;
+      audioRevision: number;
+      startedAssetCount: 0;
+    }
+  | {
+      acquired: false;
+      reason: "episode_complete" | "agnes_started" | "mutation_in_progress";
+      startedAssetCount: number;
+    };
+
+export type EpisodeAudioReadinessFailureReason =
+  | "artifact_missing_or_stale"
+  | "duration_exceeded"
+  | "total_duration_too_short";
+
+/**
+ * Expected, recoverable failure from the local narration preflight. Keeping
+ * this typed prevents database/provider errors from being mistaken for a TTS
+ * repair request by resume routing.
+ */
+export class EpisodeAudioReadinessError extends Error {
+  readonly reason: EpisodeAudioReadinessFailureReason;
+  readonly sceneNumber?: number;
+  readonly assetKind?: "series_key_art" | "episode_key_art";
+  readonly durationSeconds?: number;
+  readonly totalDurationSeconds?: number;
+
+  constructor(params: {
+    reason: EpisodeAudioReadinessFailureReason;
+    message: string;
+    sceneNumber?: number;
+    assetKind?: "series_key_art" | "episode_key_art";
+    durationSeconds?: number;
+    totalDurationSeconds?: number;
+  }) {
+    super(params.message);
+    this.name = "EpisodeAudioReadinessError";
+    this.reason = params.reason;
+    this.sceneNumber = params.sceneNumber;
+    this.assetKind = params.assetKind;
+    this.durationSeconds = params.durationSeconds;
+    this.totalDurationSeconds = params.totalDurationSeconds;
+  }
+}
+
+/** Expected overlap: an unexpired TTS/key-art writer owns the episode lease. */
+export class EpisodeAudioMutationInProgressError extends Error {
+  readonly sceneNumber: number;
+  readonly leaseExpiresAtMs: number;
+
+  constructor(sceneNumber: number, leaseExpiresAtMs: number) {
+    super(
+      `Narration audio mutation is in progress for scene ${sceneNumber}; ` +
+      "Agnes preparation must retry after the lease is completed or expires.",
+    );
+    this.name = "EpisodeAudioMutationInProgressError";
+    this.sceneNumber = sceneNumber;
+    this.leaseExpiresAtMs = leaseExpiresAtMs;
+  }
+}
+
+export interface EpisodeNarrationAudioManifestScene {
+  sceneNumber: number;
+  narrationText: string;
+  durationSeconds: number;
+}
+
+export interface EpisodeNarrationAudioManifest {
+  totalDurationSeconds: number;
+  scenes: EpisodeNarrationAudioManifestScene[];
+}
+
+export const MAX_EPISODE_SCRIPT_DRAFT_VALIDATION_ISSUES = 12;
+export const MAX_EPISODE_SCRIPT_DRAFT_VALIDATION_ISSUE_CHARACTERS = 256;
+export const MAX_EPISODE_SCRIPT_DRAFT_DURATION_EVIDENCE = DEFAULT_PRODUCTION_MAX_SCENES;
+
+export interface EpisodeScriptDraftDurationEvidence {
+  sceneNumber: number;
+  durationSeconds: number;
+}
+
+/**
+ * Compact TTS measurements that must survive process exits independently of
+ * the human-readable validation issue sample.
+ */
+export interface EpisodeScriptDraftRepairEvidence {
+  durationExceededScenes?: EpisodeScriptDraftDurationEvidence[];
+  measuredTotalNarrationSeconds?: number;
+  /** Number of successfully measured scene WAVs included in the total. */
+  measuredNarrationSceneCount?: number;
+}
+
+/**
+ * Bounded validation snapshot associated with one private script-draft
+ * revision. The full script remains in draftJson; this envelope is deliberately
+ * small enough to return through an agent tool without recreating the original
+ * context-amplification problem.
+ */
+export interface EpisodeScriptDraftValidation {
+  pass: boolean;
+  sceneCount: number;
+  totalSpokenWords: number;
+  issueCount: number;
+  issues: string[];
+  omittedIssueCount: number;
+  repairEvidence?: EpisodeScriptDraftRepairEvidence;
+}
+
+/** A non-production script revision stored durably until it can be promoted. */
+export interface EpisodeScriptDraftRow {
+  episodeId: number;
+  revision: number;
+  /** SHA-256 of the canonical JSON representation of scriptJson. */
+  contentDigest: string;
+  scriptJson: unknown;
+  validation: EpisodeScriptDraftValidation | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StageEpisodeScriptDraftResult {
+  draft: EpisodeScriptDraftRow;
+  /** True only when this call inserted the first draft for the episode. */
+  created: boolean;
+  /** True when the stored draft has the same canonical script digest. */
+  matches: boolean;
+}
+
+export interface PromoteEpisodeScriptDraftInput {
+  episodeId: number;
+  /** Exact private-draft revision used to produce scriptJson. */
+  expectedRevision: number;
+  /** Exact private-draft digest used to produce scriptJson. */
+  expectedContentDigest: string;
+  /** Fully-refined production candidate. */
+  scriptJson: unknown;
+}
+
+export interface EpisodeScriptDraftIdentity {
+  revision: number;
+  contentDigest: string;
+}
+
+/**
+ * Compact result from the atomic private-draft promotion boundary. No branch
+ * returns either the source draft or the promoted script body.
+ */
+export type PromoteEpisodeScriptDraftResult =
+  | {
+      status: "promoted";
+      episodeId: number;
+      sourceDraft: EpisodeScriptDraftIdentity;
+    }
+  | {
+      status: "stale";
+      episodeId: number;
+      expectedDraft: EpisodeScriptDraftIdentity;
+      currentDraft: EpisodeScriptDraftIdentity | null;
+    }
+  | {
+      status: "blocked";
+      episodeId: number;
+      sourceDraft: EpisodeScriptDraftIdentity;
+      reason: "agnes_started" | "episode_completed";
+    };
+
 export type NextEpisodeAvailability =
   | {
       kind: "ready";
@@ -130,6 +324,11 @@ export interface SeasonEpisodeInput {
   title: string;
   premise: string;
 }
+
+export type EnsureEpisodeManifestResult =
+  | "inserted"
+  | "verified"
+  | "manifest_required";
 
 function validateSeasonEpisodeList(
   episodes: SeasonEpisodeInput[],
@@ -266,9 +465,22 @@ export interface ClaimAgnesSceneSubmissionInput extends Omit<
   "status" | "attemptCount"
 > {
   requestDigest: string;
+  /** Canonical production script snapshot used to linearize claim vs promotion. */
+  expectedEpisodeScriptJson: string;
+  /** Episode-wide narration generation committed before this request was prepared. */
+  expectedEpisodeAudioRevision: number;
   /** Versioned receipt envelope containing the unique pre-POST claim intent. */
   providerReceipt: unknown;
 }
+
+export type ClaimAgnesSceneSubmissionResult =
+  | { claimed: true; row: AgnesSceneGenerationRow }
+  | {
+      claimed: false;
+      /** Missing means the prepared request row was deleted before the POST claim. */
+      reason: "missing" | "conflict";
+      row: AgnesSceneGenerationRow | null;
+    };
 
 export interface ResetAgnesSceneGenerationForRequestInput {
   seriesId: number;
@@ -422,6 +634,161 @@ function canonicalJsonString(value: unknown): string {
     throw new Error("Episode script must be JSON-serializable.");
   }
   return serialized;
+}
+
+/** Canonical production identity shared by preparation and the atomic Agnes claim. */
+export function canonicalEpisodeScriptJson(value: unknown): string {
+  return canonicalJsonString(value);
+}
+
+function positiveSafeInteger(label: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer.`);
+  }
+  return value;
+}
+
+function nonNegativeValidationInteger(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : 0;
+}
+
+function finiteNumberInRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric >= minimum && numeric <= maximum
+    ? numeric
+    : undefined;
+}
+
+function boundEpisodeScriptDraftRepairEvidence(
+  value: unknown,
+): EpisodeScriptDraftRepairEvidence | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const durationByScene = new Map<number, EpisodeScriptDraftDurationEvidence>();
+  if (Array.isArray(record.durationExceededScenes)) {
+    for (const entry of record.durationExceededScenes) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const item = entry as Record<string, unknown>;
+      const sceneNumber = Number(item.sceneNumber);
+      const durationSeconds = finiteNumberInRange(item.durationSeconds, 0.001, 300);
+      if (!Number.isSafeInteger(sceneNumber) || sceneNumber <= 0 || durationSeconds === undefined) {
+        continue;
+      }
+      durationByScene.set(sceneNumber, { sceneNumber, durationSeconds });
+    }
+  }
+  const durationExceededScenes = [...durationByScene.values()]
+    .sort((left, right) => left.sceneNumber - right.sceneNumber)
+    .slice(0, MAX_EPISODE_SCRIPT_DRAFT_DURATION_EVIDENCE);
+  const measuredTotalNarrationSeconds = finiteNumberInRange(
+    record.measuredTotalNarrationSeconds,
+    0.001,
+    3_600,
+  );
+  const rawMeasuredSceneCount = Number(record.measuredNarrationSceneCount);
+  const measuredNarrationSceneCount =
+    Number.isSafeInteger(rawMeasuredSceneCount)
+      && rawMeasuredSceneCount > 0
+      && rawMeasuredSceneCount <= DEFAULT_PRODUCTION_MAX_SCENES
+      ? rawMeasuredSceneCount
+      : undefined;
+  // A total without a count is incomplete evidence. Keeping the pair atomic
+  // also drops legacy zero-second/recovery-target snapshots on their next read.
+  const hasCompleteMeasuredTotal = measuredTotalNarrationSeconds !== undefined
+    && measuredNarrationSceneCount !== undefined;
+
+  if (
+    durationExceededScenes.length === 0
+    && !hasCompleteMeasuredTotal
+  ) {
+    return undefined;
+  }
+  return {
+    ...(durationExceededScenes.length === 0 ? {} : { durationExceededScenes }),
+    ...(hasCompleteMeasuredTotal
+      ? { measuredTotalNarrationSeconds, measuredNarrationSceneCount }
+      : {}),
+  };
+}
+
+function boundEpisodeScriptDraftValidation(
+  value: unknown,
+): EpisodeScriptDraftValidation | null {
+  if (value === undefined || value === null) return null;
+  const parsed = parseTopLevelJson(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Episode script draft validation must be a JSON object when supplied.");
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const rawIssues = Array.isArray(record.issues)
+    ? record.issues
+        .filter((issue): issue is string => typeof issue === "string")
+        .map((issue) => issue.trim())
+        .filter(Boolean)
+    : [];
+  const declaredIssueCount = nonNegativeValidationInteger(record.issueCount);
+  const declaredOmittedCount = nonNegativeValidationInteger(record.omittedIssueCount);
+  const issueCount = Math.max(
+    rawIssues.length,
+    declaredIssueCount,
+    rawIssues.length + declaredOmittedCount,
+  );
+  const issues = rawIssues
+    .slice(0, MAX_EPISODE_SCRIPT_DRAFT_VALIDATION_ISSUES)
+    .map((issue) => issue.slice(0, MAX_EPISODE_SCRIPT_DRAFT_VALIDATION_ISSUE_CHARACTERS));
+  const repairEvidence = boundEpisodeScriptDraftRepairEvidence(record.repairEvidence);
+
+  return {
+    pass: record.pass === true,
+    sceneCount: nonNegativeValidationInteger(record.sceneCount),
+    totalSpokenWords: nonNegativeValidationInteger(record.totalSpokenWords),
+    issueCount,
+    issues,
+    omittedIssueCount: Math.max(0, issueCount - issues.length),
+    ...(repairEvidence === undefined ? {} : { repairEvidence }),
+  };
+}
+
+function serializeEpisodeScriptDraftValidation(value: unknown): string | null {
+  const bounded = boundEpisodeScriptDraftValidation(value);
+  if (bounded === null) return null;
+  const serialized = JSON.stringify(bounded);
+  if (serialized.length > 8192) {
+    throw new Error("Bounded episode script draft validation unexpectedly exceeds 8192 characters.");
+  }
+  return serialized;
+}
+
+function episodeScriptDraftDigest(serializedScript: string): string {
+  return createHash("sha256").update(serializedScript).digest("hex");
+}
+
+function mapEpisodeScriptDraftRow(
+  row: Record<string, unknown>,
+): EpisodeScriptDraftRow {
+  const revision = Number(row.revision);
+  positiveSafeInteger("Persisted episode script draft revision", revision);
+  const digest = String(row.script_digest);
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error("Persisted episode script draft digest is invalid.");
+  }
+  return {
+    episodeId: Number(row.episode_id),
+    revision,
+    contentDigest: digest,
+    scriptJson: parseJson<unknown>(row.draft_json, null),
+    validation: boundEpisodeScriptDraftValidation(
+      parseJson<unknown | null>(row.validation_json, null),
+    ),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -727,6 +1094,22 @@ export class SeriesState {
     await ensureColumn("episodes", "uploaded_at", "TEXT");
     await ensureColumn("episodes", "completed_at", "TEXT");
     await ensureColumn("episodes", "completion_local_date", "TEXT");
+    await ensureColumn(
+      "episodes",
+      "audio_revision",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (audio_revision >= 0)",
+    );
+    await ensureColumn("episodes", "audio_mutation_token", "TEXT");
+    await ensureColumn(
+      "episodes",
+      "audio_mutation_scene_number",
+      "INTEGER CHECK (audio_mutation_scene_number IS NULL OR audio_mutation_scene_number > 0)",
+    );
+    await ensureColumn(
+      "episodes",
+      "audio_mutation_expires_at_ms",
+      "INTEGER CHECK (audio_mutation_expires_at_ms IS NULL OR audio_mutation_expires_at_ms >= 0)",
+    );
     await ensureColumn("episodes", "updated_at", "TEXT");
 
     await ensureColumn("character_sheets", "generation_prompt", "TEXT");
@@ -772,12 +1155,12 @@ export class SeriesState {
     );
   }
 
-  async getOrCreateSeries(
-    conceptName: string,
-    characters: CharacterDef[],
-    environments: EnvironmentDef[],
-    episodeFormula: string
-  ): Promise<number> {
+  /**
+   * Resolves only the durable identity of an existing series. This is the cheap
+   * bootstrap path used on reruns, where sending the full roster and series
+   * formula back through the agent would add context without changing state.
+   */
+  async findSeriesIdByConceptName(conceptName: string): Promise<number | null> {
     await this.initialize();
     const canonicalConceptName = canonicalizeKeyArtTitle(conceptName, "series");
     // Older builds could persist surrounding whitespace. Resolve one such row
@@ -794,7 +1177,19 @@ export class SeriesState {
         "merge the duplicate legacy rows before continuing.",
       );
     }
-    if (matching.rows[0]) return Number(matching.rows[0].id);
+    return matching.rows[0] ? Number(matching.rows[0].id) : null;
+  }
+
+  async getOrCreateSeries(
+    conceptName: string,
+    characters: CharacterDef[],
+    environments: EnvironmentDef[],
+    episodeFormula: string
+  ): Promise<number> {
+    await this.initialize();
+    const canonicalConceptName = canonicalizeKeyArtTitle(conceptName, "series");
+    const existingSeriesId = await this.findSeriesIdByConceptName(canonicalConceptName);
+    if (existingSeriesId !== null) return existingSeriesId;
     const inserted = await this.client.execute({
       sql: `INSERT INTO series (concept_name, characters_json, environments_json, episode_formula)
             VALUES (?, ?, ?, ?)
@@ -1002,10 +1397,14 @@ export class SeriesState {
 
   async bulkInsertEpisodesIfEmpty(
     seriesId: number,
-    episodes: SeasonEpisodeInput[]
-  ): Promise<void> {
+    episodes?: SeasonEpisodeInput[]
+  ): Promise<EnsureEpisodeManifestResult> {
     await this.initialize();
-    const normalizedEpisodes = validateSeasonEpisodeList(episodes);
+    // Preserve fail-fast validation when a caller supplies a manifest, while
+    // allowing a compact seriesId-only rerun to inspect durable state.
+    const normalizedEpisodes = episodes === undefined
+      ? undefined
+      : validateSeasonEpisodeList(episodes);
     const readStoredEpisodes = async (): Promise<SeasonEpisodeInput[]> => {
       const result = await this.client.execute({
         sql: `SELECT episode_number, title, premise
@@ -1027,8 +1426,10 @@ export class SeriesState {
     const existingEpisodes = await readStoredEpisodes();
     if (existingEpisodes.length > 0) {
       verifyStoredSeason(existingEpisodes);
-      return;
+      return "verified";
     }
+
+    if (normalizedEpisodes === undefined) return "manifest_required";
 
     try {
       await this.client.batch(
@@ -1045,10 +1446,11 @@ export class SeriesState {
       const concurrentlyStoredEpisodes = await readStoredEpisodes();
       if (concurrentlyStoredEpisodes.length === 0) throw error;
       verifyStoredSeason(concurrentlyStoredEpisodes);
-      return;
+      return "verified";
     }
 
     verifyStoredSeason(await readStoredEpisodes());
+    return "inserted";
   }
 
   /**
@@ -1080,6 +1482,10 @@ export class SeriesState {
                      script_json IS NOT NULL OR output_path IS NOT NULL OR
                      youtube_video_id IS NOT NULL OR youtube_url IS NOT NULL OR
                      uploaded_at IS NOT NULL OR completed_at IS NOT NULL OR
+                     EXISTS (
+                       SELECT 1 FROM episode_script_drafts d
+                       WHERE d.episode_id = episodes.id
+                     ) OR
                      EXISTS (
                        SELECT 1 FROM agnes_scene_generations a
                        WHERE a.series_id = episodes.series_id
@@ -1199,6 +1605,435 @@ export class SeriesState {
     options: EpisodeDailyGateOptions = {},
   ): Promise<EpisodeRow | null> {
     return (await this.getNextEpisodeAvailability(seriesId, options)).episode;
+  }
+
+  /** Returns one episode by its durable primary key. */
+  async getEpisodeById(episodeId: number): Promise<EpisodeRow | null> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    const result = await this.client.execute({
+      sql: `SELECT id, series_id, episode_number, title, premise, status, script_json, output_path,
+                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date
+            FROM episodes
+            WHERE id = ?
+            LIMIT 1`,
+      args: [episodeId],
+    });
+    const row = result.rows[0];
+    return row ? mapEpisodeRow(row as unknown as Record<string, unknown>) : null;
+  }
+
+  /** Reads the private, non-production script draft for an episode. */
+  async getEpisodeScriptDraft(episodeId: number): Promise<EpisodeScriptDraftRow | null> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    const result = await this.client.execute({
+      sql: `SELECT episode_id, revision, script_digest, draft_json, validation_json,
+                   created_at, updated_at
+            FROM episode_script_drafts
+            WHERE episode_id = ?
+            LIMIT 1`,
+      args: [episodeId],
+    });
+    const row = result.rows[0];
+    return row
+      ? mapEpisodeScriptDraftRow(row as unknown as Record<string, unknown>)
+      : null;
+  }
+
+  /**
+   * Creates the first durable draft without ever replacing an existing one.
+   * A retry with semantically identical JSON is reported as a match; a
+   * different payload must go through reviseEpisodeScriptDraft's revision CAS.
+   */
+  async stageEpisodeScriptDraft(
+    episodeId: number,
+    scriptJson: unknown,
+    validation?: unknown,
+  ): Promise<StageEpisodeScriptDraftResult> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    const serializedScript = canonicalJsonString(scriptJson);
+    const contentDigest = episodeScriptDraftDigest(serializedScript);
+    const serializedValidation = serializeEpisodeScriptDraftValidation(validation);
+
+    const inserted = await this.client.execute({
+      sql: `INSERT INTO episode_script_drafts (
+              episode_id, revision, script_digest, draft_json, validation_json
+            )
+            SELECT id, 1, ?, ?, ?
+            FROM episodes AS episode
+            WHERE id = ? AND status <> 'done'
+              AND NOT EXISTS (
+                SELECT 1 FROM agnes_scene_generations AS started
+                WHERE started.series_id = episode.series_id
+                  AND started.episode_number = episode.episode_number
+                  AND (
+                    started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                    started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                    started.status <> 'pending'
+                  )
+              )
+            ON CONFLICT (episode_id) DO NOTHING
+            RETURNING episode_id, revision, script_digest, draft_json, validation_json,
+                      created_at, updated_at`,
+      args: [contentDigest, serializedScript, serializedValidation, episodeId],
+    });
+    const insertedRow = inserted.rows[0];
+    if (insertedRow) {
+      return {
+        draft: mapEpisodeScriptDraftRow(
+          insertedRow as unknown as Record<string, unknown>,
+        ),
+        created: true,
+        matches: true,
+      };
+    }
+
+    // A concurrent creator, or an idempotent retry, reaches this branch.
+    const existing = await this.getEpisodeScriptDraft(episodeId);
+    if (existing) {
+      return {
+        draft: existing,
+        created: false,
+        matches: existing.contentDigest === contentDigest,
+      };
+    }
+
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+    if (episode.status === "done") {
+      throw new Error(`A completed episode ${episodeId} cannot receive a script draft.`);
+    }
+    throw new Error(
+      "Cannot stage an episode script draft after Agnes submission has started. " +
+      "Resume the persisted production script and Agnes tasks instead.",
+    );
+  }
+
+  /**
+   * Replaces a draft through optimistic concurrency. Repeating an already
+   * committed target payload is idempotent even with the caller's old revision.
+   */
+  async reviseEpisodeScriptDraft(
+    episodeId: number,
+    expectedRevision: number,
+    scriptJson: unknown,
+    validation?: unknown,
+  ): Promise<EpisodeScriptDraftRow> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    positiveSafeInteger("expectedRevision", expectedRevision);
+    const serializedScript = canonicalJsonString(scriptJson);
+    const contentDigest = episodeScriptDraftDigest(serializedScript);
+    const serializedValidation = serializeEpisodeScriptDraftValidation(validation);
+    const targetMatches = (draft: EpisodeScriptDraftRow): boolean => {
+      const currentValidation = draft.validation === null
+        ? null
+        : JSON.stringify(draft.validation);
+      return draft.contentDigest === contentDigest
+        && currentValidation === serializedValidation;
+    };
+
+    const current = await this.getEpisodeScriptDraft(episodeId);
+    if (!current) {
+      const episode = await this.getEpisodeById(episodeId);
+      if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+      if (episode.status === "done") {
+        throw new Error(`A completed episode ${episodeId} cannot receive a script draft revision.`);
+      }
+      throw new Error(`Episode ${episodeId} has no staged script draft to revise.`);
+    }
+    if (targetMatches(current)) return current;
+    if (current.revision !== expectedRevision) {
+      throw new Error(
+        `Episode script draft revision conflict: expected ${expectedRevision}, ` +
+        `current revision is ${current.revision}.`,
+      );
+    }
+
+    const updated = await this.client.execute({
+      sql: `UPDATE episode_script_drafts
+            SET revision = revision + 1,
+                script_digest = ?,
+                draft_json = ?,
+                validation_json = ?,
+                updated_at = datetime('now')
+            WHERE episode_id = ? AND revision = ?
+              AND EXISTS (
+                SELECT 1 FROM episodes AS episode
+                WHERE id = ? AND status <> 'done'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agnes_scene_generations AS started
+                    WHERE started.series_id = episode.series_id
+                      AND started.episode_number = episode.episode_number
+                      AND (
+                        started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                        started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                        started.status <> 'pending'
+                      )
+                  )
+              )
+            RETURNING episode_id, revision, script_digest, draft_json, validation_json,
+                      created_at, updated_at`,
+      args: [
+        contentDigest,
+        serializedScript,
+        serializedValidation,
+        episodeId,
+        expectedRevision,
+        episodeId,
+      ],
+    });
+    const updatedRow = updated.rows[0];
+    if (updatedRow) {
+      return mapEpisodeScriptDraftRow(
+        updatedRow as unknown as Record<string, unknown>,
+      );
+    }
+
+    // Resolve the two expected races deterministically: an identical writer
+    // may have committed first, or a different writer advanced the revision.
+    const latest = await this.getEpisodeScriptDraft(episodeId);
+    if (latest && targetMatches(latest)) return latest;
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+    if (episode.status === "done") {
+      throw new Error(`A completed episode ${episodeId} cannot receive a script draft revision.`);
+    }
+    if (!latest) {
+      throw new Error(`Episode ${episodeId} has no staged script draft to revise.`);
+    }
+    if (latest.revision !== expectedRevision) {
+      throw new Error(
+        `Episode script draft revision conflict: expected ${expectedRevision}, ` +
+        `current revision is ${latest.revision}.`,
+      );
+    }
+    throw new Error(
+      "Cannot revise an episode script draft after Agnes submission has started. " +
+      "Resume the persisted production script and Agnes tasks instead.",
+    );
+  }
+
+  /**
+   * Promotes exactly one private draft revision to the production script.
+   *
+   * The draft identity check, Agnes no-submission guard, production write,
+   * derived-artifact invalidation, and deletion of that exact draft share one
+   * write transaction. A stale caller can therefore never delete a newer draft
+   * after publishing an older in-memory refinement result.
+   */
+  async promoteEpisodeScriptDraft(
+    input: PromoteEpisodeScriptDraftInput,
+  ): Promise<PromoteEpisodeScriptDraftResult> {
+    await this.initialize();
+    const episodeId = positiveSafeInteger("episodeId", input.episodeId);
+    const expectedRevision = positiveSafeInteger("expectedRevision", input.expectedRevision);
+    const expectedContentDigest = input.expectedContentDigest.trim();
+    if (!/^[a-f0-9]{64}$/u.test(expectedContentDigest)) {
+      throw new Error("expectedContentDigest must be a lowercase SHA-256 digest.");
+    }
+    const expectedDraft: EpisodeScriptDraftIdentity = {
+      revision: expectedRevision,
+      contentDigest: expectedContentDigest,
+    };
+
+    // Preserve updateEpisodeStatus's authoritative production validation at the
+    // new write boundary. The subsequent SQL still guards every mutable fact,
+    // since this read is intentionally outside the short write transaction.
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) {
+      return { status: "stale", episodeId, expectedDraft, currentDraft: null };
+    }
+    const serializedScript = canonicalJsonString(input.scriptJson);
+    const productionScript = inspectProductionScript(
+      input.scriptJson,
+      (await this.getSeriesCharacters(episode.seriesId)).map((character) => character.name),
+    );
+    if (!productionScript.pass) {
+      throw new ProductionScriptContractError(
+        productionScript,
+        "Refusing to promote a script that violates the production contract",
+      );
+    }
+
+    // client.batch(..., "write") is one ordered transaction. The first SELECT
+    // records the state against which the guarded mutation was attempted so a
+    // failed CAS can be classified without a racy follow-up read.
+    const results = await this.client.batch([
+      {
+        sql: `SELECT episode.status AS episode_status,
+                     draft.revision AS draft_revision,
+                     draft.script_digest AS draft_digest,
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM agnes_scene_generations AS started
+                       WHERE started.series_id = episode.series_id
+                         AND started.episode_number = episode.episode_number
+                         AND (
+                           started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                           started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                           started.status <> 'pending'
+                         )
+                     ) THEN 1 ELSE 0 END AS agnes_started
+              FROM episodes AS episode
+              LEFT JOIN episode_script_drafts AS draft ON draft.episode_id = episode.id
+              WHERE episode.id = ?
+              LIMIT 1`,
+        args: [episodeId],
+      },
+      {
+        sql: `UPDATE episodes AS episode
+              SET status = 'script', script_json = ?, output_path = NULL,
+                  updated_at = datetime('now')
+              WHERE episode.id = ? AND episode.status <> 'done'
+                AND EXISTS (
+                  SELECT 1 FROM episode_script_drafts AS draft
+                  WHERE draft.episode_id = episode.id
+                    AND draft.revision = ? AND draft.script_digest = ?
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM agnes_scene_generations AS started
+                  WHERE started.series_id = episode.series_id
+                    AND started.episode_number = episode.episode_number
+                    AND (
+                      started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                      started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                      started.status <> 'pending'
+                    )
+                )`,
+        args: [serializedScript, episodeId, expectedRevision, expectedContentDigest],
+      },
+      {
+        sql: `DELETE FROM agnes_scene_generations AS pending
+              WHERE pending.attempt_count = 0
+                AND pending.provider_task_id IS NULL
+                AND pending.provider_receipt_json IS NULL
+                AND pending.submitted_at IS NULL
+                AND pending.status = 'pending'
+                AND EXISTS (
+                  SELECT 1 FROM episodes AS episode
+                  JOIN episode_script_drafts AS draft ON draft.episode_id = episode.id
+                  WHERE episode.id = ? AND episode.status = 'script'
+                    AND episode.script_json = ?
+                    AND episode.series_id = pending.series_id
+                    AND episode.episode_number = pending.episode_number
+                    AND draft.revision = ? AND draft.script_digest = ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM agnes_scene_generations AS started
+                      WHERE started.series_id = episode.series_id
+                        AND started.episode_number = episode.episode_number
+                        AND (
+                          started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                          started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                          started.status <> 'pending'
+                        )
+                    )
+                )`,
+        args: [episodeId, serializedScript, expectedRevision, expectedContentDigest],
+      },
+      {
+        sql: `DELETE FROM episode_video_outputs AS output
+              WHERE EXISTS (
+                SELECT 1 FROM episodes AS episode
+                JOIN episode_script_drafts AS draft ON draft.episode_id = episode.id
+                WHERE episode.id = ? AND episode.status = 'script'
+                  AND episode.script_json = ?
+                  AND episode.series_id = output.series_id
+                  AND episode.episode_number = output.episode_number
+                  AND draft.revision = ? AND draft.script_digest = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agnes_scene_generations AS started
+                    WHERE started.series_id = episode.series_id
+                      AND started.episode_number = episode.episode_number
+                      AND (
+                        started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                        started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                        started.status <> 'pending'
+                      )
+                  )
+              )`,
+        args: [episodeId, serializedScript, expectedRevision, expectedContentDigest],
+      },
+      {
+        sql: `DELETE FROM episode_script_drafts AS draft
+              WHERE draft.episode_id = ?
+                AND draft.revision = ? AND draft.script_digest = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes AS episode
+                  WHERE episode.id = draft.episode_id
+                    AND episode.status = 'script' AND episode.script_json = ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM agnes_scene_generations AS started
+                      WHERE started.series_id = episode.series_id
+                        AND started.episode_number = episode.episode_number
+                        AND (
+                          started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                          started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                          started.status <> 'pending'
+                        )
+                    )
+                )`,
+        args: [episodeId, expectedRevision, expectedContentDigest, serializedScript],
+      },
+    ], "write");
+
+    const productionUpdated = results[1]?.rowsAffected === 1;
+    const exactDraftDeleted = results[4]?.rowsAffected === 1;
+    if (productionUpdated && exactDraftDeleted) {
+      return { status: "promoted", episodeId, sourceDraft: expectedDraft };
+    }
+    if (productionUpdated || exactDraftDeleted) {
+      throw new Error(
+        `Atomic episode script promotion invariant failed for episode ${episodeId}.`,
+      );
+    }
+
+    const attempted = results[0]?.rows[0] as Record<string, unknown> | undefined;
+    const currentRevision = Number(attempted?.draft_revision);
+    const currentDigest = attempted?.draft_digest == null
+      ? null
+      : String(attempted.draft_digest);
+    const currentDraft = Number.isSafeInteger(currentRevision)
+      && currentRevision > 0
+      && currentDigest !== null
+      && /^[a-f0-9]{64}$/u.test(currentDigest)
+      ? { revision: currentRevision, contentDigest: currentDigest }
+      : null;
+    const exactDraftStillCurrent = currentDraft?.revision === expectedRevision
+      && currentDraft.contentDigest === expectedContentDigest;
+    if (!exactDraftStillCurrent) {
+      return { status: "stale", episodeId, expectedDraft, currentDraft };
+    }
+    if (attempted?.episode_status === "done") {
+      return {
+        status: "blocked",
+        episodeId,
+        sourceDraft: expectedDraft,
+        reason: "episode_completed",
+      };
+    }
+    if (Number(attempted?.agnes_started) === 1) {
+      return {
+        status: "blocked",
+        episodeId,
+        sourceDraft: expectedDraft,
+        reason: "agnes_started",
+      };
+    }
+    throw new Error(
+      `Atomic episode script promotion made no progress for episode ${episodeId} despite valid preconditions.`,
+    );
+  }
+
+  /** Deletes private draft state; safe to repeat after promotion or cleanup. */
+  async deleteEpisodeScriptDraft(episodeId: number): Promise<void> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    await this.client.execute({
+      sql: "DELETE FROM episode_script_drafts WHERE episode_id = ?",
+      args: [episodeId],
+    });
   }
 
   /**
@@ -1399,8 +2234,13 @@ export class SeriesState {
     return { outputPath: canonicalOutputPath, durationSeconds: measuredFinalDurations[0]! };
   }
 
-  /** Fail closed before Agnes when narration cannot satisfy one-request-per-scene. */
-  async assertEpisodeAudioReady(episodeId: number): Promise<{ totalDurationSeconds: number }> {
+  /**
+   * Reads the exact persisted narration plus validated WAV timing. This is the
+   * single deterministic source for both Agnes preflight and caption recovery.
+   */
+  async getEpisodeNarrationAudioManifest(
+    episodeId: number,
+  ): Promise<EpisodeNarrationAudioManifest> {
     await this.initialize();
     const result = await this.client.execute({
       sql: "SELECT series_id, episode_number, script_json FROM episodes WHERE id = ? LIMIT 1",
@@ -1413,10 +2253,7 @@ export class SeriesState {
       (await this.getSeriesCharacters(Number(episode.series_id))).map((character) => character.name),
     );
     if (!productionScript.pass) {
-      throw new Error(
-        "Persisted episode script violates the production contract: " +
-        productionScript.issues.join(" | "),
-      );
+      throw new ProductionScriptContractError(productionScript);
     }
     const sceneNumbers = episodeScriptSceneNumbers(episode.script_json);
     const narrationByScene = episodeScriptNarrationMap(episode.script_json);
@@ -1426,35 +2263,383 @@ export class SeriesState {
       `episode_${Number(episode.episode_number)}`
     );
     let totalDurationSeconds = 0;
+    const scenes: EpisodeNarrationAudioManifestScene[] = [];
     for (const sceneNumber of sceneNumbers) {
       const narrationPath = path.join(
         episodeDir,
         "audio",
         `scene_${String(sceneNumber).padStart(3, "0")}_narrator.wav`
       );
-      await requireNonEmptyFile(narrationPath, `scene ${sceneNumber} narration`);
-      const duration = await probeMediaDuration(narrationPath);
-      await requireMatchingNarrationMetadata(
-        narrationPath,
-        narrationByScene.get(sceneNumber) ?? "",
-        duration,
-        `scene ${sceneNumber} narration`,
-      );
-      if (duration > NARRATION_MAX_AUDIO_SECONDS) {
-        throw new Error(
-          `Scene ${sceneNumber} narration is ${duration.toFixed(3)}s. ` +
-          `Split the script scene and regenerate its audio before Agnes submission; the maximum is ${NARRATION_MAX_AUDIO_SECONDS}s.`
+      let duration: number;
+      try {
+        await requireNonEmptyFile(narrationPath, `scene ${sceneNumber} narration`);
+        duration = await probeMediaDuration(narrationPath);
+        await requireMatchingNarrationMetadata(
+          narrationPath,
+          narrationByScene.get(sceneNumber) ?? "",
+          duration,
+          `scene ${sceneNumber} narration`,
         );
+      } catch (error) {
+        throw new EpisodeAudioReadinessError({
+          reason: "artifact_missing_or_stale",
+          sceneNumber,
+          message:
+            `Scene ${sceneNumber} narration audio is missing, corrupt, or stale for the current exact text. ` +
+            `Regenerate episode audio through synthesize_episode_narration_audio. Cause: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+        });
+      }
+      if (duration > NARRATION_MAX_AUDIO_SECONDS) {
+        throw new EpisodeAudioReadinessError({
+          reason: "duration_exceeded",
+          sceneNumber,
+          durationSeconds: duration,
+          message:
+            `Scene ${sceneNumber} narration is ${duration.toFixed(3)}s. ` +
+            `Shorten its narration before Agnes submission; the maximum is ${NARRATION_MAX_AUDIO_SECONDS}s.`,
+        });
       }
       totalDurationSeconds += duration;
+      scenes.push({
+        sceneNumber,
+        narrationText: narrationByScene.get(sceneNumber) ?? "",
+        durationSeconds: duration,
+      });
     }
     if (totalDurationSeconds < 300) {
-      throw new Error(
-        `Measured episode narration is ${totalDurationSeconds.toFixed(3)}s. ` +
-        "Add short scenes until the narration reaches at least 300 seconds."
+      throw new EpisodeAudioReadinessError({
+        reason: "total_duration_too_short",
+        totalDurationSeconds,
+        message:
+          `Measured episode narration is ${totalDurationSeconds.toFixed(3)}s. ` +
+          "Re-author the complete script until narration reaches at least 300 seconds.",
+      });
+    }
+    return { totalDurationSeconds, scenes };
+  }
+
+  /** Fail closed before Agnes when narration cannot satisfy one-request-per-scene. */
+  async assertEpisodeAudioReady(episodeId: number): Promise<{ totalDurationSeconds: number }> {
+    const manifest = await this.getEpisodeNarrationAudioManifest(episodeId);
+    return { totalDurationSeconds: manifest.totalDurationSeconds };
+  }
+
+  /**
+   * Validates title audio separately because it is created lazily by the first
+   * Agnes submission. Once any provider claim exists these files are immutable
+   * request inputs and may no longer be silently regenerated.
+   */
+  async assertEpisodeKeyArtAudioReady(
+    seriesId: number,
+    episodeNumber: number,
+  ): Promise<void> {
+    await this.initialize();
+    const [seriesInfo, episode] = await Promise.all([
+      this.getSeriesInfo(seriesId),
+      this.getEpisodeByNumber(seriesId, episodeNumber),
+    ]);
+    if (!seriesInfo) throw new Error(`Series ${seriesId} was not found.`);
+    if (!episode) throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
+
+    const specs = [
+      {
+        kind: "series" as const,
+        assetKind: "series_key_art" as const,
+        title: canonicalizeKeyArtTitle(seriesInfo.conceptName, "series"),
+      },
+      {
+        kind: "episode" as const,
+        assetKind: "episode_key_art" as const,
+        title: canonicalizeKeyArtTitle(episode.title, "episode"),
+      },
+    ];
+    for (const spec of specs) {
+      const paths = agnesKeyArtPaths({ seriesId, episodeNumber, kind: spec.kind });
+      let duration: number;
+      try {
+        await requireNonEmptyFile(paths.audioPath, `${spec.kind} key-art title audio`);
+        duration = await probeMediaDuration(paths.audioPath);
+        await requireMatchingNarrationMetadata(
+          paths.audioPath,
+          spec.title,
+          duration,
+          `${spec.kind} key-art title audio`,
+        );
+      } catch (error) {
+        throw new EpisodeAudioReadinessError({
+          reason: "artifact_missing_or_stale",
+          assetKind: spec.assetKind,
+          message:
+            `${spec.kind} key-art title audio is missing, corrupt, or stale for its exact title. ` +
+            `Cause: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+      if (duration > NARRATION_MAX_AUDIO_SECONDS) {
+        throw new EpisodeAudioReadinessError({
+          reason: "duration_exceeded",
+          assetKind: spec.assetKind,
+          durationSeconds: duration,
+          message:
+            `${spec.kind} key-art title audio is ${duration.toFixed(3)}s; ` +
+            `the maximum is ${NARRATION_MAX_AUDIO_SECONDS}s.`,
+        });
+      }
+    }
+  }
+
+  /**
+   * Acquires the episode-wide narration mutation lease before any TTS work.
+   * Expired owners are fenced by advancing audio_revision before their token
+   * is cleared. The same transaction refuses new audio work once any Agnes
+   * POST intent has started.
+   */
+  async beginEpisodeNarrationAudioMutation(
+    input: BeginEpisodeNarrationAudioMutationInput,
+  ): Promise<BeginEpisodeNarrationAudioMutationResult> {
+    await this.initialize();
+    const seriesId = positiveSafeInteger("seriesId", input.seriesId);
+    const episodeNumber = positiveSafeInteger("episodeNumber", input.episodeNumber);
+    const sceneNumber = positiveSafeInteger("sceneNumber", input.sceneNumber);
+    const leaseToken = input.leaseToken.trim();
+    if (!leaseToken) throw new Error("Narration audio mutation leaseToken must not be empty.");
+    const nowMs = nonNegativeSafeInteger("Narration audio mutation nowMs", input.nowMs ?? Date.now());
+    const leaseExpiresAtMs = nonNegativeSafeInteger(
+      "Narration audio mutation leaseExpiresAtMs",
+      input.leaseExpiresAtMs,
+    );
+    if (leaseExpiresAtMs <= nowMs) {
+      throw new Error("Narration audio mutation leaseExpiresAtMs must be later than nowMs.");
+    }
+
+    const results = await this.client.batch([
+      {
+        sql: `UPDATE episodes
+              SET audio_revision = audio_revision + 1,
+                  audio_mutation_token = NULL,
+                  audio_mutation_scene_number = NULL,
+                  audio_mutation_expires_at_ms = NULL,
+                  updated_at = datetime('now')
+              WHERE series_id = ? AND episode_number = ?
+                AND audio_mutation_token IS NOT NULL
+                AND (
+                  audio_mutation_expires_at_ms IS NULL OR
+                  audio_mutation_expires_at_ms <= ?
+                )`,
+        args: [seriesId, episodeNumber, nowMs],
+      },
+      {
+        sql: `UPDATE episodes AS episode
+              SET audio_mutation_token = ?,
+                  audio_mutation_scene_number = ?,
+                  audio_mutation_expires_at_ms = ?,
+                  updated_at = datetime('now')
+              WHERE episode.series_id = ? AND episode.episode_number = ?
+                AND episode.status <> 'done'
+                AND episode.audio_mutation_token IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM agnes_scene_generations AS started
+                  WHERE started.series_id = episode.series_id
+                    AND started.episode_number = episode.episode_number
+                    AND (
+                      started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                      started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                      started.status <> 'pending'
+                    )
+                )
+              RETURNING audio_revision`,
+        args: [leaseToken, sceneNumber, leaseExpiresAtMs, seriesId, episodeNumber],
+      },
+      {
+        sql: `SELECT episode.status,
+                     episode.audio_revision,
+                     episode.audio_mutation_token,
+                     (
+                       SELECT COUNT(*) FROM agnes_scene_generations AS started
+                       WHERE started.series_id = episode.series_id
+                         AND started.episode_number = episode.episode_number
+                         AND (
+                           started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                           started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                           started.status <> 'pending'
+                         )
+                     ) AS started_asset_count
+              FROM episodes AS episode
+              WHERE episode.series_id = ? AND episode.episode_number = ?
+              LIMIT 1`,
+        args: [seriesId, episodeNumber],
+      },
+    ], "write");
+
+    const acquiredRow = results[1]?.rows[0];
+    if (acquiredRow) {
+      const audioRevision = nonNegativeSafeInteger(
+        "Persisted episode audio revision",
+        Number(acquiredRow.audio_revision),
+      );
+      return { acquired: true, audioRevision, startedAssetCount: 0 };
+    }
+
+    const episodeRow = results[2]?.rows[0];
+    if (!episodeRow) {
+      throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
+    }
+    const persistedStartedCount = Number(episodeRow.started_asset_count ?? 0);
+    const startedAssetCount = Number.isSafeInteger(persistedStartedCount) && persistedStartedCount > 0
+      ? persistedStartedCount
+      : 0;
+    if (episodeRow.status === "done") {
+      return { acquired: false, reason: "episode_complete", startedAssetCount };
+    }
+    return startedAssetCount > 0
+      ? { acquired: false, reason: "agnes_started", startedAssetCount }
+      : { acquired: false, reason: "mutation_in_progress", startedAssetCount: 0 };
+  }
+
+  /** Extends only the matching, still-live narration mutation lease. */
+  async renewEpisodeNarrationAudioMutation(
+    input: RenewEpisodeNarrationAudioMutationInput,
+  ): Promise<boolean> {
+    await this.initialize();
+    const seriesId = positiveSafeInteger("seriesId", input.seriesId);
+    const episodeNumber = positiveSafeInteger("episodeNumber", input.episodeNumber);
+    const sceneNumber = positiveSafeInteger("sceneNumber", input.sceneNumber);
+    const leaseToken = input.leaseToken.trim();
+    if (!leaseToken) throw new Error("Narration audio mutation leaseToken must not be empty.");
+    const nowMs = nonNegativeSafeInteger("Narration audio mutation nowMs", input.nowMs ?? Date.now());
+    const leaseExpiresAtMs = nonNegativeSafeInteger(
+      "Narration audio mutation leaseExpiresAtMs",
+      input.leaseExpiresAtMs,
+    );
+    if (leaseExpiresAtMs <= nowMs) {
+      throw new Error("Narration audio mutation leaseExpiresAtMs must be later than nowMs.");
+    }
+    const result = await this.client.execute({
+      sql: `UPDATE episodes
+            SET audio_mutation_expires_at_ms = ?, updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ?
+              AND audio_mutation_token = ?
+              AND audio_mutation_scene_number = ?
+              AND audio_mutation_expires_at_ms > ?`,
+      args: [leaseExpiresAtMs, seriesId, episodeNumber, leaseToken, sceneNumber, nowMs],
+    });
+    return result.rowsAffected === 1;
+  }
+
+  /** Commits one audio mutation and advances the episode-wide revision. */
+  async completeEpisodeNarrationAudioMutation(
+    input: EpisodeNarrationAudioMutationIdentity,
+  ): Promise<boolean> {
+    await this.initialize();
+    const seriesId = positiveSafeInteger("seriesId", input.seriesId);
+    const episodeNumber = positiveSafeInteger("episodeNumber", input.episodeNumber);
+    const sceneNumber = positiveSafeInteger("sceneNumber", input.sceneNumber);
+    const leaseToken = input.leaseToken.trim();
+    if (!leaseToken) throw new Error("Narration audio mutation leaseToken must not be empty.");
+    const nowMs = Date.now();
+    const result = await this.client.execute({
+      sql: `UPDATE episodes AS episode
+            SET audio_revision = audio_revision + 1,
+                audio_mutation_token = NULL,
+                audio_mutation_scene_number = NULL,
+                audio_mutation_expires_at_ms = NULL,
+                updated_at = datetime('now')
+            WHERE episode.series_id = ? AND episode.episode_number = ?
+              AND episode.audio_mutation_token = ?
+              AND episode.audio_mutation_scene_number = ?
+              AND episode.audio_mutation_expires_at_ms > ?
+              AND NOT EXISTS (
+                SELECT 1 FROM agnes_scene_generations AS started
+                WHERE started.series_id = episode.series_id
+                  AND started.episode_number = episode.episode_number
+                  AND (
+                    started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                    started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                    started.status <> 'pending'
+                  )
+              )`,
+      args: [seriesId, episodeNumber, leaseToken, sceneNumber, nowMs],
+    });
+    return result.rowsAffected === 1;
+  }
+
+  /** Releases only the exact mutation owner; stale owners cannot clear a successor. */
+  async abortEpisodeNarrationAudioMutation(
+    input: EpisodeNarrationAudioMutationIdentity,
+  ): Promise<boolean> {
+    await this.initialize();
+    const seriesId = positiveSafeInteger("seriesId", input.seriesId);
+    const episodeNumber = positiveSafeInteger("episodeNumber", input.episodeNumber);
+    const sceneNumber = positiveSafeInteger("sceneNumber", input.sceneNumber);
+    const leaseToken = input.leaseToken.trim();
+    if (!leaseToken) throw new Error("Narration audio mutation leaseToken must not be empty.");
+    const result = await this.client.execute({
+      sql: `UPDATE episodes
+            SET audio_mutation_token = NULL,
+                audio_mutation_scene_number = NULL,
+                audio_mutation_expires_at_ms = NULL,
+                updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ?
+              AND audio_mutation_token = ?
+              AND audio_mutation_scene_number = ?`,
+      args: [seriesId, episodeNumber, leaseToken, sceneNumber],
+    });
+    return result.rowsAffected === 1;
+  }
+
+  /**
+   * Returns the stable narration revision Agnes must bind to. An expired TTS
+   * owner is first fenced (revision++) and an active owner blocks media reads.
+   */
+  async getEpisodeAudioRevisionForAgnes(
+    seriesId: number,
+    episodeNumber: number,
+    nowMs = Date.now(),
+  ): Promise<number> {
+    await this.initialize();
+    const safeSeriesId = positiveSafeInteger("seriesId", seriesId);
+    const safeEpisodeNumber = positiveSafeInteger("episodeNumber", episodeNumber);
+    const safeNowMs = nonNegativeSafeInteger("Agnes audio revision nowMs", nowMs);
+    const results = await this.client.batch([
+      {
+        sql: `UPDATE episodes
+              SET audio_revision = audio_revision + 1,
+                  audio_mutation_token = NULL,
+                  audio_mutation_scene_number = NULL,
+                  audio_mutation_expires_at_ms = NULL,
+                  updated_at = datetime('now')
+              WHERE series_id = ? AND episode_number = ?
+                AND audio_mutation_token IS NOT NULL
+                AND (
+                  audio_mutation_expires_at_ms IS NULL OR
+                  audio_mutation_expires_at_ms <= ?
+                )`,
+        args: [safeSeriesId, safeEpisodeNumber, safeNowMs],
+      },
+      {
+        sql: `SELECT audio_revision, audio_mutation_token,
+                     audio_mutation_scene_number, audio_mutation_expires_at_ms
+              FROM episodes
+              WHERE series_id = ? AND episode_number = ?
+              LIMIT 1`,
+        args: [safeSeriesId, safeEpisodeNumber],
+      },
+    ], "write");
+    const row = results[1]?.rows[0];
+    if (!row) {
+      throw new Error(`Episode ${safeEpisodeNumber} was not found for series ${safeSeriesId}.`);
+    }
+    if (row.audio_mutation_token !== null && row.audio_mutation_token !== undefined) {
+      throw new EpisodeAudioMutationInProgressError(
+        Number(row.audio_mutation_scene_number),
+        Number(row.audio_mutation_expires_at_ms),
       );
     }
-    return { totalDurationSeconds };
+    return nonNegativeSafeInteger(
+      "Persisted episode audio revision",
+      Number(row.audio_revision),
+    );
   }
 
   async updateEpisodeStatus(
@@ -1464,6 +2649,11 @@ export class SeriesState {
   ): Promise<void> {
     await this.initialize();
     let canonicalOutputPath = fields.outputPath;
+    if (fields.scriptJson !== undefined && status !== "script") {
+      throw new Error(
+        "scriptJson may only be persisted with status=script so the production contract is validated before any later stage.",
+      );
+    }
     if (status === "audio") {
       await this.assertEpisodeAudioReady(episodeId);
     }
@@ -1489,9 +2679,9 @@ export class SeriesState {
         (await this.getSeriesCharacters(Number(row.series_id))).map((character) => character.name),
       );
       if (!productionScript.pass) {
-        throw new Error(
-          "Refusing to persist a script that violates the production contract: " +
-          productionScript.issues.join(" | "),
+        throw new ProductionScriptContractError(
+          productionScript,
+          "Refusing to persist a script that violates the production contract",
         );
       }
       const priorScript = row.script_json == null ? null : canonicalJsonString(row.script_json);
@@ -1804,6 +2994,10 @@ export class SeriesState {
         args: [seriesId, episodeNumber],
       },
       {
+        sql: "DELETE FROM episode_script_drafts WHERE episode_id = ?",
+        args: [episode.id],
+      },
+      {
         sql: "DELETE FROM agnes_scene_generations WHERE series_id = ? AND episode_number = ?",
         args: [seriesId, episodeNumber],
       },
@@ -1917,6 +3111,15 @@ export class SeriesState {
           completionLocalDate,
           episode.id,
         ],
+      },
+      {
+        sql: `DELETE FROM episode_script_drafts
+              WHERE episode_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes
+                  WHERE id = ? AND youtube_video_id = ? AND uploaded_at IS NOT NULL
+                )`,
+        args: [episode.id, episode.id, videoId],
       },
       {
         sql: `DELETE FROM agnes_scene_generations
@@ -2270,10 +3473,18 @@ export class SeriesState {
   async claimAgnesSceneSubmission(
     input: ClaimAgnesSceneSubmissionInput,
     expectedAttemptCount: number
-  ): Promise<{ claimed: boolean; row: AgnesSceneGenerationRow }> {
+  ): Promise<ClaimAgnesSceneSubmissionResult> {
     await this.initialize();
     const requestDigest = input.requestDigest.trim();
     if (!requestDigest) throw new Error("Agnes requestDigest must not be empty.");
+    const expectedEpisodeScriptJson = input.expectedEpisodeScriptJson.trim();
+    if (!expectedEpisodeScriptJson) {
+      throw new Error("An expected canonical episode script is required for an Agnes POST claim.");
+    }
+    const expectedEpisodeAudioRevision = nonNegativeSafeInteger(
+      "expectedEpisodeAudioRevision",
+      input.expectedEpisodeAudioRevision,
+    );
     if (!Number.isSafeInteger(expectedAttemptCount) || expectedAttemptCount < 0) {
       throw new Error("expectedAttemptCount must be a non-negative integer.");
     }
@@ -2286,45 +3497,34 @@ export class SeriesState {
     }
     const submittedAt = input.submittedAt ?? new Date().toISOString();
 
+    // The workflow's initial preparation pass materializes the exact pending
+    // request; every later pre-POST reload is read-only. Claiming must likewise
+    // remain UPDATE-only: if script promotion deletes that pending row (or
+    // another invocation replaces it), this stale caller must not recreate old
+    // work and POST it to Agnes.
     const result = await this.client.execute({
-      sql: `INSERT INTO agnes_scene_generations (
-              series_id, episode_number, scene_number, variant, status, prompt,
-              request_digest, attempt_count, seed,
-              requested_duration_seconds, provider_duration_seconds, public_reference_url,
-              provider_task_id, provider_receipt_json, provider_video_url,
-              raw_output_path, normalized_output_path, download_status, error, submitted_at, completed_at
-            )
-            SELECT ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL
-            WHERE ? = 0
-               OR EXISTS (
-                 SELECT 1
-                 FROM agnes_scene_generations
-                 WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
-               )
-            ON CONFLICT (series_id, episode_number, scene_number, variant)
-            DO UPDATE SET status = 'pending',
-                          prompt = excluded.prompt,
-                          request_digest = excluded.request_digest,
-                          attempt_count = agnes_scene_generations.attempt_count + 1,
-                          seed = COALESCE(excluded.seed, agnes_scene_generations.seed),
-                          requested_duration_seconds = excluded.requested_duration_seconds,
-                          provider_duration_seconds = excluded.provider_duration_seconds,
-                          public_reference_url = COALESCE(excluded.public_reference_url, agnes_scene_generations.public_reference_url),
-                          provider_task_id = COALESCE(excluded.provider_task_id, agnes_scene_generations.provider_task_id),
-                          provider_receipt_json = excluded.provider_receipt_json,
-                          provider_video_url = COALESCE(excluded.provider_video_url, agnes_scene_generations.provider_video_url),
-                          raw_output_path = COALESCE(excluded.raw_output_path, agnes_scene_generations.raw_output_path),
-                          normalized_output_path = COALESCE(excluded.normalized_output_path, agnes_scene_generations.normalized_output_path),
-                          download_status = 'pending',
-                          error = NULL,
-                          submitted_at = COALESCE(excluded.submitted_at, agnes_scene_generations.submitted_at),
-                          completed_at = NULL,
-                          updated_at = datetime('now')
-            WHERE agnes_scene_generations.attempt_count = ?
-              AND agnes_scene_generations.status <> 'completed'
-              AND agnes_scene_generations.download_status <> 'downloaded'
-              AND (agnes_scene_generations.request_digest IS NULL
-                OR agnes_scene_generations.request_digest = excluded.request_digest)
+      sql: `UPDATE agnes_scene_generations
+            SET status = 'pending',
+                attempt_count = attempt_count + 1,
+                provider_receipt_json = ?,
+                download_status = 'pending',
+                error = NULL,
+                submitted_at = COALESCE(?, submitted_at),
+                completed_at = NULL,
+                updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+              AND request_digest = ?
+              AND attempt_count = ?
+              AND status <> 'completed'
+              AND download_status <> 'downloaded'
+              AND EXISTS (
+                SELECT 1 FROM episodes AS episode
+                WHERE episode.series_id = agnes_scene_generations.series_id
+                  AND episode.episode_number = agnes_scene_generations.episode_number
+                  AND episode.script_json = ?
+                  AND episode.audio_revision = ?
+                  AND episode.audio_mutation_token IS NULL
+              )
             RETURNING id, series_id, episode_number, scene_number, variant, status,
                       prompt, request_digest, attempt_count, seed,
                       requested_duration_seconds, provider_duration_seconds,
@@ -2332,29 +3532,16 @@ export class SeriesState {
                       provider_video_url, raw_output_path, normalized_output_path, download_status,
                       error, submitted_at, completed_at, created_at, updated_at`,
       args: [
-        input.seriesId,
-        input.episodeNumber,
-        input.sceneNumber,
-        input.variant,
-        input.prompt,
-        requestDigest,
-        expectedAttemptCount + 1,
-        input.seed ?? null,
-        input.requestedDurationSeconds,
-        input.providerDurationSeconds,
-        input.publicReferenceUrl ?? null,
-        input.providerTaskId ?? null,
         providerReceiptJson,
-        input.providerVideoUrl ?? null,
-        input.rawOutputPath ?? null,
-        input.normalizedOutputPath ?? null,
         submittedAt,
-        expectedAttemptCount,
         input.seriesId,
         input.episodeNumber,
         input.sceneNumber,
         input.variant,
+        requestDigest,
         expectedAttemptCount,
+        expectedEpisodeScriptJson,
+        expectedEpisodeAudioRevision,
       ],
     });
 
@@ -2372,10 +3559,11 @@ export class SeriesState {
       input.sceneNumber,
       input.variant
     );
-    if (!row) {
-      throw new Error("Agnes submission claim lost but no current row could be read.");
-    }
-    return { claimed: false, row };
+    return {
+      claimed: false,
+      reason: row ? "conflict" : "missing",
+      row,
+    };
   }
 
   /**

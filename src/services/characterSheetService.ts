@@ -3,7 +3,7 @@ import { mkdir, writeFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import { chatText, chatVisionFrameworkOnly } from "../providers/aiClient.js";
 import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
-import { SeriesState, ReferenceImage } from "../state/seriesState.js";
+import { SeriesState, ReferenceImage, type CharacterDef } from "../state/seriesState.js";
 import { CONFIG } from "../config.js";
 import {
   buildCharacterPortraitPrompt,
@@ -40,6 +40,21 @@ export interface EnsureCharacterSheetResult {
   status: "already_approved" | "generated";
   referenceImagePaths: Record<string, ReferenceImage>;
   generationPrompt: string;
+}
+
+export interface EnsuredSeriesCharacterSheet {
+  name: string;
+  status: EnsureCharacterSheetResult["status"];
+  referenceImagePaths: Record<string, ReferenceImage>;
+  generationPrompt: string;
+}
+
+export interface EnsureSeriesCharacterSheetsResult {
+  seriesId: number;
+  rosterCount: number;
+  generatedCount: number;
+  reusedCount: number;
+  characters: EnsuredSeriesCharacterSheet[];
 }
 
 export interface CharacterSignatureInspection {
@@ -135,10 +150,73 @@ export function inspectCharacterSignaturePrompt(raw: string): CharacterSignature
  * truncated character bible never ends mid-word (e.g. "cream-wh").
  */
 export function trimToWordBoundary(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
   if (text.length <= maxChars) return text;
   const clipped = text.slice(0, maxChars);
-  const lastSeparator = Math.max(clipped.lastIndexOf(" "), clipped.lastIndexOf(","));
-  return (lastSeparator > maxChars * 0.6 ? clipped.slice(0, lastSeparator) : clipped).trim();
+  const nextCharacter = text.charAt(maxChars);
+  if (!nextCharacter || /[\s,.;:!?]/u.test(nextCharacter)) return clipped.trim();
+
+  const separatorMatches = [...clipped.matchAll(/[\s,.;:!?]/gu)];
+  const lastSeparator = separatorMatches.at(-1)?.index ?? -1;
+  return lastSeparator >= 0 ? clipped.slice(0, lastSeparator).trim() : "";
+}
+
+function hasOnlySignatureLengthOverflow(inspection: CharacterSignatureInspection): boolean {
+  return inspection.normalized.length > CHARACTER_SIGNATURE_MAX_CHARS && inspection.issues.length === 1;
+}
+
+/**
+ * Removes only optional spaces after list punctuation. This preserves every
+ * identity word and the required color-lock suffix while recovering the common
+ * case where a model misses the hard limit by a handful of characters.
+ */
+function compactSignaturePunctuationSpacing(signature: string): string {
+  let remainingOverflow = signature.length - CHARACTER_SIGNATURE_MAX_CHARS;
+  if (remainingOverflow <= 0) return signature;
+
+  const optionalSpaces = [...signature.matchAll(/[,;:] (?=\S)/gu)];
+  let compacted = signature;
+  // Work backwards so the match indexes remain valid after each deletion.
+  for (let index = optionalSpaces.length - 1; index >= 0 && remainingOverflow > 0; index--) {
+    const punctuationIndex = optionalSpaces[index].index;
+    if (punctuationIndex === undefined) continue;
+    const spaceIndex = punctuationIndex + 1;
+    compacted = compacted.slice(0, spaceIndex) + compacted.slice(spaceIndex + 1);
+    remainingOverflow--;
+  }
+  return compacted;
+}
+
+/**
+ * Recovers a semantically valid signature whose sole defect is its length.
+ * Word removal remains a final-attempt fallback; earlier attempts retain the
+ * existing opportunity for the model to author a naturally shorter version.
+ */
+function recoverSignatureLengthOverflow(
+  inspection: CharacterSignatureInspection,
+  allowWordBoundaryTrim: boolean,
+): CharacterSignatureInspection | null {
+  if (!hasOnlySignatureLengthOverflow(inspection)) return null;
+
+  const compactedInspection = inspectCharacterSignaturePrompt(
+    compactSignaturePunctuationSpacing(inspection.normalized),
+  );
+  if (compactedInspection.pass) return compactedInspection;
+  if (!allowWordBoundaryTrim || !hasOnlySignatureLengthOverflow(compactedInspection)) return null;
+
+  const suffix = CHARACTER_SIGNATURE_REQUIRED_ENDING;
+  const identity = compactedInspection.normalized
+    .slice(0, -suffix.length)
+    .replace(/[\s,.;:-]+$/gu, "")
+    .trim();
+  const identityBudget = CHARACTER_SIGNATURE_MAX_CHARS - suffix.length - 2; // `. ${suffix}`
+  const trimmedIdentity = trimToWordBoundary(identity, identityBudget)
+    .replace(/[\s,.;:-]+$/gu, "")
+    .trim();
+  if (!trimmedIdentity) return null;
+
+  const trimmedInspection = inspectCharacterSignaturePrompt(`${trimmedIdentity}. ${suffix}`);
+  return trimmedInspection.pass ? trimmedInspection : null;
 }
 
 /** Normalizes a character name for tolerant matching against the roster. */
@@ -302,6 +380,8 @@ async function distillSignaturePrompt(detailedDescription: string): Promise<stri
       });
       const inspection = inspectCharacterSignaturePrompt(rawSignature);
       if (inspection.pass) return inspection.normalized;
+      const recovered = recoverSignatureLengthOverflow(inspection, attempt === 3);
+      if (recovered?.pass) return recovered.normalized;
       lastFailure = inspection.issues.join(" ");
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : String(error);
@@ -315,7 +395,7 @@ async function distillSignaturePrompt(detailedDescription: string): Promise<stri
  * Guarantees that an approved character sheet exists for `characterName`,
  * generating it on demand when it is missing.
  *
- * This is the single source of truth used both by the `generate_character_sheet`
+ * This is the single-character source of truth used by the production roster
  * tool and by downstream video-prompt construction. Downstream tools call it so
  * that a partially-completed or interrupted run self-heals instead of failing
  * fatally with "No approved detailed description found".
@@ -330,7 +410,7 @@ export async function ensureCharacterSheet(params: {
   seriesId: number;
   characterName: string;
   characterVisual?: SceneCharacterVisual;
-  /** Story description. Resolved from the series roster when omitted. */
+  /** Legacy fallback only when the character is absent from the stored roster. */
   characterDescription?: string;
   customState?: CustomStateStore;
   promptHash?: string;
@@ -341,16 +421,28 @@ export async function ensureCharacterSheet(params: {
   }
 
   const existing = await seriesState.getCharacterSheet(seriesId, characterName);
-  // Resolve the story description: caller-supplied -> series roster -> the
-  // previously stored description. We only fall back to the bare name as a last
-  // resort so that a missing roster entry cannot abort an otherwise healthy run.
-  let baseCharacterDescription = params.characterDescription?.trim();
-  if (!baseCharacterDescription) {
-    baseCharacterDescription =
-      (await resolveCharacterDescription(seriesState, seriesId, characterName)) ??
-      existing?.description?.replace(/\.\s*Visual ontology:[\s\S]*$/iu, "").trim() ??
-      undefined;
+  // The stored series roster is the immutable portrait identity. Agent turns
+  // may paraphrase a tool argument on a rerun; allowing that prose to win would
+  // change the request digest and generate a second portrait for the same
+  // character. Caller text remains only a legacy fallback for a character that
+  // genuinely has no roster entry yet.
+  const rosterDescription = (
+    await resolveCharacterDescription(seriesState, seriesId, characterName)
+  )?.trim();
+  if (
+    rosterDescription
+    && params.characterDescription?.trim()
+    && params.characterDescription.trim() !== rosterDescription
+  ) {
+    console.warn(
+      `[characterSheet] Ignoring a non-canonical rerun description for "${characterName}"; ` +
+      "using the stored series roster identity.",
+    );
   }
+  let baseCharacterDescription = rosterDescription
+    || params.characterDescription?.trim()
+    || existing?.description?.replace(/\.\s*Visual ontology:[\s\S]*$/iu, "").trim()
+    || undefined;
 
   if (!baseCharacterDescription?.trim()) {
     console.warn(
@@ -524,6 +616,87 @@ export async function ensureCharacterSheet(params: {
 }
 
 /**
+ * Ensures the complete stored main-character roster in its canonical order.
+ *
+ * This is intentionally a deterministic application operation rather than a
+ * sequence the creative agent must remember to perform. Each character still
+ * uses `ensureCharacterSheet`, so approved digest-bound portraits, on-disk
+ * portraits, and durable extraction checkpoints retain their existing reuse
+ * behavior. Work is sequential to avoid bursting the portrait provider. If a
+ * later character fails, earlier completed sheets remain durable and a rerun
+ * resumes only the missing work.
+ */
+export async function ensureSeriesCharacterSheets(params: {
+  seriesState: SeriesState;
+  seriesId: number;
+  /** A caller that already loaded the canonical roster may avoid a second DB read. */
+  roster?: readonly CharacterDef[];
+  customState?: CustomStateStore;
+  promptHash?: string;
+}): Promise<EnsureSeriesCharacterSheetsResult> {
+  const { seriesState, seriesId, customState, promptHash } = params;
+  if (!Number.isSafeInteger(seriesId) || seriesId <= 0) {
+    throw new Error("seriesId must be a positive integer.");
+  }
+  if (!(await seriesState.seriesExists(seriesId))) {
+    throw new Error(
+      `Series id ${seriesId} does not exist. Re-run from the beginning so ` +
+      "get_or_create_series returns the current durable series id.",
+    );
+  }
+
+  const roster = params.roster ? [...params.roster] : await seriesState.getSeriesCharacters(seriesId);
+  if (roster.length === 0) {
+    throw new Error(`Series ${seriesId} has no stored main-character roster.`);
+  }
+
+  const characters: EnsuredSeriesCharacterSheet[] = [];
+  for (const character of roster) {
+    const name = character.name.trim();
+    const description = character.description.trim();
+    if (!name || !description) {
+      throw new Error(`Series ${seriesId} contains a main character with a missing name or description.`);
+    }
+    logStep(`Ensuring roster portrait ${characters.length + 1}/${roster.length}: ${name}`);
+    const ensured = await ensureCharacterSheet({
+      seriesState,
+      seriesId,
+      characterName: name,
+      characterDescription: description,
+      customState,
+      promptHash,
+    });
+    if (!ensured.generationPrompt.trim() || !ensured.referenceImagePaths.portrait?.path) {
+      throw new Error(`Character-sheet pipeline returned an incomplete approved sheet for "${name}".`);
+    }
+    const durable = await seriesState.getCharacterSheet(seriesId, name);
+    if (
+      !durable?.approvedAt
+      || !durable.generationPrompt?.trim()
+      || !durable.referenceImagePaths.portrait?.path
+      || durable.generationPrompt.trim() !== ensured.generationPrompt.trim()
+    ) {
+      throw new Error(`Approved character sheet for "${name}" was not durably persisted as expected.`);
+    }
+    characters.push({
+      name,
+      status: ensured.status,
+      referenceImagePaths: durable.referenceImagePaths,
+      generationPrompt: durable.generationPrompt.trim(),
+    });
+  }
+
+  const generatedCount = characters.filter(({ status }) => status === "generated").length;
+  return {
+    seriesId,
+    rosterCount: roster.length,
+    generatedCount,
+    reusedCount: roster.length - generatedCount,
+    characters,
+  };
+}
+
+/**
  * Returns the locked character bible entry for a character, generating the
  * whole character sheet first if it is missing. Direct scene-video prompting
  * uses this so a missing sheet self-heals rather than aborting the run.
@@ -538,7 +711,7 @@ export async function ensureCharacterBibleEntry(params: {
   /** Label used in the log line explaining why the sheet is being back-filled. */
   requestedBy: string;
 }): Promise<string> {
-  // The mandatory generate_character_sheet phase owns provenance migration and
+  // The mandatory complete-roster sheet phase owns provenance migration and
   // signature validation. Scene prompt materialization can use an already locked
   // DB identity directly, but it must still reject an actual ontology conflict.
   const sheet = await params.seriesState.getCharacterSheet(params.seriesId, params.characterName);

@@ -21,6 +21,7 @@ async function cleanupTursoTables(): Promise<void> {
       "youtube_upload_receipts",
       "episode_video_outputs",
       "agnes_scene_generations",
+      "episode_script_drafts",
       "key_art",
       "character_sheets",
       "episodes",

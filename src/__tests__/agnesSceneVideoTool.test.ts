@@ -54,9 +54,12 @@ import {
 } from "../services/agnesKeyArtService.js";
 import { CHARACTER_INTEGRITY_NEGATIVE_BIBLE } from "../promptBuilder.js";
 import { AgnesError, type AgnesSubmitVideoRequest, type AgnesVideoTask } from "../providers/agnes/index.js";
-import type {
-  AgnesSceneGenerationRow,
-  UpsertAgnesSceneGenerationInput,
+import { ProductionScriptContractError } from "../services/productionScriptContract.js";
+import {
+  EpisodeAudioMutationInProgressError,
+  EpisodeAudioReadinessError,
+  type AgnesSceneGenerationRow,
+  type UpsertAgnesSceneGenerationInput,
 } from "../state/seriesState.js";
 import {
   buildAgnesSceneVideoTools as buildAgnesSceneVideoToolsImpl,
@@ -171,13 +174,18 @@ function mockState(sceneCount: number) {
     continuityAnchors: ["The same yellow flower stands beside Pip."],
   }));
   const state = {
+    getEpisodeAudioRevisionForAgnes: vi.fn(async () => 0),
     getOrCreateSeriesAgnesSeed: vi.fn(async (_seriesId: number, preferredCandidate?: number) => {
       persistedSeriesSeed ??= preferredCandidate ?? 1_357_911;
       return persistedSeriesSeed;
     }),
     getEpisodeByNumber: vi.fn(async () => ({ id: 72, scriptJson: { scenes } })),
     assertEpisodeAudioReady: vi.fn(async () => ({ totalDurationSeconds: 300 })),
+    assertEpisodeKeyArtAudioReady: vi.fn(async () => undefined),
     getAgnesSceneGeneration: vi.fn(async (_series: number, _episode: number, scene: number) => rows.get(scene) ?? null),
+    listAgnesSceneGenerations: vi.fn(async () => [...rows.values()].sort(
+      (left, right) => left.sceneNumber - right.sceneNumber,
+    )),
     upsertAgnesSceneGeneration: vi.fn(async (input: UpsertAgnesSceneGenerationInput) => {
       const prior = rows.get(input.sceneNumber);
       const row = rowFrom(input, prior?.id ?? ++nextId, prior);
@@ -186,8 +194,11 @@ function mockState(sceneCount: number) {
     }),
     claimAgnesSceneSubmission: vi.fn(async (input: any, expected: number) => {
       const prior = rows.get(input.sceneNumber);
-      if ((prior?.attemptCount ?? 0) !== expected) return { claimed: false, row: prior };
-      const row = rowFrom({ ...input, status: "pending", attemptCount: expected + 1 }, prior?.id ?? ++nextId, prior);
+      if (!prior) return { claimed: false, reason: "missing", row: null };
+      if (prior.attemptCount !== expected || prior.requestDigest !== input.requestDigest) {
+        return { claimed: false, reason: "conflict", row: prior };
+      }
+      const row = rowFrom({ ...input, status: "pending", attemptCount: expected + 1 }, prior.id, prior);
       rows.set(input.sceneNumber, row);
       return { claimed: true, row };
     }),
@@ -307,22 +318,300 @@ describe("three-phase Agnes scene workflow", () => {
     expect(resolveStatusRequestIntervalMs(undefined, 45_000)).toBe(45_000);
   });
 
+  it("returns repair_required from every Agnes phase for a typed invalid-script preflight", async () => {
+    const { state } = mockState(1);
+    const contractError = new ProductionScriptContractError({
+      pass: false,
+      sceneCount: 31,
+      totalSpokenWords: 620,
+      issues: Array.from({ length: 20 }, (_unused, index) => `Issue ${index + 1}`),
+    });
+    state.assertEpisodeAudioReady.mockRejectedValue(contractError);
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tools = buildAgnesSceneVideoTools(state as never, { client });
+
+    for (const [index, phase] of ["submit", "verify", "download"].entries()) {
+      const result = JSON.parse(await (tools[index] as any).func({
+        seriesId: 7,
+        episodeNumber: 2,
+      }));
+      expect(result).toMatchObject({
+        status: "repair_required",
+        phase,
+        stopRun: false,
+        scriptValidation: {
+          issueCount: 20,
+          omittedIssueCount: 8,
+          canReplaceScript: true,
+          agnesSubmissionStarted: false,
+        },
+      });
+      expect(result.scriptValidation.issues).toHaveLength(12);
+    }
+    expect(client.submitVideo).not.toHaveBeenCalled();
+    expect(client.retrieveVideo).not.toHaveBeenCalled();
+    expect(client.downloadCompletedVideo).not.toHaveBeenCalled();
+  });
+
+  it("returns repair_blocked when an invalid script already has durable Agnes work", async () => {
+    const { state } = mockState(1);
+    state.assertEpisodeAudioReady.mockRejectedValue(new ProductionScriptContractError({
+      pass: false,
+      sceneCount: 31,
+      totalSpokenWords: 620,
+      issues: ["Scene count 31 is below the production minimum of 40."],
+    }));
+    state.listAgnesSceneGenerations.mockResolvedValue([{
+      status: "queued",
+      attemptCount: 1,
+      providerTaskId: "agnes-task-1",
+      providerReceipt: { video_id: "agnes-task-1", status: "queued" },
+      submittedAt: "2026-09-05T10:00:00.000Z",
+    }] as any);
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, { client });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status: "repair_blocked",
+      phase: "submit",
+      stopRun: true,
+      scriptValidation: {
+        canReplaceScript: false,
+        agnesSubmissionStarted: true,
+        startedAssetCount: 1,
+      },
+    });
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { started: false, status: "audio_repair_required", stopRun: false },
+    { started: true, status: "audio_repair_blocked", stopRun: true },
+  ])("returns $status for typed local audio drift with started=$started", async ({
+    started,
+    status,
+    stopRun,
+  }) => {
+    const { state } = mockState(1);
+    state.assertEpisodeAudioReady.mockRejectedValue(new EpisodeAudioReadinessError({
+      reason: "artifact_missing_or_stale",
+      sceneNumber: 1,
+      message: "Scene 1 narration is missing.",
+    }));
+    if (started) {
+      state.listAgnesSceneGenerations.mockResolvedValue([{
+        status: "queued",
+        attemptCount: 1,
+        providerTaskId: "task-1",
+        providerReceipt: { video_id: "task-1" },
+        submittedAt: "2026-09-05T10:00:00.000Z",
+      }] as any);
+    }
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, { client });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status,
+      phase: "submit",
+      stopRun,
+      audioValidation: {
+        reason: "artifact_missing_or_stale",
+        sceneNumber: 1,
+      },
+      startedAssetCount: started ? 1 : 0,
+    });
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it("defers Agnes cleanly while another narration or key-art writer owns the episode lease", async () => {
+    const { state } = mockState(1);
+    state.getEpisodeAudioRevisionForAgnes.mockRejectedValue(
+      new EpisodeAudioMutationInProgressError(2_147_483_647, 9_999_999),
+    );
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, { client });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status: "audio_mutation_deferred",
+      phase: "submit",
+      stopRun: true,
+      audioValidation: {
+        status: "mutation_deferred",
+        reason: "mutation_in_progress",
+        sceneNumber: 2_147_483_647,
+      },
+    });
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it("blocks missing key-art audio before mutating it when an Agnes receipt exists", async () => {
+    const { state } = mockState(1);
+    state.listAgnesSceneGenerations.mockResolvedValue([{
+      status: "queued",
+      attemptCount: 1,
+      providerTaskId: "task-1",
+      providerReceipt: { video_id: "task-1" },
+      submittedAt: "2026-09-05T10:00:00.000Z",
+    }] as any);
+    state.assertEpisodeKeyArtAudioReady.mockRejectedValue(
+      new EpisodeAudioReadinessError({
+        reason: "artifact_missing_or_stale",
+        assetKind: "series_key_art",
+        message: "Series title audio is missing.",
+      }),
+    );
+    const ensureKeyArtAudioAssets = vi.fn();
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      ensureKeyArtAudioAssets,
+    });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status: "audio_repair_blocked",
+      stopRun: true,
+      audioValidation: {
+        reason: "artifact_missing_or_stale",
+        assetKind: "series_key_art",
+      },
+      startedAssetCount: 1,
+    });
+    expect(ensureKeyArtAudioAssets).not.toHaveBeenCalled();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it("does not swallow unrelated audio preflight errors", async () => {
+    const { state } = mockState(1);
+    state.assertEpisodeAudioReady.mockRejectedValue(new Error("scene 1 narration WAV is missing"));
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client: {
+        submitVideo: vi.fn(),
+        retrieveVideo: vi.fn(),
+        downloadCompletedVideo: vi.fn(),
+      },
+    });
+
+    await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
+      .rejects.toThrow("scene 1 narration WAV is missing");
+  });
+
+  it("rejects a preparation snapshot when narration audio changes during media reads", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state } = mockState(1);
+    state.getEpisodeAudioRevisionForAgnes
+      .mockResolvedValueOnce(8)
+      .mockResolvedValueOnce(9);
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+
+    await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
+      .rejects.toThrow("changed during Agnes preparation (revision 8 -> 9)");
+    expect(state.claimAgnesSceneSubmission).not.toHaveBeenCalled();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it("binds every outbound claim to the audio revision rechecked after preparation", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state } = mockState(1);
+    state.getEpisodeAudioRevisionForAgnes.mockResolvedValue(17);
+    const client = {
+      submitVideo: vi.fn(async () => task("revision-bound", "queued")),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+
+    await (tool as any).func({ seriesId: 7, episodeNumber: 2 });
+
+    expect(state.getEpisodeAudioRevisionForAgnes).toHaveBeenCalledTimes(2);
+    expect(state.claimAgnesSceneSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedEpisodeAudioRevision: 17 }),
+      0,
+    );
+    expect(client.submitVideo).toHaveBeenCalledOnce();
+  });
+
   it("submits both key-art videos by default before the numbered scene manifest", async () => {
     await addAudioFiles(outputDir, 1);
     const { state, rows } = mockState(1);
+    // Simulate ensureKeyArtAudioAssets committing revision 1 after the initial
+    // stable snapshot at revision 0.
+    state.getEpisodeAudioRevisionForAgnes
+      .mockResolvedValueOnce(0)
+      .mockResolvedValue(1);
+    const roster = [
+      { name: "Pip the Ant", description: "A small red ant." },
+      { name: "Bobo the Backpack", description: "A friendly blue talking backpack." },
+    ];
+    const approvedSheets = new Map<string, { approvedAt: string; generationPrompt: string }>([[
+      "Pip the Ant",
+      {
+        approvedAt: "2026-09-05T00:00:00.000Z",
+        generationPrompt: "tiny ruby-red ant with six legs, bright eyes, and one yellow backpack",
+      },
+    ]]);
     Object.assign(state, {
       getSeriesInfo: vi.fn(async () => ({
         conceptName: "  Tiny Heroes Club  ",
         episodeFormula: "Small friends solve gentle problems together.",
-        charactersJson: [{ name: "Pip the Ant", description: "A small red ant." }],
+        charactersJson: roster,
       })),
-      getSeriesCharacters: vi.fn(async () => [{ name: "Pip the Ant", description: "A small red ant." }]),
-      getCharacterSheet: vi.fn(async () => ({
-        approvedAt: "2026-09-05T00:00:00.000Z",
-        generationPrompt: "tiny ruby-red ant with six legs, bright eyes, and one yellow backpack",
-      })),
+      getSeriesCharacters: vi.fn(async () => roster),
+      getCharacterSheet: vi.fn(async (_seriesId: number, name: string) => approvedSheets.get(name) ?? null),
+    });
+    const ensureCompleteRoster = vi.fn(async ({ seriesId }: { seriesId: number }) => {
+      approvedSheets.set("Bobo the Backpack", {
+        approvedAt: "2026-09-06T00:00:00.000Z",
+        generationPrompt: "friendly cobalt-blue backpack, amber eyes, yellow zipper. Always same colors.",
+      });
+      return {
+        seriesId,
+        rosterCount: 2,
+        generatedCount: 1,
+        reusedCount: 1,
+        characters: [],
+      };
     });
     const ensureKeyArtAudioAssets = vi.fn(async () => {
+      expect(approvedSheets.has("Bobo the Backpack")).toBe(true);
       const seriesPaths = agnesKeyArtPaths({ outputDir, seriesId: 7, episodeNumber: 2, kind: "series" });
       const episodePaths = agnesKeyArtPaths({ outputDir, seriesId: 7, episodeNumber: 2, kind: "episode" });
       await Promise.all([
@@ -355,7 +644,10 @@ describe("three-phase Agnes scene workflow", () => {
     });
     let submitted = 0;
     const client = {
-      submitVideo: vi.fn(async () => task(`title-or-scene-${++submitted}`, "queued")),
+      submitVideo: vi.fn(async () => {
+        expect(ensureCompleteRoster).toHaveBeenCalledOnce();
+        return task(`title-or-scene-${++submitted}`, "queued");
+      }),
       retrieveVideo: vi.fn(),
       downloadCompletedVideo: vi.fn(),
     };
@@ -364,6 +656,7 @@ describe("three-phase Agnes scene workflow", () => {
       submissionIntervalMs: 0,
       statusRequestIntervalMs: 0,
       ensureKeyArtAudioAssets,
+      ensureSeriesCharacterSheets: ensureCompleteRoster as any,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
@@ -373,7 +666,15 @@ describe("three-phase Agnes scene workflow", () => {
     expect(result.assetCount).toBe(3);
     expect(result.keyArtCount).toBe(2);
     expect(result.sceneCount).toBe(1);
+    expect(ensureCompleteRoster).toHaveBeenCalledWith(expect.objectContaining({
+      seriesId: 7,
+      roster,
+    }));
     expect(client.submitVideo).toHaveBeenCalledTimes(3);
+    expect(state.getEpisodeAudioRevisionForAgnes).toHaveBeenCalledTimes(3);
+    expect(state.claimAgnesSceneSubmission.mock.calls.every(
+      ([input]: [any, number]) => input.expectedEpisodeAudioRevision === 1,
+    )).toBe(true);
     expect(ensureKeyArtAudioAssets).toHaveBeenCalledWith(expect.objectContaining({
       seriesTitle: "Tiny Heroes Club",
       episodeTitle: "Pip's Berry Bridge",
@@ -397,6 +698,91 @@ describe("three-phase Agnes scene workflow", () => {
       expect(prompt.split(CHARACTER_INTEGRITY_NEGATIVE_BIBLE)).toHaveLength(2);
     }
     expect([...rows.values()].every(({ seed }) => seed === 1_357_911)).toBe(true);
+  });
+
+  it("repairs the complete roster before the first Agnes provider claim", async () => {
+    const { state } = mockState(1);
+    const roster = [
+      { name: "Mia", description: "A child explorer in a teal jacket." },
+      { name: "Bobo the Backpack", description: "A friendly blue talking backpack." },
+    ];
+    Object.assign(state, {
+      getSeriesInfo: vi.fn(async () => ({
+        conceptName: "Tiny Heroes Club",
+        episodeFormula: "Small friends solve gentle problems together.",
+        charactersJson: roster,
+      })),
+      getSeriesCharacters: vi.fn(async () => roster),
+      getCharacterSheet: vi.fn(async () => null),
+    });
+    const rosterFailure = new Error("portrait provider temporarily unavailable for Bobo");
+    const ensureCompleteRoster = vi.fn(async () => { throw rosterFailure; });
+    const ensureKeyArtAudioAssets = vi.fn();
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosToolImpl(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      statusRequestIntervalMs: 0,
+      ensureSeriesCharacterSheets: ensureCompleteRoster,
+      ensureKeyArtAudioAssets,
+    });
+
+    await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
+      .rejects.toBe(rosterFailure);
+    expect(ensureCompleteRoster).toHaveBeenCalledOnce();
+    expect(ensureCompleteRoster).toHaveBeenCalledWith(expect.objectContaining({
+      seriesId: 7,
+      roster,
+    }));
+    expect(ensureKeyArtAudioAssets).not.toHaveBeenCalled();
+    expect(state.claimAgnesSceneSubmission).not.toHaveBeenCalled();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+  });
+
+  it("keeps character identity read-only after an Agnes claim exists", async () => {
+    const { state } = mockState(1);
+    state.listAgnesSceneGenerations.mockResolvedValue([{
+      status: "queued",
+      attemptCount: 1,
+      providerTaskId: "locked-task",
+      providerReceipt: { video_id: "locked-task", status: "queued" },
+      submittedAt: "2026-09-05T10:00:00.000Z",
+    }] as any);
+    const roster = [{
+      name: "Bobo the Backpack",
+      description: "A friendly blue talking backpack.",
+    }];
+    Object.assign(state, {
+      getSeriesInfo: vi.fn(async () => ({
+        conceptName: "Tiny Heroes Club",
+        episodeFormula: "Small friends solve gentle problems together.",
+        charactersJson: roster,
+      })),
+      getSeriesCharacters: vi.fn(async () => roster),
+      getCharacterSheet: vi.fn(async () => null),
+    });
+    const ensureCompleteRoster = vi.fn();
+    const client = {
+      submitVideo: vi.fn(),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildVerifyAgnesSceneVideosToolImpl(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      statusRequestIntervalMs: 0,
+      ensureSeriesCharacterSheets: ensureCompleteRoster,
+    });
+
+    await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
+      .rejects.toThrow("after Agnes submission already started");
+    expect(ensureCompleteRoster).not.toHaveBeenCalled();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+    expect(client.retrieveVideo).not.toHaveBeenCalled();
   });
 
   it("uses one persisted series seed for every scene request and reuses it after a rerun", async () => {
@@ -645,6 +1031,18 @@ describe("three-phase Agnes scene workflow", () => {
       statusRequestIntervalMs: 0,
       includeKeyArt: true,
       ensureKeyArtAudioAssets,
+      ensureSeriesCharacterSheets: vi.fn(async ({ seriesId, roster }) => ({
+        seriesId,
+        rosterCount: roster?.length ?? 0,
+        generatedCount: 0,
+        reusedCount: roster?.length ?? 0,
+        characters: (roster ?? []).map((character: { name: string }) => ({
+          name: character.name,
+          status: "already_approved" as const,
+          referenceImagePaths: { portrait: { path: `/approved/${character.name}.png` } },
+          generationPrompt: "tiny ruby-red ant with six legs, bright eyes. Always same colors.",
+        })),
+      })),
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
@@ -1097,6 +1495,79 @@ describe("three-phase Agnes scene workflow", () => {
     expect(result.awaitingAcknowledgement).toBe(0);
     expect(client.retrieveVideo).toHaveBeenCalledTimes(2);
     expect(rows.get(1)?.status).toBe("queued");
+  });
+
+  it("does not rematerialize or POST a row invalidated before the pre-claim reload", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state, rows } = mockState(1);
+    const client = {
+      submitVideo: vi.fn(async () => task("must-not-submit", "queued")),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    let reads = 0;
+    state.getAgnesSceneGeneration.mockImplementation(async (
+      _series: number,
+      _episode: number,
+      sceneNumber: number,
+    ) => {
+      reads += 1;
+      // prepareEpisode reads once, then initializeAll materializes the row.
+      // Deleting it on submitOne's read models promotion between the initial
+      // snapshot and the outbound claim.
+      if (reads === 3) rows.delete(sceneNumber);
+      return rows.get(sceneNumber) ?? null;
+    });
+    const submit = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+
+    const result = JSON.parse(await (submit as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status: "pending",
+      pending: 1,
+      missingPreparedRows: 1,
+      results: [{ status: "pending", preparedRequestMissing: true }],
+    });
+    expect(state.claimAgnesSceneSubmission).not.toHaveBeenCalled();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+    expect(rows.has(1)).toBe(false);
+    expect(state.upsertAgnesSceneGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rematerialize or POST after promotion deletes the row at claim time", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state, rows } = mockState(1);
+    const client = {
+      submitVideo: vi.fn(async () => task("must-not-submit", "queued")),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    state.claimAgnesSceneSubmission.mockImplementationOnce(async (input: any) => {
+      rows.delete(input.sceneNumber);
+      return { claimed: false, reason: "missing", row: null };
+    });
+    const submit = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+
+    const result = JSON.parse(await (submit as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({
+      status: "pending",
+      pending: 1,
+      missingPreparedRows: 1,
+      results: [{ status: "pending", preparedRequestMissing: true }],
+    });
+    expect(state.claimAgnesSceneSubmission).toHaveBeenCalledOnce();
+    expect(client.submitVideo).not.toHaveBeenCalled();
+    expect(rows.has(1)).toBe(false);
+    expect(state.upsertAgnesSceneGeneration).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a stale pre-POST claim only in a later runtime", async () => {

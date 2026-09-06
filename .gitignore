@@ -1,25 +1,10 @@
-# Dependencies
 node_modules/
-
-# Build and runtime output
 dist/
-output/
-assets/
-generated_images/
-*.log
-
-# Sensitive environment and credentials
 .env
-.env.*
-.env*.local
-!.env.example
-*.pem
-*.key
-get-youtube-token.js
-tokens.json
-client_secret*.json
-
-# System & temporary files
+output/
+assets/characters/
+assets/environments/
 .DS_Store
+get-youtube-token.js
 prompt.txt
 temp_script.json

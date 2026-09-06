@@ -24,6 +24,7 @@
     "@freetier/orchestrator": "github:RY0502/freetier-orchestrator",
     "@langchain/core": "^1.0.0",
     "@libsql/client": "^0.17.4",
+    "deepagents": "^1.12.3",
     "dotenv": "^16.4.5",
     "fluent-ffmpeg": "^2.1.3",
     "freetier-deepagent-framework": "github:RY0502/freetier-deepagent-framework",

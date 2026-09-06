@@ -53,7 +53,7 @@ describe("scenePromptService production character gate", () => {
     await expect(materializeScenePrompt({
       seriesState: state as never,
       input: baseInput,
-    })).rejects.toThrow("generate_character_sheet");
+    })).rejects.toThrow("ensure_series_character_sheets");
     expect(ensureCharacterBibleEntryMock).not.toHaveBeenCalled();
   });
 

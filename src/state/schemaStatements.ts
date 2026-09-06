@@ -41,8 +41,28 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
     uploaded_at TEXT,
     completed_at TEXT,
     completion_local_date TEXT,
+    audio_revision INTEGER NOT NULL DEFAULT 0 CHECK (audio_revision >= 0),
+    audio_mutation_token TEXT,
+    audio_mutation_scene_number INTEGER
+      CHECK (audio_mutation_scene_number IS NULL OR audio_mutation_scene_number > 0),
+    audio_mutation_expires_at_ms INTEGER
+      CHECK (audio_mutation_expires_at_ms IS NULL OR audio_mutation_expires_at_ms >= 0),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (series_id, episode_number)
+  )`,
+
+  // Invalid or partially-refined scripts live here until the production
+  // contract passes. Keeping them separate from episodes.script_json prevents
+  // resumable authoring work from becoming media-authoritative too early.
+  `CREATE TABLE IF NOT EXISTS episode_script_drafts (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    script_digest TEXT NOT NULL CHECK (length(script_digest) = 64),
+    draft_json TEXT NOT NULL,
+    validation_json TEXT
+      CHECK (validation_json IS NULL OR length(validation_json) <= 8192),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
 
   `CREATE TABLE IF NOT EXISTS character_sheets (

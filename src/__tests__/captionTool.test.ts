@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildCaptionTool } from "../tools/captionTool.js";
 
 describe("captionTool", () => {
@@ -89,5 +89,32 @@ describe("captionTool", () => {
     expect(parsed).not.toHaveProperty("transitionSeconds");
     expect(parsed).not.toHaveProperty("seriesKeyArtAudioPath");
     expect(parsed).not.toHaveProperty("episodeKeyArtAudioPath");
+  });
+
+  it("rebuilds production captions from durable exact-text WAV timing using only episode identity", async () => {
+    const getEpisodeByNumber = vi.fn().mockResolvedValue({ id: 71 });
+    const getEpisodeNarrationAudioManifest = vi.fn().mockResolvedValue({
+      totalDurationSeconds: 7,
+      scenes: [
+        { sceneNumber: 1, narrationText: "[warm] Hello, meadow!", durationSeconds: 4 },
+        { sceneNumber: 2, narrationText: "Everyone smiles.", durationSeconds: 3 },
+      ],
+    });
+    const tool = buildCaptionTool({
+      getEpisodeByNumber,
+      getEpisodeNarrationAudioManifest,
+    } as any);
+    const schema = (tool as any).schema;
+
+    expect(Object.keys(schema.shape)).toEqual(["seriesId", "episodeNumber"]);
+    const result = JSON.parse(await (tool as any).func({ seriesId: 99, episodeNumber: 2 }));
+
+    expect(getEpisodeByNumber).toHaveBeenCalledWith(99, 2);
+    expect(getEpisodeNarrationAudioManifest).toHaveBeenCalledWith(71);
+    expect(result).toMatchObject({
+      sceneCount: 2,
+      totalDurationSeconds: 7,
+      initialOffsetSeconds: 0,
+    });
   });
 });

@@ -24,17 +24,34 @@ import {
   CHARACTER_INTEGRITY_NEGATIVE_BIBLE,
 } from "../promptBuilder.js";
 import {
+  AgnesKeyArtAudioMutationDeferredError,
   ensureAgnesKeyArtAudioAssets,
   type AgnesKeyArtAudioAsset,
 } from "../services/agnesKeyArtService.js";
 import { canonicalizeKeyArtTitle } from "../services/keyArtTitleContract.js";
+import {
+  ensureSeriesCharacterSheets,
+  type EnsureSeriesCharacterSheetsResult,
+} from "../services/characterSheetService.js";
+import {
+  hasStartedAgnesSubmission,
+  ProductionScriptContractError,
+  productionScriptReadiness,
+} from "../services/productionScriptContract.js";
 import { materializeScenePrompt, type ScenePromptInput } from "../services/scenePromptService.js";
-import type { AgnesSceneGenerationRow, SeriesState } from "../state/seriesState.js";
+import {
+  canonicalEpisodeScriptJson,
+  EpisodeAudioMutationInProgressError,
+  EpisodeAudioReadinessError,
+  type AgnesSceneGenerationRow,
+  type SeriesState,
+} from "../state/seriesState.js";
 import {
   createNarrationAudioRequestDigest,
   narrationAudioMetadataPath,
   readNarrationAudioMetadata,
 } from "./ttsTool.js";
+import type { CustomStateStore } from "freetier-deepagent-framework";
 
 const MIN_VIDEO_BYTES = 1_024;
 const OUTPUT_FPS = 30;
@@ -98,6 +115,10 @@ interface PreparedScene {
   providerSeconds: number;
   providerPrompt: string;
   requestDigest: string;
+  /** One shared canonical string reference captured before any row is prepared. */
+  expectedEpisodeScriptJson: string;
+  /** Episode-wide narration revision captured and rechecked around media reads. */
+  expectedEpisodeAudioRevision: number;
   seed: number;
   normalizedPath: string;
   rawPath: string;
@@ -132,6 +153,11 @@ export interface AgnesSceneVideoToolOptions {
   includeKeyArt?: boolean;
   /** Injectable title-audio preparation used by focused tests. */
   ensureKeyArtAudioAssets?: typeof ensureAgnesKeyArtAudioAssets;
+  /** Durable portrait checkpoint dependencies used by the roster preflight. */
+  characterSheetCustomState?: CustomStateStore;
+  characterSheetPromptHash?: string;
+  /** Injectable complete-roster operation used by focused tests. */
+  ensureSeriesCharacterSheets?: typeof ensureSeriesCharacterSheets;
 }
 
 interface WorkflowRuntime {
@@ -154,6 +180,15 @@ interface WorkflowRuntime {
   selectedSceneNumbers?: readonly number[];
   includeKeyArt: boolean;
   ensureKeyArtAudioAssets: typeof ensureAgnesKeyArtAudioAssets;
+  ensureSeriesCharacterSheets: (params: {
+    seriesState: SeriesState;
+    seriesId: number;
+    roster?: readonly { name: string; description: string }[];
+    customState?: CustomStateStore;
+    promptHash?: string;
+  }) => Promise<EnsureSeriesCharacterSheetsResult>;
+  characterSheetCustomState?: CustomStateStore;
+  characterSheetPromptHash?: string;
 }
 
 interface AgnesAccountRuntime {
@@ -969,6 +1004,13 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     haltedSubmissions: new Set<string>(),
     includeKeyArt: options.includeKeyArt ?? true,
     ensureKeyArtAudioAssets: options.ensureKeyArtAudioAssets ?? ensureAgnesKeyArtAudioAssets,
+    ensureSeriesCharacterSheets: options.ensureSeriesCharacterSheets ?? ensureSeriesCharacterSheets,
+    ...(options.characterSheetCustomState
+      ? { characterSheetCustomState: options.characterSheetCustomState }
+      : {}),
+    ...(options.characterSheetPromptHash
+      ? { characterSheetPromptHash: options.characterSheetPromptHash }
+      : {}),
     ...(options.sceneNumbers ? { selectedSceneNumbers: [...options.sceneNumbers] } : {}),
   };
 }
@@ -976,8 +1018,18 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
 async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<PreparedScene[]> {
   const episode = await runtime.seriesState.getEpisodeByNumber(seriesId, episodeNumber);
   if (!episode) throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}`);
+  let expectedEpisodeAudioRevision = await runtime.seriesState.getEpisodeAudioRevisionForAgnes(
+    seriesId,
+    episodeNumber,
+  );
   await runtime.seriesState.assertEpisodeAudioReady(episode.id);
+  const existingRows = await runtime.seriesState.listAgnesSceneGenerations(seriesId, episodeNumber);
+  const agnesSubmissionStarted = existingRows.some(hasStartedAgnesSubmission);
+  if (agnesSubmissionStarted) {
+    await runtime.seriesState.assertEpisodeKeyArtAudioReady(seriesId, episodeNumber);
+  }
   const seriesSeed = await runtime.seriesState.getOrCreateSeriesAgnesSeed(seriesId, CONFIG.agnesSeed);
+  const expectedEpisodeScriptJson = canonicalEpisodeScriptJson(episode.scriptJson);
   const script = parseEpisodeScript(episode.scriptJson);
   const selected = runtime.selectedSceneNumbers ? new Set(runtime.selectedSceneNumbers) : undefined;
   const scriptedScenes = selected ? script.scenes.filter((scene) => selected.has(scene.sceneNumber)) : script.scenes;
@@ -999,13 +1051,19 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
     if (characters.length === 0) {
       throw new Error(`Series ${seriesId} has no stored characters for its key-art video.`);
     }
+
+    // Read-only fail-closed gate. Only runSubmit may repair the roster, and it
+    // does so before the first durable provider claim. Verification/download
+    // must never mutate a character identity after submission has begun.
     const lockedCharacters: Array<{ name: string; description: string }> = [];
     for (const character of characters) {
       const sheet = await runtime.seriesState.getCharacterSheet(seriesId, character.name);
       if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
         throw new Error(
-          `Approved character sheet for "${character.name}" is missing. Generate the complete roster ` +
-          "before either key-art video is submitted.",
+          `Approved character sheet for "${character.name}" is missing` +
+          (agnesSubmissionStarted
+            ? " after Agnes submission already started, so its locked identity cannot be regenerated."
+            : " before Agnes submission. Run the submit phase to repair the complete roster before any provider request."),
         );
       }
       lockedCharacters.push({ name: character.name, description: sheet.generationPrompt.trim() });
@@ -1021,8 +1079,21 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       options: {
         outputDir: CONFIG.outputDir,
         probeDurationSeconds: runtime.probeMediaDuration,
+        audioMutationState: runtime.seriesState,
+        allowMutation: !agnesSubmissionStarted,
       },
     });
+    // Title generation, when needed, commits the same episode-wide revision as
+    // narration TTS. Bind all prepared key-art and scene requests to that new
+    // stable snapshot rather than the pre-generation revision.
+    expectedEpisodeAudioRevision = await runtime.seriesState.getEpisodeAudioRevisionForAgnes(
+      seriesId,
+      episodeNumber,
+    );
+    // Re-read the exact published pair inside the new revision snapshot. This
+    // also closes the narrow case where an overlapping owner rolled back after
+    // an optimistic reusable-file read but before its lease was observed.
+    await runtime.seriesState.assertEpisodeKeyArtAudioReady(seriesId, episodeNumber);
 
     const appearanceCounts = new Map<string, number>();
     for (const scene of script.scenes) {
@@ -1106,6 +1177,8 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
         providerSeconds,
         providerPrompt: binding.providerPrompt,
         requestDigest: binding.requestDigest,
+        expectedEpisodeScriptJson,
+        expectedEpisodeAudioRevision,
         seed: binding.seed,
         normalizedPath: spec.audio.normalizedVideoPath,
         rawPath: path.join(spec.audio.rawDirectory, `${spec.audio.stem}_${prefix}.mp4`),
@@ -1176,6 +1249,8 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       providerSeconds: providerSeconds!,
       providerPrompt: binding.providerPrompt,
       requestDigest: binding.requestDigest,
+      expectedEpisodeScriptJson,
+      expectedEpisodeAudioRevision,
       seed: binding.seed,
       normalizedPath: path.join(variantDir, "scenes", `${stem}.mp4`),
       rawPath: path.join(variantDir, "raw", `${stem}_${prefix}.mp4`),
@@ -1189,21 +1264,50 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       + durationErrors.join(" | "),
     );
   }
+  const verifiedEpisodeAudioRevision = await runtime.seriesState.getEpisodeAudioRevisionForAgnes(
+    seriesId,
+    episodeNumber,
+  );
+  if (verifiedEpisodeAudioRevision !== expectedEpisodeAudioRevision) {
+    throw new Error(
+      `Episode narration audio changed during Agnes preparation (revision ` +
+      `${expectedEpisodeAudioRevision} -> ${verifiedEpisodeAudioRevision}); rerun against the stable audio set.`,
+    );
+  }
   return prepared;
 }
 
+type LoadedAgnesSceneState = {
+  row: AgnesSceneGenerationRow;
+  envelope: AgnesSceneReceiptEnvelope;
+};
+
 async function loadState(
   runtime: WorkflowRuntime, scene: PreparedScene, seriesId: number, episodeNumber: number,
-): Promise<{ row: AgnesSceneGenerationRow; envelope: AgnesSceneReceiptEnvelope }> {
+  materializeMissing?: true,
+): Promise<LoadedAgnesSceneState>;
+async function loadState(
+  runtime: WorkflowRuntime, scene: PreparedScene, seriesId: number, episodeNumber: number,
+  materializeMissing: false,
+): Promise<LoadedAgnesSceneState | null>;
+async function loadState(
+  runtime: WorkflowRuntime, scene: PreparedScene, seriesId: number, episodeNumber: number,
+  materializeMissing = true,
+): Promise<LoadedAgnesSceneState | null> {
   const sceneNumber = scene.input.sceneNumber;
   let row = await runtime.seriesState.getAgnesSceneGeneration(seriesId, episodeNumber, sceneNumber, "text");
   if (!row) {
+    if (!materializeMissing) return null;
     row = await runtime.seriesState.upsertAgnesSceneGeneration({
       seriesId, episodeNumber, sceneNumber, variant: "text", status: "pending",
       prompt: scene.providerPrompt, requestDigest: scene.requestDigest, seed: scene.seed,
       requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
     });
   } else if (row.requestDigest !== scene.requestDigest) {
+    // A non-materializing reload runs only after this invocation's initial
+    // preparation snapshot. A mismatch means another invocation changed the
+    // script/request, so this stale invocation must not reset it backwards.
+    if (!materializeMissing) return null;
     const safety = receiptSafety(row.providerReceipt);
     if (safety.accepted || safety.unresolved || row.providerTaskId) {
       throw new Error(`Stored Agnes receipt for scene ${sceneNumber} belongs to a different request and may be accepted.`);
@@ -1339,7 +1443,15 @@ async function submitOne(
   preferredAccountIndex = 0,
 ): Promise<Record<string, unknown>> {
   const logicalKey = logicalSubmissionKey(seriesId, episodeNumber, scene);
-  let state = await loadState(runtime, scene, seriesId, episodeNumber);
+  let state = await loadState(runtime, scene, seriesId, episodeNumber, false);
+  if (!state) {
+    return {
+      sceneNumber: scene.input.sceneNumber,
+      status: "pending",
+      preparedRequestMissing: true,
+      error: "The prepared Agnes request changed before submission; rerun to prepare the current script.",
+    };
+  }
   let recovered = await recoverStaleSubmittingAttempt(
     runtime, scene, seriesId, episodeNumber, state,
   );
@@ -1420,7 +1532,19 @@ async function submitOne(
           },
         };
       }
-      state = await loadState(runtime, scene, seriesId, episodeNumber);
+      const refreshedState = await loadState(runtime, scene, seriesId, episodeNumber, false);
+      if (!refreshedState) {
+        return {
+          failover: false,
+          result: {
+            sceneNumber: scene.input.sceneNumber,
+            status: "pending",
+            preparedRequestMissing: true,
+            error: "The prepared Agnes request changed before submission; rerun to prepare the current script.",
+          },
+        };
+      }
+      state = refreshedState;
       recovered = await recoverStaleSubmittingAttempt(runtime, scene, seriesId, episodeNumber, state);
       state = recovered;
       recoveryDiagnostic ??= recovered.diagnostic;
@@ -1473,6 +1597,8 @@ async function submitOne(
       const claim = await runtime.seriesState.claimAgnesSceneSubmission({
         seriesId, episodeNumber, sceneNumber: scene.input.sceneNumber, variant: "text",
         prompt: scene.providerPrompt, requestDigest: scene.requestDigest, seed: scene.seed,
+        expectedEpisodeScriptJson: scene.expectedEpisodeScriptJson,
+        expectedEpisodeAudioRevision: scene.expectedEpisodeAudioRevision,
         requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
         providerReceipt: cloneEnvelope(envelope),
       }, row.attemptCount);
@@ -1482,7 +1608,10 @@ async function submitOne(
           result: {
             sceneNumber: scene.input.sceneNumber,
             status: "pending",
-            error: "Another invocation claimed this submission.",
+            ...(claim.reason === "missing" ? { preparedRequestMissing: true } : {}),
+            error: claim.reason === "missing"
+              ? "The prepared Agnes request changed before it could be claimed; rerun to prepare the current script."
+              : "Another invocation claimed or changed this submission.",
           },
         };
       }
@@ -1635,7 +1764,39 @@ async function initializeAll(
   return result;
 }
 
+/**
+ * Repairs a partial portrait phase only before this episode has any durable
+ * Agnes side effect. `prepareEpisode` remains read-only so verify/download can
+ * never change an identity that an accepted prompt may already reference.
+ */
+async function ensureRosterBeforeFirstAgnesClaim(
+  runtime: WorkflowRuntime,
+  seriesId: number,
+  episodeNumber: number,
+): Promise<void> {
+  if (!runtime.includeKeyArt) return;
+  const existingRows = await runtime.seriesState.listAgnesSceneGenerations(seriesId, episodeNumber);
+  if (existingRows.some(hasStartedAgnesSubmission)) return;
+
+  const seriesInfo = await runtime.seriesState.getSeriesInfo(seriesId);
+  if (!seriesInfo) throw new Error(`Series ${seriesId} was not found while ensuring its character roster.`);
+  const roster = seriesInfo.charactersJson.length > 0
+    ? seriesInfo.charactersJson
+    : await runtime.seriesState.getSeriesCharacters(seriesId);
+  if (roster.length === 0) {
+    throw new Error(`Series ${seriesId} has no stored characters for its key-art video.`);
+  }
+  await runtime.ensureSeriesCharacterSheets({
+    seriesState: runtime.seriesState,
+    seriesId,
+    roster,
+    customState: runtime.characterSheetCustomState,
+    promptHash: runtime.characterSheetPromptHash,
+  });
+}
+
 async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<string> {
+  await ensureRosterBeforeFirstAgnesClaim(runtime, seriesId, episodeNumber);
   const scenes = await prepareEpisode(runtime, seriesId, episodeNumber);
   const states = await initializeAll(runtime, scenes, seriesId, episodeNumber);
   // Snapshot candidates: a retry-safe failure is never re-attempted in this invocation.
@@ -1651,10 +1812,16 @@ async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       runtime.accounts.length > 0 ? scene.manifestIndex % runtime.accounts.length : 0,
     )
   ));
-  const finalStates = await Promise.all(scenes.map(async (scene) => ({
-    scene,
-    ...await loadState(runtime, scene, seriesId, episodeNumber),
-  })));
+  // This is a read-only reconciliation pass. Script promotion may have
+  // invalidated a prepared row while submissions were waiting for an account
+  // gate; recreating it here would resurrect stale work after we safely skipped
+  // the POST.
+  const finalSnapshots = await Promise.all(scenes.map(async (scene) => {
+    const state = await loadState(runtime, scene, seriesId, episodeNumber, false);
+    return state ? { scene, ...state } : null;
+  }));
+  const finalStates = finalSnapshots.filter((state): state is NonNullable<typeof state> => state !== null);
+  const missingPreparedRows = finalSnapshots.length - finalStates.length;
   const finalClassifications = finalStates.map(({ row, envelope }) => {
     const task = activeTask(envelope);
     if (task?.status === "queued" || task?.status === "in_progress" || task?.status === "completed") {
@@ -1674,7 +1841,7 @@ async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumb
   const pendingRows = finalClassifications.filter((value) => value === "pending").length;
   const unresolvedClaims = finalClassifications.filter((value) => value === "unresolved_claim").length;
   const failedRows = finalClassifications.filter((value) => value === "failed").length;
-  const pending = pendingRows + awaitingAcknowledgement + unresolvedClaims;
+  const pending = pendingRows + awaitingAcknowledgement + unresolvedClaims + missingPreparedRows;
   const failed = failedRows;
   const alreadyAcceptedCount = states.filter(({ envelope }) => {
     const task = activeTask(envelope);
@@ -1696,6 +1863,7 @@ async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumb
     providerCompleted,
     acknowledged,
     awaitingAcknowledgement,
+    missingPreparedRows,
     pending,
     failed,
     accountCount: runtime.accounts.length,
@@ -1912,14 +2080,122 @@ const toolSchema = z.object({
   episodeNumber: z.number().int().positive(),
 });
 
+type AgnesWorkflowPhase = "submit" | "verify" | "download";
+
+async function runWithScriptPreflightResult(
+  runtime: WorkflowRuntime,
+  phase: AgnesWorkflowPhase,
+  seriesId: number,
+  episodeNumber: number,
+  operation: () => Promise<string>,
+): Promise<string> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof EpisodeAudioMutationInProgressError) {
+      return JSON.stringify({
+        status: "audio_mutation_deferred",
+        phase,
+        stopRun: true,
+        seriesId,
+        episodeNumber,
+        audioValidation: {
+          status: "mutation_deferred",
+          reason: "mutation_in_progress",
+          sceneNumber: error.sceneNumber,
+          leaseExpiresAtMs: error.leaseExpiresAtMs,
+        },
+        startedAssetCount: 0,
+        note: "Another audio writer owns the episode lease. End this run and retry from persisted state.",
+      });
+    }
+    if (error instanceof AgnesKeyArtAudioMutationDeferredError) {
+      const locked = error.reason === "agnes_started"
+        || error.reason === "mutation_disabled"
+        || error.reason === "episode_complete";
+      return JSON.stringify({
+        status: locked ? "audio_repair_blocked" : "audio_mutation_deferred",
+        phase,
+        stopRun: true,
+        seriesId,
+        episodeNumber,
+        audioValidation: {
+          status: locked ? "repair_blocked" : "mutation_deferred",
+          reason: error.reason,
+          assetKind: "key_art",
+        },
+        startedAssetCount: error.startedAssetCount,
+        note: locked
+          ? "Key-art title audio is immutable after an Agnes claim or episode completion. Stop without regenerating it."
+          : "Another audio writer owns or fenced the episode lease. End this run and retry from persisted state.",
+      });
+    }
+    if (error instanceof EpisodeAudioReadinessError) {
+      const agnesRows = await runtime.seriesState.listAgnesSceneGenerations(
+        seriesId,
+        episodeNumber,
+      );
+      const startedAssetCount = agnesRows.filter(hasStartedAgnesSubmission).length;
+      const locked = startedAssetCount > 0;
+      return JSON.stringify({
+        status: locked ? "audio_repair_blocked" : "audio_repair_required",
+        phase,
+        stopRun: locked,
+        seriesId,
+        episodeNumber,
+        audioValidation: {
+          status: locked ? "repair_blocked" : "repair_required",
+          reason: error.reason,
+          ...(error.sceneNumber === undefined ? {} : { sceneNumber: error.sceneNumber }),
+          ...(error.assetKind === undefined ? {} : { assetKind: error.assetKind }),
+          ...(error.durationSeconds === undefined
+            ? {}
+            : { durationSeconds: error.durationSeconds }),
+          ...(error.totalDurationSeconds === undefined
+            ? {}
+            : { totalDurationSeconds: error.totalDurationSeconds }),
+        },
+        startedAssetCount,
+        note: locked
+          ? "Audio drift was detected after an Agnes claim. Stop without regenerating audio or submitting more work."
+          : "Return to the exact-text audio step, regenerate/reuse every scene WAV, and submit complete timing evidence before retrying Agnes.",
+      });
+    }
+    if (!(error instanceof ProductionScriptContractError)) throw error;
+
+    const agnesRows = await runtime.seriesState.listAgnesSceneGenerations(
+      seriesId,
+      episodeNumber,
+    );
+    const scriptValidation = productionScriptReadiness(error.inspection, agnesRows);
+    return JSON.stringify({
+      status: scriptValidation.status,
+      phase,
+      stopRun: scriptValidation.status === "repair_blocked",
+      seriesId,
+      episodeNumber,
+      scriptValidation,
+      note: scriptValidation.nextAction,
+    });
+  }
+}
+
 function submitTool(runtime: WorkflowRuntime): DynamicStructuredTool {
   return new DynamicStructuredTool({
     name: "submit_agnes_scene_videos",
     description:
-      "Submits both key-art title-card videos plus one text-to-video Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
-      "Only definite account rate/quota/credit limits fail over; all intents/receipts are durable, and queue-full or ambiguous failures stay pending until another invocation.",
+      "Before the first durable provider claim, deterministically ensures and verifies the complete stored character-sheet roster; after claims begin, preserves the locked identities and fails closed if one is missing. Then submits both key-art title-card videos plus one text-to-video Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
+      "Only definite account rate/quota/credit limits fail over; all intents/receipts are durable, and queue-full or ambiguous failures stay pending until another invocation. " +
+      "An invalid persisted script returns repair_required before any provider call, or repair_blocked when durable submission evidence already exists. " +
+      "Typed local narration drift returns audio_repair_required before any provider call.",
     schema: toolSchema,
-    func: ({ seriesId, episodeNumber }) => runSubmit(runtime, seriesId, episodeNumber),
+    func: ({ seriesId, episodeNumber }) => runWithScriptPreflightResult(
+      runtime,
+      "submit",
+      seriesId,
+      episodeNumber,
+      () => runSubmit(runtime, seriesId, episodeNumber),
+    ),
   });
 }
 
@@ -1929,7 +2205,13 @@ function verifyTool(runtime: WorkflowRuntime): DynamicStructuredTool {
     description:
       "Resubmits only safe pending Agnes key-art/scene videos and then ends that run, or refreshes each accepted receipt with its exact submitting account and reports when all required videos are provider-complete.",
     schema: toolSchema,
-    func: ({ seriesId, episodeNumber }) => runVerify(runtime, seriesId, episodeNumber),
+    func: ({ seriesId, episodeNumber }) => runWithScriptPreflightResult(
+      runtime,
+      "verify",
+      seriesId,
+      episodeNumber,
+      () => runVerify(runtime, seriesId, episodeNumber),
+    ),
   });
 }
 
@@ -1939,7 +2221,13 @@ function downloadTool(runtime: WorkflowRuntime): DynamicStructuredTool {
     description:
       "Downloads only after both key-art videos and all Agnes scenes are provider-complete, removes provider audio, and exact-normalizes each video to its matching Groq audio duration.",
     schema: toolSchema,
-    func: ({ seriesId, episodeNumber }) => runDownload(runtime, seriesId, episodeNumber),
+    func: ({ seriesId, episodeNumber }) => runWithScriptPreflightResult(
+      runtime,
+      "download",
+      seriesId,
+      episodeNumber,
+      () => runDownload(runtime, seriesId, episodeNumber),
+    ),
   });
 }
 
@@ -1981,6 +2269,15 @@ export function buildAgnesSceneVideoTool(
     name: "generate_agnes_scene_videos",
     description: "Compatibility wrapper that performs only the durable Agnes submission phase.",
     schema: toolSchema,
-    func: ({ seriesId, episodeNumber }) => runSubmit(createRuntime(seriesState, options), seriesId, episodeNumber),
+    func: ({ seriesId, episodeNumber }) => {
+      const runtime = createRuntime(seriesState, options);
+      return runWithScriptPreflightResult(
+        runtime,
+        "submit",
+        seriesId,
+        episodeNumber,
+        () => runSubmit(runtime, seriesId, episodeNumber),
+      );
+    },
   });
 }

@@ -1,5 +1,7 @@
 import { DeepAgentRunner, DatabaseClient, CustomStateStore, hashUserPrompt, CONFIG as FRAMEWORK_CONFIG } from "freetier-deepagent-framework";
+import path from "node:path";
 import { CONFIG, validateProjectConfig } from "../src/config.js";
+import { installDeepAgentBackend } from "../src/services/deepAgentBackend.js";
 import { SeriesState } from "../src/state/seriesState.js";
 import { buildCharacterSheetTool } from "../src/tools/characterSheetTool.js";
 
@@ -78,6 +80,10 @@ ${characterNames.map(name => `- ${name}: ${characterDescriptions[name] || "No de
 `,
       recursionLimit: 100,
     });
+    installDeepAgentBackend(
+      runner,
+      path.join(CONFIG.outputDir, "_deep_agent_state"),
+    );
 
     const prompt = `Regenerate character sheets for the following characters in series ${seriesId}: ${characterNames.join(", ")}. Call generate_character_sheet for each one. Use the character descriptions provided in the system prompt.`;
     const result = await runner.run(prompt);

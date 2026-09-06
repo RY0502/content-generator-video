@@ -85,8 +85,8 @@ export async function materializeScenePrompt(params: {
       const sheet = await seriesState.getCharacterSheet(input.seriesId, characterName);
       if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
         throw new Error(
-          `Approved character sheet for "${characterName}" is missing. Call generate_character_sheet for ` +
-          "the complete fixed roster before Agnes submission; scene-video prompting never generates images.",
+          `Approved character sheet for "${characterName}" is missing. Call ensure_series_character_sheets ` +
+          "before the first Agnes submission; scene-video prompting never generates images.",
         );
       }
       generationPrompt = sheet.generationPrompt.trim();

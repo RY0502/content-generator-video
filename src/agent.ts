@@ -8,19 +8,36 @@ import {
   hashUserPrompt,
   validateConfig,
 } from "freetier-deepagent-framework";
-import { validateProjectConfig } from "./config.js";
+import { CONFIG, validateProjectConfig } from "./config.js";
+import { AgentProgressCallback } from "./services/agentProgressCallback.js";
+import { installDeepAgentBackend } from "./services/deepAgentBackend.js";
+import {
+  buildEndEpisodeInvocationTool,
+  guardTerminalEpisodeInvocationReceipts,
+} from "./services/episodeInvocationBoundary.js";
+import {
+  assertProductionHarnessConfigured,
+  configureProductionHarness,
+} from "./services/productionHarness.js";
+import {
+  assertNvidiaDeepAgentProfileConfigured,
+  configureNvidiaDeepAgentProfile,
+} from "./services/nvidiaDeepAgentProfile.js";
 import { runWithFinalizer } from "./services/runLifecycle.js";
 import { selectiveCleanupNeon } from "./state/selectiveCleanup.js";
 import { SeriesState } from "./state/seriesState.js";
 import { SYSTEM_PROMPT_EXTENSION } from "./systemPrompt.js";
 import { buildAgnesSceneVideoTools } from "./tools/agnesSceneVideoTool.js";
 import { buildCaptionTool } from "./tools/captionTool.js";
-import { buildCharacterSheetTool } from "./tools/characterSheetTool.js";
-import { buildScriptRefinementTool } from "./tools/scriptRefinementTool.js";
+import { buildEnsureSeriesCharacterSheetsTool } from "./tools/characterSheetTool.js";
+import { buildEpisodeAssemblyTool } from "./tools/episodeAssemblyTool.js";
+import {
+  buildEpisodeScriptChunkTool,
+  buildScriptRefinementTool,
+} from "./tools/scriptRefinementTool.js";
 import { buildSeriesStateTools } from "./tools/seriesStateTools.js";
 import { buildSoundLibraryTool } from "./tools/soundLibraryTool.js";
-import { buildTtsTool } from "./tools/ttsTool.js";
-import { buildVideoAssemblyTool } from "./tools/videoAssemblyTool.js";
+import { buildEpisodeTtsTool } from "./tools/ttsTool.js";
 import {
   buildYoutubeEpisodeMetadataTool,
   buildYoutubeSeriesMetadataTool,
@@ -31,6 +48,10 @@ import { buildYoutubeUploadTool } from "./tools/youtubeUploadTool.js";
 export async function runAgent(args: readonly string[] = process.argv.slice(2)): Promise<void> {
   validateConfig();
   validateProjectConfig();
+  configureProductionHarness();
+  assertProductionHarnessConfigured();
+  configureNvidiaDeepAgentProfile();
+  assertNvidiaDeepAgentProfileConfigured();
 
   let conceptPrompt = args.join(" ").trim();
   if (!conceptPrompt) {
@@ -105,25 +126,40 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
     const runner = new DeepAgentRunner(db, {
       extraTools: [
         ...buildSeriesStateTools(seriesState),
-        buildCharacterSheetTool(seriesState, customState, promptHash),
-        buildScriptRefinementTool(),
-        buildTtsTool(),
+        buildEnsureSeriesCharacterSheetsTool(seriesState, customState, promptHash),
+        guardTerminalEpisodeInvocationReceipts(buildEpisodeScriptChunkTool(seriesState)),
+        guardTerminalEpisodeInvocationReceipts(buildScriptRefinementTool(seriesState)),
+        buildEndEpisodeInvocationTool(),
+        buildEpisodeTtsTool({ seriesState }),
         buildSoundLibraryTool(),
-        buildCaptionTool(),
-        ...buildAgnesSceneVideoTools(seriesState, { includeKeyArt: true }),
-        buildVideoAssemblyTool(seriesState, { includeKeyArt: true }),
+        buildCaptionTool(seriesState),
+        ...buildAgnesSceneVideoTools(seriesState, {
+          includeKeyArt: true,
+          characterSheetCustomState: customState,
+          characterSheetPromptHash: promptHash,
+        }),
+        buildEpisodeAssemblyTool(seriesState, { includeKeyArt: true }),
         buildYoutubeEpisodeMetadataTool(seriesState),
         buildYoutubeSeriesMetadataTool(seriesState),
         youtubeUploadTool,
       ],
       extraSubagents: [],
       systemPromptExtension: SYSTEM_PROMPT_EXTENSION,
-      recursionLimit: 400,
+      callbacks: [new AgentProgressCallback()],
+      recursionLimit: 120,
     });
+    installDeepAgentBackend(
+      runner,
+      path.join(CONFIG.outputDir, "_deep_agent_state"),
+    );
 
     // A fresh Turso database has no domain tables. This also applies every
     // additive migration required by older installations before the agent runs.
     await seriesState.initialize();
+    console.log("[episode-agent] Starting compact production flow", {
+      conceptPromptChars: conceptPrompt.length,
+      productionContractChars: SYSTEM_PROMPT_EXTENSION.length,
+    });
     const result = await runner.run(conceptPrompt);
     await selectiveCleanupNeon({ preserveAgentRuns: true, preserveCustomState: true });
       console.log(result.finalText);

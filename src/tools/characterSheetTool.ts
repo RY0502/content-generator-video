@@ -2,7 +2,10 @@ import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import path from "node:path";
 import { SeriesState } from "../state/seriesState.js";
-import { ensureCharacterSheet } from "../services/characterSheetService.js";
+import {
+  ensureCharacterSheet,
+  ensureSeriesCharacterSheets,
+} from "../services/characterSheetService.js";
 import { startTimer, endTimer, logSheetFinalized, logStep } from "../utils/logger.js";
 import type { CustomStateStore } from "freetier-deepagent-framework";
 
@@ -46,13 +49,13 @@ export function buildCharacterSheetTool(
       characterDescription: z
         .string()
         .describe(
-          "Fixed, verbatim textual description of the character's COMPLETE appearance (species, colors, clothing, accessories) AND its complete persona/personality as established in the story (e.g. brave, shy, curious, energetic) so the rendered portrait reflects both. This becomes the locked identity used in every video prompt."
+          "The fixed verbatim roster description returned by get_or_create_series. For an existing roster character, the stored Turso description is authoritative and this value cannot change or regenerate the portrait."
         ),
     }),
     func: async ({ seriesId, characterName, characterDescription }) => {
       const timerName = `character_${characterName}`;
       startTimer(timerName);
-      logStep(`Generating character portrait for ${characterName}`);
+      logStep(`Ensuring approved character portrait for ${characterName}`);
 
       // Guard against stale/deleted series ids (e.g. DB cleanup happened but
       // a resumed run/checkpoint still references an old seriesId).
@@ -80,6 +83,50 @@ export function buildCharacterSheetTool(
         path: path.dirname(referenceImagePaths.portrait.path),
       });
       return JSON.stringify({ status, sheet: referenceImagePaths, generationPrompt });
+    },
+  });
+}
+
+/**
+ * Production roster preflight. The agent supplies only the durable series id;
+ * character names and descriptions always come from the stored series roster,
+ * so it cannot accidentally ensure only one cast member or alter an identity.
+ */
+export function buildEnsureSeriesCharacterSheetsTool(
+  seriesState: SeriesState,
+  customState?: CustomStateStore,
+  promptHash?: string,
+): DynamicStructuredTool {
+  return new DynamicStructuredTool({
+    name: "ensure_series_character_sheets",
+    description:
+      "Ensures or reuses approved portrait sheets for the complete stored main-character roster in one call. " +
+      "This is idempotent and uses canonical roster descriptions, digest-bound files, and durable checkpoints. " +
+      "Call it once for resumeAction=script_and_audio before episode authoring/audio; never loop over " +
+      "individual roster members, and do not call it after Agnes work has started.",
+    schema: z.object({
+      seriesId: z.number().int().positive().describe("The series id returned by get_or_create_series."),
+    }),
+    func: async ({ seriesId }) => {
+      const timerName = `character_roster_${seriesId}`;
+      startTimer(timerName);
+      logStep(`Ensuring approved portraits for the complete series ${seriesId} roster`);
+      const result = await ensureSeriesCharacterSheets({
+        seriesState,
+        seriesId,
+        customState,
+        promptHash,
+      });
+      endTimer(timerName);
+      return JSON.stringify({
+        status: "complete_roster_approved",
+        seriesId,
+        rosterCount: result.rosterCount,
+        generatedCount: result.generatedCount,
+        reusedCount: result.reusedCount,
+        characters: result.characters.map(({ name, status }) => ({ name, status })),
+        nextAction: "Continue the exact resumeAction returned by get_next_episode.",
+      });
     },
   });
 }

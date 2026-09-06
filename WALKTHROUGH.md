@@ -3,10 +3,11 @@
 ## 1. Resume durable series state
 
 `SeriesState.initialize()` creates the Turso schema and applies supported
-additive migrations to older databases. The agent then calls
-`get_or_create_series`; `bulk_insert_episode_list` validates and atomically
-inserts exactly 25 unique, ordered entries numbered 1 through 25 (or verifies
-the existing manifest); and `get_next_episode` returns a discriminated episode
+additive migrations to older databases. The agent first calls
+`get_or_create_series` with only the concept name and reuses the stored roster;
+the full definition is requested only for a new series. It then calls
+`bulk_insert_episode_list` with only the series id; the full 25-entry manifest
+is requested only when missing. `get_next_episode` returns a discriminated episode
 availability result before any character or media work begins.
 
 A `ready` result contains the episode to start or resume. Persisted work always
@@ -38,9 +39,15 @@ The episode is refined before persistence. The production validator requires:
 - genuinely distinct visual beats; an exact beat copied under a new scene
   number is rejected.
 
-Only a refinement result with `status: "ready"` includes `scriptJson`. The Turso
+The full draft is staged once. Later refinement calls and resume receipts carry
+only episode/revision/timing data; the production script remains in Turso. The
 save path independently enforces the same core narration manifest, so an old
-long-scene script cannot accidentally become the current production script.
+long-scene script cannot accidentally become current production state.
+
+Any script receipt marked `retryThisInvocation=false` is a hard runtime
+boundary, not merely an instruction to the model. The current invocation ends
+immediately after the durable receipt, so a `needs_reauthor` result can produce
+at most one replacement attempt per fresh run.
 
 A stored script may be replaced only before Agnes submission has begun. A
 genuine pre-submission replacement invalidates zero-attempt Agnes and assembled
@@ -50,19 +57,22 @@ whether each file is safe to reuse.
 
 ## 3. Generate exact-text narration
 
-`synthesize_narration_audio` receives one persisted scene narration and makes
-one Groq Orpheus request. It preserves the configured voice/model and vocal
-directions.
+`synthesize_episode_narration_audio(seriesId, episodeNumber)` loads the
+persisted script and processes every scene through the same one-request Groq
+Orpheus implementation in one agent tool call. It preserves the configured
+voice/model and vocal directions and prints per-scene progress.
 
 Each WAV has a JSON sidecar containing a SHA-256 request digest, measured
 duration, spoken-word count, and duration result. A matching valid pair is
 reused. A missing or mismatched sidecar causes regeneration.
+Publication is lease-fenced and token-bound: an expired worker can never roll
+back or overwrite a newer worker's committed WAV/sidecar pair.
 
-If ffprobe measures more than 12 seconds, the tool returns
-`duration_exceeded`, `readyForAgnes: false`, and `needsScriptSplit: true`. It does
-not expose a usable audio path and does not split or concatenate audio. The
-agent must split the script scene, persist the complete revised script, and run
-TTS for the affected sequential scenes.
+If ffprobe measures any WAV above 12 seconds, the batch returns
+`repair_required` with complete compact timing evidence. The narrow refiner may
+shorten only that narration; Cloudflare is tried first and NVIDIA is fallback.
+It cannot change visual or continuity fields. A rerun reuses every unchanged
+digest-bound WAV and regenerates only changed narration.
 
 The `audio` episode stage is accepted only after all exact-text WAVs are valid,
 each is at most 12 seconds, and their measured total is at least 300 seconds.
@@ -188,8 +198,8 @@ normalized_output_path = .../agnes_text/scenes/scene_NNN.mp4
 
 ## 8. Assemble one canonical episode
 
-`assemble_episode_video` accepts only the ordered narration/SFX manifest. It
-automatically resolves and prepends the canonical series and episode key-art
+`assemble_episode_video(seriesId, episodeNumber)` derives the ordered manifest
+from Turso. It automatically resolves and prepends the canonical series and episode key-art
 video/audio pairs, then resolves scene audio exclusively from canonical
 `audio/scene_NNN_narrator.wav` paths and visuals from
 `agnes_text/scenes/scene_NNN.mp4`. It checks order, Turso completion/download
@@ -199,6 +209,10 @@ exactly once, and inserts no transition padding.
 The output is `<Series>_episode_<N>_agnes_text.mp4`. Optional music and caption
 burn-in remain supported. The subscribe outro reuses the last scene frame; no
 new still image is created.
+
+If the completed output receipt committed just before a crash but the coarse
+episode stage did not, the next run validates and reuses that MP4 and proceeds
+to YouTube rather than assembling it again.
 
 ## 9. Upload and clean state
 
