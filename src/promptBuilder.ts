@@ -1,21 +1,21 @@
 /**
  * Prompt architecture for consistent children's storybook media.
  *
- * Every video-scene prompt is assembled in strict layer order. Character
+ * Every video-scene prompt is assembled in Agnes Video 2.5's recommended
+ * semantic order. Character
  * portraits are the only generated images; scene prompts feed Agnes directly.
- *   1. GLOBAL STYLE BIBLE (never changes) — illustration style, rendering,
- *      lighting, composition, and negative prompts.
- *   2. CHARACTER BIBLE (never changes per character) — locked descriptions
- *      stored as generationPrompt in the database.
- *   3. SCENE PROMPT (changes every video scene) — camera preset, environment,
- *      story moment, action, poses, emotions, props.
+ *   1. SUBJECT AND SETTING — locked character descriptions and environment.
+ *   2. ACTION AND CHANGE — one visible story beat and physical movement.
+ *   3. CAMERA — authored motion/viewpoint plus cast-compatible framing.
+ *   4. VISUAL STYLE — rendering, lighting, color, material, and atmosphere.
+ *   5. SOUND AND RHYTHM — visual-only pacing; provider audio is discarded.
+ *   6. CONSISTENCY — identity, continuity, anatomy, and temporal negatives.
  *
  * Character portraits still use their own builder but share the same
  * STYLE_BIBLE and CONSISTENCY_BLOCK so sheets and scenes look like they
  * belong to the same show.
  */
 import type { CharacterDef } from "./state/seriesState.js";
-
 export interface StylizedImageSpec {
 
   subjectDescription: string;
@@ -32,25 +32,33 @@ export interface StylizedImageSpec {
 // PART 1 — GLOBAL STYLE BIBLE  (never changes)
 // ---------------------------------------------------------------------------
 
-/** Illustration style — the single most important consistency anchor. */
+/** Visual style — the single most important series-level appearance anchor. */
 const STYLE_BIBLE =
-  "A single continuous full-bleed cinematic children's storybook animation shot — one location and one story beat. " +
   "Premium children's storybook visual design. Modern 2D animated style. " +
   "Soft painterly digital art, hand-painted appearance, matte finish. " +
   "Rounded appealing character designs, large expressive eyes, child-friendly proportions, " +
   "readable silhouettes and warm friendly body language. " +
   "Vibrant cheerful colours with natural saturation, soft global illumination. " +
   "Rich detailed environment with clear foreground, middle ground and background depth. " +
-  "16:9 landscape composition. Stable artistic style for the entire shot and across scenes. " +
+  "16:9 landscape composition. Stable artistic style for the entire shot and across scenes.";
+
+/** Character/color lock belongs in Agnes's final consistency section. */
+const CHARACTER_APPEARANCE_BIBLE =
   "CRITICAL: Every character must match their given description EXACTLY " +
-  "in every scene — same fur/skin/body colors, same eye color, same clothing, same accessories, " +
-  "same markings. Never change a character's color palette between scenes. " +
+  "in every scene — same gender presentation, hairstyle, fur/skin/body colors, eye color, clothing, accessories, " +
+  "markings, proportions, and body form. Never change a character's color palette between scenes. " +
   "Characters must wear or carry ONLY what is explicitly specified in their locked description — " +
   "never add unrequested clothing, hats, caps, sunhats, dresses, shirts, shoes, bags, satchels, or glasses.";
 
 /** Locked rendering — prevents Pixar / CGI drift. */
 const RENDERING_BIBLE =
   "No 3D. No CGI. No photorealism. No anime.";
+
+/** Video-only defects which static-image negative prompts cannot cover. */
+export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
+  "No flicker, jitter, strobing, melting, warping, temporal morphing, identity drift, color drift, " +
+  "wardrobe drift, sudden popping, teleporting, disappearing figures, discontinuous prop or background changes, " +
+  "jump cuts, unintended camera shake, looped or repeated action, or frozen holds.";
 
 /**
  * Shared character-integrity exclusions for every scene and key-art video.
@@ -66,9 +74,9 @@ export const CHARACTER_INTEGRITY_NEGATIVE_BIBLE =
 /** Negative prompt — critical constraints, stated once, at the end. */
 const NEGATIVE_BIBLE =
   "Avoid: any floating text overlays, subtitles, captions, digital UI text, character name tags, stamped titles, or watermarks; " +
-  "split panels, stacked images, collage, comic strip layout, before/after layout or duplicated frames; " +
+  "split panels, stacked views, collage, comic-strip layout, before/after layout, frame-within-frame compositions, or repeated side-by-side views; " +
   "wings or feathers on non-bird land mammals (such as winged monkeys or winged squirrels); chimera body parts; " +
-  "the same character drawn more than once; duplicate or cloned characters; duplicate living objects or companion characters; characters wearing an item while a duplicate living version is nearby; multiple copies of the same named or described individual (distinct required characters of the same species are allowed); " +
+  "the same character appearing more than once at the same time; duplicate or cloned characters; duplicate living objects or companion characters; characters wearing an item while a duplicate living version is nearby; multiple copies of the same named or described individual (distinct required characters of the same species are allowed); " +
   "gender swap, depicting girls as boys, depicting boys as girls, wrong character gender, opposite gender appearance; " +
   "floating characters, cropped bodies, missing body parts, extra or duplicated appendages beyond the character's locked species and body form, malformed limbs, deformed anatomy, bad anatomy, mutated body parts, headshots; " +
   "unrequested hats, sunhats, unrequested dresses, unrequested shirts, unrequested clothing or outfits on non-clothed characters, unrequested extra backpacks or bags; " +
@@ -312,16 +320,79 @@ function buildCreatureIdentityGuard(characterVisuals: SceneCharacterVisual[] | u
   ].filter(Boolean).join(" ");
 }
 
+function supportingEntityName(descriptor: string, index: number): string {
+  const prefix = descriptor.split(":", 1)[0]?.replace(/\s+/g, " ").trim();
+  return prefix || `Supporting entity ${index + 1}`;
+}
+
+function buildExactCastLedger(
+  characterNames: string[] | undefined,
+  characterCount: number,
+  supportingEntities: readonly string[],
+): string {
+  const mainNames = Array.from({ length: characterCount }, (_, index) => (
+    characterNames?.[index]?.replace(/\s+/g, " ").trim() || `Character ${index + 1}`
+  ));
+  const supportingNames = supportingEntities.map(supportingEntityName);
+  const names = [...mainNames, ...supportingNames];
+  if (names.length === 0) return "";
+
+  return (
+    `EXACT ON-SCREEN CAST LEDGER — ${names.length} TOTAL CHARACTER ${names.length === 1 ? "FIGURE" : "FIGURES"}, AND NO OTHERS: ` +
+    `${names.map((name) => `[${name}] × 1`).join("; ")}. ` +
+    "These are the only animate figures in the entire shot. Every later name, pronoun, role, collective label such as friends/children/group, " +
+    "or object-type alias refers only to the matching single ledger individual; it never authorizes another figure. " +
+    "The background contains no crowds, bystanders, unnamed people or animals, character-shaped reflections, portraits, statues, screens, or silhouettes."
+  );
+}
+
+function buildObjectCharacterInstanceLock(
+  characterVisuals: SceneCharacterVisual[] | undefined,
+): string {
+  const objects = (characterVisuals ?? []).filter((item) => item.visualForm === "object_character");
+  if (objects.length === 0) return "";
+
+  return (
+    "OBJECT-CHARACTER SINGLE-INSTANCE LOCK — " +
+    objects.map((item) => {
+      const name = item.name.replace(/\s+/g, " ").trim();
+      const type = item.speciesOrType?.replace(/\s+/g, " ").trim() || "object";
+      return `[${name}] × 1 is the one physical ${type}; references to ${name}, the ${type}, its body/material, or its parts all mean that same one instance`;
+    }).join(" | ") +
+    ". Each object-character occupies exactly one place and one state at a time. If carried or worn, it cannot also stand elsewhere; " +
+    "if freestanding, it cannot also be carried or worn. Do not add an ordinary duplicate of the same object type."
+  );
+}
+
+/** Keeps authored camera motion/viewpoint while preventing impossible cast crops. */
+function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number): string {
+  const authoredIntent = rawCameraAngle.replace(/\s+/g, " ").trim() || "wide establishing shot";
+  const requestedPreset = resolveCameraPreset(authoredIntent);
+  const effectivePreset = totalFigureCount >= 4
+    ? "establishing"
+    : totalFigureCount >= 2 && requestedPreset === "close"
+      ? "medium"
+      : requestedPreset;
+  const framingAdjustment = effectivePreset === requestedPreset
+    ? "Preserve that authored viewpoint, shot size, and camera movement."
+    : `Preserve its viewpoint and movement, but widen its shot size to ${effectivePreset} framing so all ${totalFigureCount} required figures stay fully visible and uncropped.`;
+
+  return [
+    `CAMERA — ${CAMERA_PRESETS[effectivePreset]}`,
+    `Authored camera intent: ${authoredIntent}.`,
+    framingAdjustment,
+    /\b(?:fixed|locked[- ]?off|static|tripod)\b/i.test(authoredIntent)
+      ? "Keep the camera fixed as authored; do not add camera drift."
+      : "Use only the authored push, pull, pan, tilt, tracking, or other camera movement; if none is stated, keep the camera stable.",
+  ].join(" ");
+}
+
 /**
- * Builds a scene prompt using the layered architecture:
- *   Layer 1 — STYLE BIBLE (locked)
- *   Layer 2 — CAMERA (preset)
- *   Layer 3 — ENVIRONMENT (locked location bible + scene-specific desc)
- *   Layer 4 — CHARACTERS (locked bible descriptions)
- *   Layer 5 — SUPPORTING ENTITIES (episode-local continuity anchors)
- *   Layer 6 — CONTINUITY ANCHORS (episode-local recurring props/setup continuity)
- *   Layer 7 — STORY ACTION (scene-specific)
- *   Layer 8 — NEGATIVE (locked)
+ * Builds a scene prompt using Agnes's documented semantic order: subject and
+ * setting, action and change, camera, visual style, sound and rhythm, then
+ * consistency requirements. Invariant bibles remain byte-stable across
+ * scenes even though they are placed in the semantic section where Agnes is
+ * expected to use them.
  *
  * Character descriptions passed here should be the locked "character bible"
  * entries stored as `generationPrompt` in the database. Supporting entities
@@ -349,24 +420,14 @@ export function buildStylizedScenePrompt(params: {
   characterMovements?: string[];
   objectInteractions?: string;
 }): string {
-  const camera = resolveCameraPreset(params.cameraAngle);
-
-  // Layer 1 — STYLE
-  const styleLayer = `${STYLE_BIBLE} ${RENDERING_BIBLE}`;
-
-  // Layer 2 — CAMERA
-  const cameraLayer = `${CAMERA_PRESETS[camera]}`;
-
-  // Layer 3 — ENVIRONMENT (locked location description + this scene's lighting/mood)
-  const lighting = params.lighting?.trim();
-  const envLayer = `SETTING: ${params.environmentDescription.replace(/\s+/g, " ").trim()}` +
-    (lighting ? ` LIGHTING AND MOOD: ${lighting}, consistent across the entire shot.` : "");
+  const lighting = params.lighting?.replace(/\s+/g, " ").trim();
+  const envLayer = `SETTING: ${params.environmentDescription.replace(/\s+/g, " ").trim()}`;
 
   const normalizedSupportingEntities = (params.supportingEntities ?? [])
     .map((entity) => entity.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  // Layer 4 — CHARACTERS (with strict identity anchoring and locked gender)
+  // SUBJECT — main characters with strict identity anchoring and locked gender.
   const characters = params.characterDescriptions
     .map((description, index) => {
       const compactDescription = description.replace(/\s+/g, " ").trim();
@@ -379,49 +440,50 @@ export function buildStylizedScenePrompt(params: {
   const charCount = params.characterDescriptions.length;
   const supportingCount = normalizedSupportingEntities.length;
   const totalFigureCount = charCount + supportingCount;
+  const castLedger = buildExactCastLedger(
+    params.characterNames,
+    charCount,
+    normalizedSupportingEntities,
+  );
   const charLayer = charCount > 0
-    ? `MAIN CHARACTERS — show exactly ${charCount}, each drawn once (never draw duplicate copies, clones, or multiple instances of any character, animal, or living object character; never draw both a worn version and a standing clone of a living companion; never add extra anonymous figures or helper children during teamwork actions like pulling, pushing, or lifting), using these locked descriptions ` +
-      `without deviating from any color, gender, hairstyle, or feature and without adding unrequested clothing, hats, or accessories: ${characters}. ` +
-      `All ${charCount} main characters must have their complete bodies visible in frame with species-correct anatomy and the natural or authored number and type of legs, arms, wings, fins, antennae, tentacles, or other appendages. Do not force a two-arm/two-leg humanoid plan onto non-humanoid species: for example, insects may have six legs, snakes may have no legs, and birds have wings plus legs. ` +
-      `STRICT GENDER INTEGRITY: human girls must strictly look like young girls with their specified hairstyles and girl facial features; human boys must strictly look like young boys with their specified boy hairstyles. NEVER depict a girl character as a boy or a boy character as a girl. ` +
-      `All characters interacting naturally with each other and the setting.`
+    ? `MAIN CHARACTERS — exactly ${charCount} visible named ${charCount === 1 ? "character" : "characters"}, each appearing once: ${characters}. ` +
+      "Keep every complete body readable in the shot and let the characters interact naturally with each other and the setting."
     : supportingCount > 0
       ? `MAIN CHARACTERS — exactly 0 main-series character figures. Do not add any member of the main cast. This is NOT a scenery-only scene: the ${supportingCount} supporting ${supportingCount === 1 ? "entity" : "entities"} below are required.`
       : `CHARACTERS — SCENERY / ENVIRONMENT ONLY. Exactly 0 characters. No people, no children, no kids, no humans, no animals, no figures, no characters of any kind. The scene is completely empty of people and characters, showing only the pure landscape and environment.`;
 
-  // Layer 5 — SUPPORTING ENTITIES (episode-local recurring continuity anchors)
+  // SUBJECT — episode-local supporting entities.
   const supportingEntities = normalizedSupportingEntities
     .map((entity, index) => `[Supporting entity ${index + 1}]: ${entity}`)
     .join(" | ");
   const supportingLayer = supportingEntities
-    ? `SUPPORTING ENTITIES — treat each of these as a required, on-model figure in this scene with the same ` +
-    `strict identity lock as the main characters. Their species, colors, markings, proportions, clothing, ` +
-    `and accessories must appear EXACTLY as described, never as humanoid or fairy-like hybrids unless the ` +
-    `description explicitly says so, and must remain identical across every scene where they appear: ` +
-    `${supportingEntities}. Draw each required supporting entity exactly once, fully visible with a complete, species-correct body.`
+    ? `SUPPORTING ENTITIES — required visible episode-local figures, each appearing once with a complete readable body: ${supportingEntities}.`
     : "";
 
   const figureCountLayer = totalFigureCount > 0
     ? `EXACT TOTAL FIGURE COUNT RULE — show exactly ${totalFigureCount} individual character ${totalFigureCount === 1 ? "figure" : "figures"} total: ` +
       `${charCount} main-character ${charCount === 1 ? "figure" : "figures"} plus ${supportingCount} supporting-entity ${supportingCount === 1 ? "figure" : "figures"}. ` +
-      `Every required main or supporting individual appears exactly once. Do not add anonymous figures, helper children, background animals, clones, or a second copy of any individual, including during teamwork actions.`
+      `Every required main or supporting individual appears exactly once with complete, species-correct anatomy and the natural or authored number and type of appendages; insects may have six legs, snakes may have no legs, and birds have wings plus legs. ` +
+      `Keep exactly the same ${totalFigureCount} identities from first frame to last, with one continuous trajectory per identity. ` +
+      `No identity may split, fork, enter twice, or reappear as a second copy after motion, occlusion, camera movement, or a portal crossing. ` +
+      `Do not add anonymous figures, helper children, background animals, clones, or a second copy of any individual, including during teamwork actions.`
     : "";
 
-  // Layer 6 — CONTINUITY ANCHORS (episode-local recurring props/setup continuity)
+  // CONSISTENCY — episode-local recurring props/setup continuity.
   const continuityAnchors = params.continuityAnchors
     ?.map((anchor, index) => anchor.replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .map((anchor, index) => `[Anchor ${index + 1}]: ${anchor}`)
     .join(" | ");
   const continuityLayer = continuityAnchors
-    ? `SCENE CONTINUITY ANCHORS — keep these elements visually consistent with adjacent scenes: ${continuityAnchors}.`
+    ? `NON-CHARACTER CONTINUITY ANCHORS — these describe only inanimate props, layout, or environmental state and never authorize another living or object-character figure: ${continuityAnchors}.`
     : "";
 
   const creatureIdentityLayer = buildCreatureIdentityGuard(params.characterVisuals);
+  const objectCharacterInstanceLayer = buildObjectCharacterInstanceLock(params.characterVisuals);
 
-  // Layer 7 — STORY ACTION (with scene context)
+  // ACTION AND CHANGE — the one filmable beat, before camera/style constraints.
   const actionParts = [
-    params.narrationText ? `SCENE CONTEXT: ${params.narrationText}` : "",
     `VISIBLE ACTION: ${params.action}`,
     params.sceneDetails
       ? `DETAILS: ${params.sceneDetails}`
@@ -439,25 +501,51 @@ export function buildStylizedScenePrompt(params: {
       ? `PROPS/INTERACTIONS: ${params.objectInteractions}`
       : "",
   ].filter(Boolean);
-  const actionLayer = actionParts.join(". ") +
-    ". Animate this single visible beat as one coherent shot with gentle readable movement, stable identities, clear expressions, and natural body language; do not introduce a second action, cut, montage, or time jump.";
+  const actionLayer = "ACTION AND CHANGE — " + actionParts.join(". ") +
+    ". Animate this single visible beat as one coherent shot with one primary moving figure; any other listed figures remain spatially separated and use only subtle reactions. " +
+    "Use clear expressions, natural body language, and only subtle physically plausible environmental motion. Do not introduce a second action, cut, montage, or time jump.";
 
-  // Layer 8 — NEGATIVE
+  // CONSISTENCY — static and temporal exclusions, stated once at the end.
   const negativeLayer = totalFigureCount === 0
     ? `${NEGATIVE_BIBLE} Avoid: any people, humans, persons, children, kids, toddlers, boys, girls, babies, animals, creatures, characters, figures, silhouettes of people.`
     : NEGATIVE_BIBLE;
 
-  return [
-    styleLayer,
-    cameraLayer,
-    envLayer,
+  const subjectAndSettingLayer = [
+    "SUBJECT AND SETTING —",
+    castLedger,
     charLayer,
     supportingLayer,
+    envLayer,
+  ].filter(Boolean).join(" ");
+  const cameraLayer = buildSceneCameraLayer(params.cameraAngle, totalFigureCount);
+  const visualStyleLayer = [
+    "VISUAL STYLE —",
+    STYLE_BIBLE,
+    lighting ? `LIGHTING, COLOR, AND ATMOSPHERE: ${lighting} Keep it stable throughout the shot.` : "",
+    RENDERING_BIBLE,
+  ].filter(Boolean).join(" ");
+  const soundAndRhythmLayer =
+    "SOUND AND RHYTHM — Silent visual-only shot with gentle readable pacing. No narration, dialogue, music, or sound effects.";
+  const consistencyLayer = [
+    "CONSISTENCY REQUIREMENTS —",
+    totalFigureCount > 0 ? CHARACTER_APPEARANCE_BIBLE : "",
     figureCountLayer,
     continuityLayer,
     creatureIdentityLayer,
-    actionLayer,
+    objectCharacterInstanceLayer,
+    TEMPORAL_STABILITY_NEGATIVE_BIBLE,
     negativeLayer,
+  ].filter(Boolean).join(" ");
+
+  // Agnes Video 2.5's documented order: subject/setting, action/change,
+  // camera, visual style, sound/rhythm, then consistency requirements.
+  return [
+    subjectAndSettingLayer,
+    actionLayer,
+    cameraLayer,
+    visualStyleLayer,
+    soundAndRhythmLayer,
+    consistencyLayer,
   ]
     .filter(Boolean)
     .join(" ");
@@ -565,5 +653,101 @@ export function buildEpisodeKeyArtPrompt(params: {
     "No 3D CGI. No anime. No comic style.",
     "Avoid: gender swap, depicting girls as boys, depicting boys as girls, wrong character gender, opposite gender appearance, random unrequested children, duplicate characters.",
     CHARACTER_INTEGRITY_NEGATIVE_BIBLE,
+  ].filter(Boolean).join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Direct Agnes video title cards
+// ---------------------------------------------------------------------------
+
+const TITLE_CARD_NEGATIVE_BIBLE =
+  "No text except the one required title. No subtitles, captions, extra lettering, misspelled or changing letters, " +
+  "logos, watermarks, digital UI, split screen, collage, comic-strip panels, random background figures, scary elements, " +
+  "harsh dark shadows, gender swaps, cropped bodies, malformed anatomy, unrequested clothing, or unrequested accessories. " +
+  CHARACTER_INTEGRITY_NEGATIVE_BIBLE;
+
+function lockedSeriesCharacterText(params: {
+  characters?: CharacterDef[];
+  characterDescriptions?: string[];
+  characterNames?: string[];
+}): { name: string; appearance: string } {
+  if (params.characters && params.characters.length > 0) {
+    const character = params.characters[0]!;
+    return {
+      name: character.name.replace(/\s+/g, " ").trim(),
+      appearance: character.description.replace(/\s+/g, " ").trim(),
+    };
+  }
+  const descriptions = params.characterDescriptions ?? [];
+  const description = descriptions[0];
+  if (!description) return { name: "Main character", appearance: "one friendly preschool protagonist" };
+  const name = params.characterNames?.[0]?.replace(/\s+/g, " ").trim();
+  return {
+    name: name || "Main character",
+    appearance: description.replace(/\s+/g, " ").trim(),
+  };
+}
+
+/**
+ * Canonical direct-video series title card in Agnes Video 2.5's recommended
+ * semantic order. This deliberately does not reuse the legacy still-key-art
+ * builder: words such as poster, thumbnail, cover, and image bias the model
+ * toward a static composition.
+ */
+export function buildSeriesKeyArtVideoPrompt(params: {
+  conceptName: string;
+  conceptSummary: string;
+  environmentDescription?: string;
+  characters?: CharacterDef[];
+  characterDescriptions?: string[];
+  characterNames?: string[];
+}): string {
+  const title = params.conceptName.replace(/\s+/g, " ").trim();
+  const environment = params.environmentDescription?.replace(/\s+/g, " ").trim()
+    || "A warm, uncluttered storybook setting with cheerful colors and generous open space";
+  const characters = lockedSeriesCharacterText(params);
+  return [
+    `SUBJECT AND SETTING — A full-bleed animated children's series title card in this figure-free location: ${environment}.`,
+    `Render the exact title ${JSON.stringify(title)} once in large, playful, clearly readable lettering at the upper center.`,
+    `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${characters.name}] × 1.`,
+    `REQUIRED FOREGROUND PROTAGONIST — show that one ${characters.name}, fully visible and prominent: [${characters.name} appearance]: ${characters.appearance}.`,
+    "The title words are typography only and never authorize another person, creature, living object, or depiction.",
+    "ACTION AND CHANGE — Use only gentle breathing, blinking, and one small friendly gesture by the single protagonist, plus subtle physically plausible environmental motion. Keep the title and layout unchanged; no entrance, exit, plot action, cut, montage, morph, or time jump.",
+    "CAMERA — Medium-wide 16:9 shot with the single protagonist in the center and lower half, environment readable around them, and clear open space for the title. Use a very slow straight push-in; keep the title plane stable and undistorted.",
+    `VISUAL STYLE — ${STYLE_BIBLE} Bright high-key color, warm friendly atmosphere, clean readable silhouettes, polished cinematic depth. ${RENDERING_BIBLE}`,
+    "SOUND AND RHYTHM — Silent visual-only title card with calm, gentle movement. No narration, dialogue, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — Keep the exact title spelling, placement, letter shapes, and readability stable for the full shot; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep exactly one complete protagonist from first frame to last on one continuous trajectory. No other people, animals, living objects, background figures, reflections, portraits, statues, screens, silhouettes, entrances, or re-entry copies. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
+  ].join(" ");
+}
+
+/** Canonical direct-video episode title card in Agnes's recommended order. */
+export function buildEpisodeKeyArtVideoPrompt(params: {
+  conceptName: string;
+  episodeTitle: string;
+  episodePremise: string;
+  environmentDescription?: string;
+  mainCharacterDescription: string;
+  mainCharacterName?: string;
+  otherCharacters?: Array<{ name: string; description: string }>;
+  supportingEntities?: string[];
+}): string {
+  const seriesTitle = params.conceptName.replace(/\s+/g, " ").trim();
+  const episodeTitle = params.episodeTitle.replace(/\s+/g, " ").trim();
+  const environment = params.environmentDescription?.replace(/\s+/g, " ").trim()
+    || "A warm, uncluttered storybook setting with cheerful colors and generous open space";
+  const protagonistName = params.mainCharacterName?.replace(/\s+/g, " ").trim() || "Main character";
+  const protagonist = `[${protagonistName} appearance]: ${params.mainCharacterDescription.replace(/\s+/g, " ").trim()}`;
+  return [
+    `SUBJECT AND SETTING — A full-bleed animated children's episode title card in this figure-free location: ${environment}.`,
+    `Render the exact episode title ${JSON.stringify(episodeTitle)} once in large, playful, clearly readable lettering at the upper center.`,
+    `SERIES CONTEXT: ${JSON.stringify(seriesTitle)}.`,
+    `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${protagonistName}] × 1.`,
+    `REQUIRED FOREGROUND PROTAGONIST — show that one ${protagonistName}, fully visible and prominent: ${protagonist}.`,
+    "The series and episode title words are typography only and never authorize another person, creature, living object, or depiction.",
+    "ACTION AND CHANGE — The protagonist holds one readable pose connected to the premise, with gentle breathing, blinking, one small friendly gesture, and subtle physically plausible environmental motion. Keep the title and layout unchanged; no new plot beat, cut, montage, morph, or time jump.",
+    "CAMERA — Medium-wide 16:9 title-card shot with the protagonist centered in the lower half, the episode setting readable, and clear open space for the title. Use a very slow straight push-in; keep the title plane stable and undistorted.",
+    `VISUAL STYLE — ${STYLE_BIBLE} Bright high-key color, warm friendly atmosphere, clean readable silhouette, polished cinematic depth. ${RENDERING_BIBLE}`,
+    "SOUND AND RHYTHM — Silent visual-only title card with calm, gentle movement. No narration, dialogue, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — Keep the exact episode-title spelling, placement, letter shapes, and readability stable for the full shot; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep exactly one complete protagonist from first frame to last on one continuous trajectory. No other people, animals, living objects, background figures, reflections, portraits, statues, screens, silhouettes, entrances, or re-entry copies. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
   ].filter(Boolean).join(" ");
 }

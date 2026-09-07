@@ -52,19 +52,34 @@ export interface YoutubeUploadToolOptions {
  * Returns the video ID and public URL.
  */
 export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): DynamicStructuredTool {
+  const requiresEpisodeIdentity = Boolean(
+    options.getExistingUpload || options.beforeUpload || options.onUploaded,
+  );
+  const seriesIdSchema = z.number().int().positive().describe(
+    requiresEpisodeIdentity
+      ? "Required canonical series id returned by get_next_episode."
+      : "Optional series id for standalone uploads.",
+  );
+  const episodeNumberSchema = z.number().int().positive().describe(
+    requiresEpisodeIdentity
+      ? "Required canonical episode number returned by get_next_episode."
+      : "Optional episode number for standalone uploads.",
+  );
+
   return new DynamicStructuredTool({
     name: "upload_to_youtube",
     description:
       "Uploads the final episode video to YouTube with title, description, tags, and thumbnail. " +
+      (requiresEpisodeIdentity
+        ? "This state-integrated production tool requires seriesId and episodeNumber from get_next_episode on every call. "
+        : "Episode identity is optional only for standalone uploads without state integration. ") +
       "Requires YouTube API credentials configured in environment. Returns the video ID and public URL.",
     schema: z.object({
       videoPath: z.string().describe("Absolute path to the video file to upload."),
-      seriesId: z.number().int().positive().optional().describe(
-        "Series id. Required when an upload-completion cleanup hook is configured."
-      ),
-      episodeNumber: z.number().int().positive().optional().describe(
-        "Episode number. Required when an upload-completion cleanup hook is configured."
-      ),
+      seriesId: requiresEpisodeIdentity ? seriesIdSchema : seriesIdSchema.optional(),
+      episodeNumber: requiresEpisodeIdentity
+        ? episodeNumberSchema
+        : episodeNumberSchema.optional(),
       title: z.string().describe("Video title (max 100 characters)."),
       description: z.string().describe("Video description with episode summary and credits."),
       tags: z
@@ -86,11 +101,6 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
       thumbnailPath,
       privacyStatus,
     }) => {
-      logStep(`Uploading video to YouTube: ${title}`);
-
-      const requiresEpisodeIdentity = Boolean(
-        options.getExistingUpload || options.beforeUpload || options.onUploaded,
-      );
       if (requiresEpisodeIdentity && (!seriesId || !episodeNumber)) {
         throw new Error(
           "seriesId and episodeNumber are required when YouTube upload state integration is enabled."
@@ -111,6 +121,8 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
           });
         }
       }
+
+      logStep(`Preparing YouTube upload: ${title}`);
 
       // Key art is video-only, so YouTube selects a frame automatically unless
       // the caller explicitly supplies a separate custom thumbnail image.

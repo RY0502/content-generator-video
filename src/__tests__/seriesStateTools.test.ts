@@ -20,7 +20,7 @@ function buildProductionScript() {
       sceneNumber: index + 1,
       narrationText: narration,
       environmentDescription: "A sunny green meadow beside the little wooden clubhouse.",
-      action: `Pip takes careful step ${index + 1} while carrying the berry.`,
+      action: `Pip the Ant takes careful step ${index + 1} while Ladybug friend watches the berry.`,
       characterNames: ["Pip the Ant"],
       characterVisuals: [{
         name: "Pip the Ant",
@@ -30,7 +30,7 @@ function buildProductionScript() {
       }],
       supportingEntities: ["Ladybug friend: tiny red ladybug with seven round black spots"],
       continuityAnchors: ["Berry: one glossy raspberry-red berry held above the grass."],
-      sceneDetails: `Pip and the berry remain fully visible during careful step ${index + 1}.`,
+      sceneDetails: `Pip the Ant and Ladybug friend remain fully visible beside the berry during careful step ${index + 1}.`,
       cameraAngle: "medium wide shot at child eye level",
       lighting: "warm soft morning sunlight",
     })),

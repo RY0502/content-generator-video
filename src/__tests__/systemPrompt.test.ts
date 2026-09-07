@@ -23,10 +23,17 @@ describe("production system prompt", () => {
     expect(SYSTEM_PROMPT_EXTENSION).toContain("target about 800 words");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("at least 300 measured narration seconds");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Scene 1 must establish time, place, mood");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("readable start, one visible movement/change, and a clear end");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("cameraAngle names one move or fixed camera");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("light preschool repetition");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("distinctive character voices and reactions");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("one naturally integrated educational idea");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("No filler or duplicate beats");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("impose no arbitrary figure-count ceiling");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("Include every actually visible individual exactly once");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("continuityAnchors are optional and only for visible non-living props/layout/environment state");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("environmentDescription is figure-free");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("the backpack/bag");
   });
 
   it("keeps the one-audio/one-video timing and narrow-repair rules", () => {
@@ -72,6 +79,7 @@ describe("production system prompt", () => {
     expect(SYSTEM_PROMPT_EXTENSION).toContain("rejected draft's exact expectedDraftRevision");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("synthesize_episode_narration_audio once with seriesId and episodeNumber");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Only a durable successful YouTube receipt may finalize the episode as done");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("call upload_to_youtube once with the canonical seriesId and episodeNumber");
     expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(13_000);
   });
 });

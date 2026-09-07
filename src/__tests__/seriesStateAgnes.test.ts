@@ -65,7 +65,7 @@ function productionScript() {
       }],
       supportingEntities: ["Ladybug friend: tiny red ladybug with seven round black spots"],
       continuityAnchors: ["Berry: one glossy raspberry-red berry held carefully above the short grass."],
-      sceneDetails: "Pip remains fully visible beside the same berry and clubhouse while his friends watch warmly.",
+      sceneDetails: "Pip the Ant remains fully visible beside the same berry and clubhouse while Ladybug friend watches warmly.",
       cameraAngle: "medium wide shot at child eye level",
       lighting: "warm soft morning sunlight",
     })),
@@ -850,7 +850,7 @@ describe("SeriesState Agnes persistence", () => {
       sceneNumber: index + 1,
       narrationText,
       environmentDescription: "A sunny meadow beside the cozy wooden clubhouse.",
-      action: `Pip carries the berry through visible beat ${index + 1}.`,
+      action: `Pip the Ant carries the berry through visible beat ${index + 1}.`,
       characterNames: ["Pip the Ant"],
       characterVisuals: [{
         name: "Pip the Ant",
@@ -862,7 +862,7 @@ describe("SeriesState Agnes persistence", () => {
       continuityAnchors: [
         "Berry path: one glossy raspberry-red berry above short green grass beside the wooden clubhouse.",
       ],
-      sceneDetails: "Pip stays fully visible beside the same berry path while taking one careful, readable step.",
+      sceneDetails: "Pip the Ant stays fully visible beside the same berry path while taking one careful, readable step.",
       cameraAngle: "medium wide child-eye-level shot",
       lighting: "warm soft morning sunlight",
     }));

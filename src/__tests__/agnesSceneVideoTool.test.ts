@@ -62,6 +62,7 @@ import {
   type UpsertAgnesSceneGenerationInput,
 } from "../state/seriesState.js";
 import {
+  AGNES_PROGRESS_LOG_PREFIX,
   buildAgnesSceneVideoTools as buildAgnesSceneVideoToolsImpl,
   buildAgnesVideoPrompt,
   AGNES_NORMALIZATION_VERSION,
@@ -316,6 +317,100 @@ describe("three-phase Agnes scene workflow", () => {
     expect(resolveStatusRequestIntervalMs(undefined, 1_000))
       .toBe(MIN_PRODUCTION_STATUS_INTERVAL_MS);
     expect(resolveStatusRequestIntervalMs(undefined, 45_000)).toBe(45_000);
+  });
+
+  it("logs safe per-asset progress across submission, queue polling, verification, and download", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state } = mockState(1);
+    let retrievalCount = 0;
+    const client = {
+      submitVideo: vi.fn(async () => task("video-progress-log", "submitted")),
+      retrieveVideo: vi.fn(async (input: AgnesVideoTask) => {
+        retrievalCount += 1;
+        return task(input.video_id, retrievalCount === 1 ? "queued" : "completed");
+      }),
+      downloadCompletedVideo: vi.fn(async (input: AgnesVideoTask, outputPath: string) => {
+        await mkdir(path.dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, Buffer.alloc(2_048, 1));
+        return {
+          outputPath,
+          url: input.metadata!.url!,
+          bytes: 2_048,
+          sha256: "b".repeat(64),
+        };
+      }),
+    };
+    const normalizeVideo = vi.fn(async ({ outputPath }: { outputPath: string }) => {
+      await mkdir(path.dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, Buffer.alloc(2_048, 2));
+    });
+    const [submit, verify, download] = buildAgnesSceneVideoTools(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      statusRequestIntervalMs: 0,
+      queuePollIntervalMs: 1,
+      queuePollWindowMs: 100,
+      probeMediaDuration: vi.fn(async () => 5),
+      normalizeVideo,
+    });
+    const captured: unknown[][] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      captured.push(args);
+    });
+
+    try {
+      await (submit as any).func({ seriesId: 7, episodeNumber: 2 });
+      await (verify as any).func({ seriesId: 7, episodeNumber: 2 });
+      await (download as any).func({ seriesId: 7, episodeNumber: 2 });
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    const progressCalls = captured.filter(([message]) => (
+      typeof message === "string" && message.startsWith(`${AGNES_PROGRESS_LOG_PREFIX} `)
+    ));
+    const events = progressCalls.map(([message]) => (
+      (message as string).slice(AGNES_PROGRESS_LOG_PREFIX.length + 1)
+    ));
+    expect(events).toEqual(expect.arrayContaining([
+      "phase_start",
+      "prepared",
+      "submission_start",
+      "submission_accepted",
+      "queue_poll_wait",
+      "queue_poll_result",
+      "submission_result",
+      "verify_status_start",
+      "verify_status_result",
+      "download_start",
+      "download_raw_complete",
+      "download_normalized",
+      "phase_summary",
+    ]));
+
+    const submissionStart = progressCalls.find(([message]) => (
+      message === `${AGNES_PROGRESS_LOG_PREFIX} submission_start`
+    ));
+    expect(submissionStart?.[1]).toMatchObject({
+      accountId: "injected-account",
+      attemptNumber: 1,
+    });
+    expect(submissionStart?.[1]).toHaveProperty("assetLabel");
+    const submitPhaseStart = progressCalls.find(([message, metadata]) => (
+      message === `${AGNES_PROGRESS_LOG_PREFIX} phase_start`
+      && (metadata as { phase?: unknown } | undefined)?.phase === "submit"
+    ));
+    expect(submitPhaseStart?.[1]).toMatchObject({
+      seriesId: 7,
+      episodeNumber: 2,
+      accountCount: 1,
+    });
+
+    const serializedLogs = JSON.stringify(progressCalls);
+    expect(serializedLogs).not.toContain("test-agnes-key");
+    expect(serializedLogs).not.toContain("a".repeat(64));
+    expect(serializedLogs).not.toContain("CANONICAL SCENE PROMPT");
+    expect(serializedLogs).not.toContain("https://media.example.test");
   });
 
   it("returns repair_required from every Agnes phase for a typed invalid-script preflight", async () => {
@@ -686,6 +781,23 @@ describe("three-phase Agnes scene workflow", () => {
     ]);
     expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain("Tiny Heroes Club");
     expect(rows.get(AGNES_EPISODE_KEY_ART_TRACKING_SCENE)?.prompt).toContain("Pip's Berry Bridge");
+    for (const sceneNumber of [
+      AGNES_SERIES_KEY_ART_TRACKING_SCENE,
+      AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
+    ]) {
+      const prompt = rows.get(sceneNumber)?.prompt ?? "";
+      expect(prompt).not.toMatch(/\b(?:poster|thumbnail|cover|image)\b/i);
+      const sections = [
+        "SUBJECT AND SETTING",
+        "ACTION AND CHANGE",
+        "CAMERA",
+        "VISUAL STYLE",
+        "SOUND AND RHYTHM",
+        "CONSISTENCY REQUIREMENTS",
+      ].map((section) => prompt.indexOf(section));
+      expect(sections).toEqual([...sections].sort((left, right) => left - right));
+      expect(prompt).toContain("No flicker, jitter, strobing");
+    }
     for (const sceneNumber of [
       AGNES_SERIES_KEY_ART_TRACKING_SCENE,
       AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
@@ -1861,10 +1973,12 @@ describe("three-phase Agnes scene workflow", () => {
       targetDurationSeconds: 8.2,
     });
     expect(prompt).not.toContain("<Picture 1>");
-    expect(prompt).toContain("provider audio track will be discarded");
+    expect(prompt).toContain("Silent visual-only shot");
+    expect(prompt).not.toContain("DURATION");
     expect(prompt).toContain("No duplicate characters");
     expect(prompt).toContain("No extra limbs");
     expect(prompt).toContain("No double heads");
+    expect(prompt).toContain("No flicker, jitter, strobing");
     expect(planAgnesVideoSegments(3.1)).toEqual([4]);
     expect(planAgnesVideoSegments(12)).toEqual([12]);
     expect(() => planAgnesVideoSegments(12.001)).toThrow("at most 12s");

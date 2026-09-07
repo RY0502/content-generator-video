@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildEpisodeKeyArtPrompt,
+  buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtPrompt,
+  buildSeriesKeyArtVideoPrompt,
   buildStylizedScenePrompt,
   resolveCameraPreset,
+  TEMPORAL_STABILITY_NEGATIVE_BIBLE,
 } from "../promptBuilder.js";
 
 describe("promptBuilder", () => {
@@ -206,6 +209,117 @@ describe("promptBuilder", () => {
     expect(resolveCameraPreset("close up shot")).toBe("close");
     expect(resolveCameraPreset("medium two-shot")).toBe("medium");
     expect(resolveCameraPreset("birds eye wide")).toBe("establishing");
+  });
+
+  it("orders direct-video scene guidance for Agnes and preserves cast-compatible authored camera intent", () => {
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Mia", "Leo", "Bobo"],
+      characterVisuals: [
+        { name: "Mia", visualForm: "humanoid", speciesOrType: "young girl" },
+        { name: "Leo", visualForm: "humanoid", speciesOrType: "young boy" },
+        { name: "Bobo", visualForm: "object_character", speciesOrType: "living backpack" },
+      ],
+      characterDescriptions: [
+        "young girl, yellow shirt. Always same colors.",
+        "young boy, green shirt. Always same colors.",
+        "small sky-blue living backpack. Always same colors.",
+      ],
+      environmentDescription: "A fern-lined valley with one round leaf nest beside a shallow stream.",
+      action: "Mia points while the others take one careful step toward the nest.",
+      narrationText: "The friends spotted the nest and moved closer.",
+      cameraAngle: "close tracking shot from creek level moving slowly right",
+      lighting: "warm amber late-afternoon light with soft fern shadows",
+      continuityAnchors: ["Nest: round woven green leaves beside the same shallow stream."],
+      sceneDetails: "Mia stands front-left pointing; Leo follows at right; Bobo bounces once behind them.",
+    });
+
+    const sections = [
+      "SUBJECT AND SETTING",
+      "ACTION AND CHANGE",
+      "CAMERA",
+      "VISUAL STYLE",
+      "SOUND AND RHYTHM",
+      "CONSISTENCY REQUIREMENTS",
+    ].map((section) => prompt.indexOf(section));
+    expect(sections.every((index) => index >= 0)).toBe(true);
+    expect(sections).toEqual([...sections].sort((left, right) => left - right));
+    expect(prompt).toContain("Authored camera intent: close tracking shot from creek level moving slowly right.");
+    expect(prompt).toContain("widen its shot size to medium framing so all 3 required figures stay fully visible and uncropped");
+    expect(prompt).toContain("Nest: round woven green leaves beside the same shallow stream.");
+    expect(prompt).toContain("warm amber late-afternoon light with soft fern shadows");
+    expect(prompt).toContain(TEMPORAL_STABILITY_NEGATIVE_BIBLE);
+    expect(prompt).toContain("EXACT ON-SCREEN CAST LEDGER — 3 TOTAL CHARACTER FIGURES, AND NO OTHERS");
+    expect(prompt).toContain("[Mia] × 1; [Leo] × 1; [Bobo] × 1");
+    expect(prompt).toContain("OBJECT-CHARACTER SINGLE-INSTANCE LOCK");
+    expect(prompt).toContain("If carried or worn, it cannot also stand elsewhere");
+    expect(prompt).not.toContain("The friends spotted the nest and moved closer");
+  });
+
+  it("keeps any authored cast size while locking its exact figure count", () => {
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Mia", "Leo", "Tara", "Bobo"],
+      characterDescriptions: ["girl", "boy", "girl", "living backpack"],
+      environmentDescription: "A clear path.",
+      action: "Mia points while Leo watches, Tara smiles, and Bobo bounces once.",
+      narrationText: "The friends look ahead.",
+      cameraAngle: "wide",
+      lighting: "warm daylight",
+    });
+
+    expect(prompt).toContain("EXACT ON-SCREEN CAST LEDGER — 4 TOTAL CHARACTER FIGURES, AND NO OTHERS");
+    expect(prompt).toContain("[Mia] × 1; [Leo] × 1; [Tara] × 1; [Bobo] × 1");
+    expect(prompt).toContain("show exactly 4 individual character figures total");
+  });
+
+  it("uses dedicated direct-video title cards without legacy still-media bias", () => {
+    const seriesPrompt = buildSeriesKeyArtVideoPrompt({
+      conceptName: "Tiny Heroes Club",
+      conceptSummary: "Small friends solve gentle meadow problems together.",
+      environmentDescription: "A sunny meadow beside a tiny wooden clubhouse.",
+      characterNames: ["Pip", "Bobo"],
+      characterDescriptions: [
+        "tiny ruby-red ant with six legs and a yellow backpack",
+        "small cobalt-blue living backpack with an amber zipper",
+      ],
+    });
+    const episodePrompt = buildEpisodeKeyArtVideoPrompt({
+      conceptName: "Tiny Heroes Club",
+      episodeTitle: "The Berry Bridge",
+      episodePremise: "Pip carries a berry over a little stream.",
+      environmentDescription: "A sunny meadow beside a tiny wooden clubhouse.",
+      mainCharacterName: "Pip",
+      mainCharacterDescription: "tiny ruby-red ant with six legs and a yellow backpack",
+      otherCharacters: [{
+        name: "Bobo",
+        description: "small cobalt-blue living backpack with an amber zipper",
+      }],
+      supportingEntities: ["Berry: one glossy raspberry-red berry with a green leaf"],
+    });
+
+    for (const prompt of [seriesPrompt, episodePrompt]) {
+      expect(prompt).not.toMatch(/\b(?:poster|thumbnail|cover|image)\b/i);
+      expect(prompt).toContain("SUBJECT AND SETTING");
+      expect(prompt).toContain("ACTION AND CHANGE");
+      expect(prompt).toContain("CAMERA");
+      expect(prompt).toContain("VISUAL STYLE");
+      expect(prompt).toContain("SOUND AND RHYTHM");
+      expect(prompt).toContain("CONSISTENCY REQUIREMENTS");
+      expect(prompt).toContain("Silent visual-only title card");
+      expect(prompt).not.toContain("provider audio track will be discarded");
+      expect(prompt).toContain(TEMPORAL_STABILITY_NEGATIVE_BIBLE);
+      expect(prompt).toContain("No duplicate characters");
+      expect(prompt).toContain("No extra limbs");
+      expect(prompt).toContain("No double heads");
+    }
+    expect(seriesPrompt).toContain("EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS");
+    expect(seriesPrompt).toContain("[Pip] × 1");
+    expect(seriesPrompt).toContain("A sunny meadow beside a tiny wooden clubhouse");
+    expect(seriesPrompt).not.toContain("Small friends solve gentle meadow problems together");
+    expect(seriesPrompt).not.toContain("small cobalt-blue living backpack with an amber zipper");
+    expect(episodePrompt).toContain("EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [Pip] × 1");
+    expect(episodePrompt).not.toContain("Pip carries a berry over a little stream");
+    expect(episodePrompt).not.toContain("OPTIONAL NAMED CAST");
+    expect(episodePrompt).not.toContain("Berry: one glossy raspberry-red berry with a green leaf");
   });
 
   it("enforces locked wardrobe and suppresses unrequested hats, dresses, and clothing in negative bible", () => {

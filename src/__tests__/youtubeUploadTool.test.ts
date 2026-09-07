@@ -244,12 +244,55 @@ describe("youtubeUploadTool", () => {
   it("requires episode identity when upload state integration is configured", async () => {
     const tool = buildYoutubeUploadTool({ onUploaded: vi.fn() });
 
+    expect((tool as any).schema.safeParse({
+      videoPath: "/tmp/video.mp4",
+      title: "Tiny Heroes Club Episode 5",
+      description: "A new story.",
+    }).success).toBe(false);
+
     await expect((tool as any).call({
       videoPath: "/tmp/video.mp4",
       title: "Tiny Heroes Club Episode 5",
       description: "A new story.",
-    })).rejects.toThrow("seriesId and episodeNumber are required");
+    })).rejects.toThrow("Received tool input did not match expected schema");
 
     expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("advertises and accepts required identity for every state-integration hook", async () => {
+    insertMock.mockResolvedValue({ data: { id: "stateful-video" } });
+    const beforeUpload = vi.fn().mockResolvedValue(undefined);
+    const tool = buildYoutubeUploadTool({ beforeUpload });
+    const input = {
+      seriesId: 13,
+      episodeNumber: 1,
+      videoPath: "/tmp/video.mp4",
+      title: "Time-Travel Backpack #1: Dino Egg Rescue",
+      description: "A dinosaur rescue adventure.",
+    };
+
+    expect(tool.description).toContain("requires seriesId and episodeNumber");
+    expect((tool as any).schema.safeParse(input).success).toBe(true);
+
+    const result = JSON.parse(await (tool as any).call(input));
+
+    expect(result.status).toBe("uploaded");
+    expect(beforeUpload).toHaveBeenCalledWith({
+      seriesId: 13,
+      episodeNumber: 1,
+      videoPath: "/tmp/video.mp4",
+    });
+    expect(insertMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps episode identity optional for legitimate standalone uploads", () => {
+    const tool = buildYoutubeUploadTool();
+
+    expect((tool as any).schema.safeParse({
+      videoPath: "/tmp/video.mp4",
+      title: "Standalone story",
+      description: "Uploaded without production state integration.",
+    }).success).toBe(true);
+    expect(tool.description).toContain("optional only for standalone uploads");
   });
 });

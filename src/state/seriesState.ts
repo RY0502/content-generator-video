@@ -84,6 +84,9 @@ export interface EpisodeRow {
   completedAt: string | null;
   /** Calendar date of completedAt in the configured episode timezone. */
   completionLocalDate: string | null;
+  /** Administrative opt-out from automatic scheduling; this is not completion. */
+  schedulerSkippedAt: string | null;
+  schedulerSkipReason: string | null;
 }
 
 export interface BeginEpisodeNarrationAudioMutationInput {
@@ -609,6 +612,8 @@ function mapEpisodeRow(row: Record<string, unknown>): EpisodeRow {
     uploadedAt: (row.uploaded_at as string | null) ?? null,
     completedAt: (row.completed_at as string | null) ?? null,
     completionLocalDate: (row.completion_local_date as string | null) ?? null,
+    schedulerSkippedAt: (row.scheduler_skipped_at as string | null) ?? null,
+    schedulerSkipReason: (row.scheduler_skip_reason as string | null) ?? null,
   };
 }
 
@@ -1094,6 +1099,8 @@ export class SeriesState {
     await ensureColumn("episodes", "uploaded_at", "TEXT");
     await ensureColumn("episodes", "completed_at", "TEXT");
     await ensureColumn("episodes", "completion_local_date", "TEXT");
+    await ensureColumn("episodes", "scheduler_skipped_at", "TEXT");
+    await ensureColumn("episodes", "scheduler_skip_reason", "TEXT");
     await ensureColumn(
       "episodes",
       "audio_revision",
@@ -1477,6 +1484,7 @@ export class SeriesState {
     const candidateResult = await this.client.execute({
       sql: `SELECT id, series_id, episode_number, title, premise, status, script_json, output_path,
                    youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date,
+                   scheduler_skipped_at, scheduler_skip_reason,
                    CASE WHEN
                      status <> 'pending' OR
                      script_json IS NOT NULL OR output_path IS NOT NULL OR
@@ -1504,6 +1512,7 @@ export class SeriesState {
                    THEN 1 ELSE 0 END AS is_resumable
             FROM episodes
             WHERE series_id = ?
+              AND scheduler_skipped_at IS NULL
               AND (
                 status <> 'done' OR uploaded_at IS NULL OR trim(uploaded_at) = '' OR
                 youtube_video_id IS NULL OR trim(youtube_video_id) = '' OR
@@ -1578,7 +1587,9 @@ export class SeriesState {
     }
 
     const episodeCount = await this.client.execute({
-      sql: "SELECT COUNT(*) AS count FROM episodes WHERE series_id = ?",
+      sql: `SELECT COUNT(*) AS count,
+                   SUM(CASE WHEN scheduler_skipped_at IS NOT NULL THEN 1 ELSE 0 END) AS skipped_count
+            FROM episodes WHERE series_id = ?`,
       args: [seriesId],
     });
     if (Number(episodeCount.rows[0]?.count ?? 0) === 0) {
@@ -1595,7 +1606,9 @@ export class SeriesState {
       episode: null,
       timeZone: gate.timeZone,
       localDate: gate.localDate,
-      message: "Every episode in the series is complete.",
+      message: Number(episodeCount.rows[0]?.skipped_count ?? 0) > 0
+        ? "No schedulable episodes remain; intentionally skipped episodes are not marked complete."
+        : "Every episode in the series is complete.",
     };
   }
 
@@ -1613,7 +1626,8 @@ export class SeriesState {
     positiveSafeInteger("episodeId", episodeId);
     const result = await this.client.execute({
       sql: `SELECT id, series_id, episode_number, title, premise, status, script_json, output_path,
-                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date
+                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date,
+                   scheduler_skipped_at, scheduler_skip_reason
             FROM episodes
             WHERE id = ?
             LIMIT 1`,
@@ -2824,6 +2838,106 @@ export class SeriesState {
     });
   }
 
+  /**
+   * Administratively removes one assembled, never-uploaded episode from the
+   * automatic scheduler without pretending it completed or deleting any of
+   * its media/tracking state. This intentionally is not exposed as an agent
+   * tool: an operator must make the exceptional one-off decision.
+   */
+  async skipEpisodeFromScheduler(
+    seriesId: number,
+    episodeNumber: number,
+    reason: string,
+  ): Promise<EpisodeRow> {
+    await this.initialize();
+    const safeSeriesId = positiveSafeInteger("seriesId", seriesId);
+    const safeEpisodeNumber = positiveSafeInteger("episodeNumber", episodeNumber);
+    const normalizedReason = reason.replace(/\s+/gu, " ").trim();
+    if (!normalizedReason) throw new Error("A scheduler skip reason is required.");
+    if (normalizedReason.length > 500) {
+      throw new Error("A scheduler skip reason must be at most 500 characters.");
+    }
+
+    const skipped = await this.client.execute({
+      sql: `UPDATE episodes AS episode
+            SET scheduler_skipped_at = datetime('now'),
+                scheduler_skip_reason = ?,
+                updated_at = datetime('now')
+            WHERE episode.series_id = ? AND episode.episode_number = ?
+              AND episode.scheduler_skipped_at IS NULL
+              AND episode.status = 'assembly'
+              AND episode.output_path IS NOT NULL AND trim(episode.output_path) <> ''
+              AND episode.uploaded_at IS NULL
+              AND episode.completed_at IS NULL
+              AND episode.youtube_video_id IS NULL
+              AND episode.youtube_url IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM youtube_upload_receipts AS receipt
+                WHERE receipt.series_id = episode.series_id
+                  AND receipt.episode_number = episode.episode_number
+              )
+            RETURNING id`,
+      args: [normalizedReason, safeSeriesId, safeEpisodeNumber],
+    });
+    const current = await this.getEpisodeByNumber(safeSeriesId, safeEpisodeNumber);
+    if (!current) {
+      throw new Error(`Episode ${safeEpisodeNumber} was not found for series ${safeSeriesId}.`);
+    }
+    if (skipped.rowsAffected === 1 || current.schedulerSkippedAt) return current;
+
+    if (await this.getYoutubeUploadReceipt(safeSeriesId, safeEpisodeNumber)) {
+      throw new Error(
+        `Episode ${safeEpisodeNumber} already has a YouTube recovery receipt and must be finalized, not skipped.`,
+      );
+    }
+    if (
+      current.uploadedAt || current.completedAt || current.youtubeVideoId || current.youtubeUrl ||
+      current.status === "done"
+    ) {
+      throw new Error(`Episode ${safeEpisodeNumber} has upload/completion evidence and cannot be skipped.`);
+    }
+    throw new Error(
+      `Episode ${safeEpisodeNumber} can be skipped only after assembly with a persisted output path.`,
+    );
+  }
+
+  /** Re-enables automatic scheduling for an administratively skipped episode. */
+  async unskipEpisodeFromScheduler(
+    seriesId: number,
+    episodeNumber: number,
+  ): Promise<EpisodeRow> {
+    await this.initialize();
+    const safeSeriesId = positiveSafeInteger("seriesId", seriesId);
+    const safeEpisodeNumber = positiveSafeInteger("episodeNumber", episodeNumber);
+    const result = await this.client.execute({
+      sql: `UPDATE episodes AS episode
+            SET scheduler_skipped_at = NULL,
+                scheduler_skip_reason = NULL,
+                updated_at = datetime('now')
+            WHERE episode.series_id = ? AND episode.episode_number = ?
+              AND episode.scheduler_skipped_at IS NOT NULL
+              AND episode.status <> 'done'
+              AND episode.uploaded_at IS NULL
+              AND episode.completed_at IS NULL
+              AND episode.youtube_video_id IS NULL
+              AND episode.youtube_url IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM youtube_upload_receipts AS receipt
+                WHERE receipt.series_id = episode.series_id
+                  AND receipt.episode_number = episode.episode_number
+              )`,
+      args: [safeSeriesId, safeEpisodeNumber],
+    });
+    const current = await this.getEpisodeByNumber(safeSeriesId, safeEpisodeNumber);
+    if (!current) {
+      throw new Error(`Episode ${safeEpisodeNumber} was not found for series ${safeSeriesId}.`);
+    }
+    if (result.rowsAffected === 1 || !current.schedulerSkippedAt) return current;
+    throw new Error(
+      `Episode ${safeEpisodeNumber} has upload/completion evidence and cannot be unskipped safely.`,
+    );
+  }
+
   /** Returns the durable recovery receipt written immediately after YouTube succeeds. */
   async getYoutubeUploadReceipt(
     seriesId: number,
@@ -2864,6 +2978,12 @@ export class SeriesState {
     const episode = await this.getEpisodeByNumber(seriesId, episodeNumber);
     if (!episode) {
       throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
+    }
+    if (episode.schedulerSkippedAt) {
+      throw new Error(
+        `Episode ${episodeNumber} is intentionally skipped from automatic scheduling and YouTube upload. ` +
+        "Unskip it explicitly before uploading.",
+      );
     }
     if (
       episode.status === "done" && episode.uploadedAt?.trim() &&
@@ -2931,6 +3051,12 @@ export class SeriesState {
     const episode = await this.getEpisodeByNumber(params.seriesId, params.episodeNumber);
     if (!episode) {
       throw new Error(`Episode ${params.episodeNumber} was not found for series ${params.seriesId}.`);
+    }
+    if (episode.schedulerSkippedAt) {
+      throw new Error(
+        `Episode ${params.episodeNumber} is intentionally skipped from automatic scheduling and YouTube upload. ` +
+        "Unskip it explicitly before recording an upload.",
+      );
     }
     if (episode.youtubeVideoId && episode.youtubeVideoId !== videoId) {
       throw new Error(
@@ -3798,7 +3924,8 @@ export class SeriesState {
     await this.initialize();
     const res = await this.client.execute({
       sql: `SELECT id, series_id, episode_number, title, premise, status, script_json, output_path,
-                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date
+                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date,
+                   scheduler_skipped_at, scheduler_skip_reason
             FROM episodes
             WHERE series_id = ?
             ORDER BY episode_number ASC`,
@@ -3814,7 +3941,8 @@ export class SeriesState {
     await this.initialize();
     const res = await this.client.execute({
       sql: `SELECT id, series_id, episode_number, title, premise, status, script_json, output_path,
-                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date
+                   youtube_video_id, youtube_url, uploaded_at, completed_at, completion_local_date,
+                   scheduler_skipped_at, scheduler_skip_reason
             FROM episodes
             WHERE series_id = ? AND episode_number = ?
             LIMIT 1`,

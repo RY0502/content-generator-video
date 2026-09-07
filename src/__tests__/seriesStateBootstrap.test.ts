@@ -385,6 +385,8 @@ describe("SeriesState blank database bootstrap", () => {
         "uploaded_at",
         "completed_at",
         "completion_local_date",
+        "scheduler_skipped_at",
+        "scheduler_skip_reason",
         "updated_at",
       ]),
     );
