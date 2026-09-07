@@ -19,9 +19,10 @@ import {
   type AgnesVideoTask,
 } from "../providers/agnes/index.js";
 import {
-  buildEpisodeKeyArtPrompt,
-  buildSeriesKeyArtPrompt,
+  buildEpisodeKeyArtVideoPrompt,
+  buildSeriesKeyArtVideoPrompt,
   CHARACTER_INTEGRITY_NEGATIVE_BIBLE,
+  TEMPORAL_STABILITY_NEGATIVE_BIBLE,
 } from "../promptBuilder.js";
 import {
   AgnesKeyArtAudioMutationDeferredError,
@@ -59,6 +60,8 @@ const OUTPUT_FPS = 30;
 export const VIDEO_DURATION_TOLERANCE_SECONDS = (1 / OUTPUT_FPS) + 0.005;
 /** Bump whenever canonical scene-frame timing semantics change. */
 export const AGNES_NORMALIZATION_VERSION = 2;
+/** Stable prefix for operator-visible, secret-free Agnes workflow progress. */
+export const AGNES_PROGRESS_LOG_PREFIX = "[AgnesVideo]";
 const REQUEST_DIGEST_VERSION = 3;
 const RECEIPT_SCHEMA_VERSION = 3;
 const LEGACY_RECEIPT_SCHEMA_VERSION = 2;
@@ -75,6 +78,36 @@ export const AGNES_STALE_SUBMISSION_LEASE_MS = 10 * 60_000;
 type EpisodeScript = { scenes: Array<Omit<ScenePromptInput, "seriesId">> };
 type AttemptState = "submitting" | "accepted" | "definite_rejection" | "ambiguous";
 type SubmissionPhase = "claim_created" | "post_started";
+
+type AgnesProgressValue = string | number | boolean | null | undefined;
+
+function safeProgressError(error: unknown, providerPrompt?: string): string {
+  const withoutPrompt = providerPrompt?.trim()
+    ? safeError(error).split(providerPrompt.trim()).join("[prompt omitted]")
+    : safeError(error);
+  return withoutPrompt
+    .replace(/https?:\/\/\S+/giu, "[url omitted]")
+    .replace(
+      /\b(api[-_ ]?key|authorization|bearer|token)\b\s*[:=]?\s*[^\s,;]+/giu,
+      "$1=[redacted]",
+    )
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/gu, "[redacted]")
+    .slice(0, 320);
+}
+
+function logAgnesProgress(
+  event: string,
+  metadata: Record<string, AgnesProgressValue>,
+  level: "info" | "warn" | "error" = "info",
+): void {
+  const compactMetadata = Object.fromEntries(
+    Object.entries(metadata).filter(([, value]) => value !== undefined),
+  );
+  const message = `${AGNES_PROGRESS_LOG_PREFIX} ${event}`;
+  if (level === "error") console.error(message, compactMetadata);
+  else if (level === "warn") console.warn(message, compactMetadata);
+  else console.log(message, compactMetadata);
+}
 
 interface AgnesAttemptReceipt {
   attemptNumber: number;
@@ -110,6 +143,8 @@ interface PreparedScene {
   assetKind: "series_key_art" | "episode_key_art" | "scene";
   assetLabel: string;
   manifestIndex: number;
+  /** Populated once the full episode manifest has been prepared. */
+  manifestSize?: number;
   input: ScenePromptInput;
   durationSeconds: number;
   providerSeconds: number;
@@ -123,6 +158,18 @@ interface PreparedScene {
   normalizedPath: string;
   rawPath: string;
   promptPath: string;
+}
+
+function assetProgressMetadata(scene: PreparedScene): Record<string, AgnesProgressValue> {
+  return {
+    assetLabel: scene.assetLabel,
+    assetKind: scene.assetKind,
+    assetPosition: scene.manifestIndex + 1,
+    assetCount: scene.manifestSize,
+    sceneNumber: scene.assetKind === "scene" ? scene.input.sceneNumber : undefined,
+    targetSeconds: Number(scene.durationSeconds.toFixed(3)),
+    providerSeconds: scene.providerSeconds,
+  };
 }
 
 type AgnesClientLike = Pick<AgnesVideoClient, "submitVideo" | "retrieveVideo" | "downloadCompletedVideo">;
@@ -169,6 +216,8 @@ interface WorkflowRuntime {
   submissionBatchSizePerAccount: number;
   totalSubmissionConcurrency: number;
   downloadConcurrency: number;
+  submissionIntervalMsPerAccount: number;
+  statusIntervalMsPerAccount: number;
   queuePollIntervalMs: number;
   queuePollWindowMs: number;
   /** Lives only for one production agent runtime/invocation. */
@@ -554,14 +603,28 @@ export function buildAgnesVideoPrompt(params: {
   if (params.variant === "reference") {
     throw new Error("Agnes image-reference generation is disabled in the video-only scene flow.");
   }
+  // The documented `seconds` request field controls provider duration, while
+  // normalization uses the exact measured WAV duration. Avoid a competing
+  // fractional duration instruction inside the creative prompt.
+  void params.targetDurationSeconds;
+  const canonicalPrompt = params.canonicalScenePrompt.trim();
+  const isStructuredVideoPrompt = [
+    "SUBJECT AND SETTING",
+    "ACTION AND CHANGE",
+    "CAMERA",
+    "VISUAL STYLE",
+    "SOUND AND RHYTHM",
+    "CONSISTENCY REQUIREMENTS",
+  ].every((section) => canonicalPrompt.includes(section));
+  if (isStructuredVideoPrompt) return withCharacterIntegrityGuard(canonicalPrompt);
   return [
-    `Create one continuous cinematic children's storybook animation lasting about ${params.targetDurationSeconds.toFixed(2)} seconds.`,
-    "Use the complete locked character descriptions below as identity constraints throughout the shot.",
-    "Animate the described visible action with gentle, readable body movement, facial expression, environmental motion, and a smooth restrained camera move. Keep one location and one coherent moment; no cuts, montage, time jump, or new action.",
-    "Preserve the exact 2D painterly art style and all character colors, anatomy, clothing, accessories, figure counts, and spatial relationships for the full clip. Do not morph, duplicate, replace, or add characters.",
-    "Do not add captions, text, logos, narration, dialogue audio, music, or sound effects. The provider audio track will be discarded and the existing Groq narration will be added during assembly.",
-    withCharacterIntegrityGuard(params.canonicalScenePrompt),
-  ].join(" ");
+    `SUBJECT AND SETTING — ${canonicalPrompt}`,
+    "ACTION AND CHANGE — Animate one continuous visible beat with gentle, readable movement and no cut, montage, or time jump.",
+    "CAMERA — Use one smooth restrained camera move, or a fixed camera when movement is not needed.",
+    "VISUAL STYLE — Preserve the supplied children's storybook style, lighting, color, and atmosphere.",
+    "SOUND AND RHYTHM — Silent visual-only shot. No narration, dialogue, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE} ${TEMPORAL_STABILITY_NEGATIVE_BIBLE}`,
+  ].filter(Boolean).join(" ");
 }
 
 /** Builds one gently animated title-card shot while keeping its only title stable. */
@@ -573,15 +636,25 @@ export function buildAgnesKeyArtVideoPrompt(params: {
 }): string {
   const label = params.kind === "series" ? "series" : "episode";
   const title = canonicalizeKeyArtTitle(params.title, params.kind);
+  void params.targetDurationSeconds;
+  const canonicalPrompt = params.canonicalKeyArtPrompt.trim();
+  const isStructuredVideoPrompt = [
+    "SUBJECT AND SETTING",
+    "ACTION AND CHANGE",
+    "CAMERA",
+    "VISUAL STYLE",
+    "SOUND AND RHYTHM",
+    "CONSISTENCY REQUIREMENTS",
+  ].every((section) => canonicalPrompt.includes(section));
+  if (isStructuredVideoPrompt) return withCharacterIntegrityGuard(canonicalPrompt);
   return [
-    `Create one continuous cinematic children's storybook ${label} key-art animation lasting about ${params.targetDurationSeconds.toFixed(2)} seconds.`,
-    `Render the exact title ${JSON.stringify(title)} once and keep its spelling, placement, letter shapes, and readability stable for the full clip. Do not add any other text.`,
-    "Use the complete locked character descriptions below as identity constraints throughout the shot.",
-    "Animate the poster with only gentle character breathing, blinking, small friendly gestures, subtle environmental motion, and a smooth restrained camera drift. Keep one composition; no cuts, montage, time jump, morph, or new action.",
-    "Preserve the exact 2D painterly style, character colors, species-correct anatomy, clothing, accessories, figure counts, and spatial relationships for the full clip.",
-    "Do not add narration, dialogue audio, music, or sound effects. The provider audio track will be discarded and the matching Groq title audio will be added during assembly.",
-    withCharacterIntegrityGuard(params.canonicalKeyArtPrompt),
-  ].join(" ");
+    `SUBJECT AND SETTING — One animated children's ${label} title card. Render the exact title ${JSON.stringify(title)} once. ${canonicalPrompt}`,
+    "ACTION AND CHANGE — Use only gentle character and environmental motion; keep one composition with no cut, montage, or time jump.",
+    "CAMERA — Use a very slow straight push-in while keeping the title plane stable.",
+    "VISUAL STYLE — Premium colorful 2D painterly children's storybook animation.",
+    "SOUND AND RHYTHM — Silent visual-only title card. No narration, dialogue, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — Keep the exact title stable and add no other text. ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE} ${TEMPORAL_STABILITY_NEGATIVE_BIBLE}`,
+  ].filter(Boolean).join(" ");
 }
 
 function hasDurableOrPotentialProviderWork(row: AgnesSceneGenerationRow | null): boolean {
@@ -822,15 +895,27 @@ async function retrieveTaskWithOwningAccount(
 
 async function acknowledgeQueue(
   runtime: WorkflowRuntime,
+  scene: PreparedScene,
   envelope: AgnesSceneReceiptEnvelope,
   initial: AgnesVideoTask,
 ): Promise<AgnesVideoTask> {
   let task = initial;
+  const accountId = accountForTask(runtime, latestAttempt(envelope), initial)?.accountId;
   const acknowledged = () => ["queued", "in_progress", "completed", "failed"].includes(String(task.status));
   if (acknowledged()) return task;
   const deadline = Date.now() + runtime.queuePollWindowMs;
+  let pollNumber = 0;
   while (Date.now() < deadline) {
-    await delay(Math.min(runtime.queuePollIntervalMs, Math.max(0, deadline - Date.now())));
+    pollNumber += 1;
+    const waitMs = Math.min(runtime.queuePollIntervalMs, Math.max(0, deadline - Date.now()));
+    logAgnesProgress("queue_poll_wait", {
+      ...assetProgressMetadata(scene),
+      accountId,
+      pollNumber,
+      waitSeconds: Number((waitMs / 1_000).toFixed(1)),
+      providerStatus: task.status,
+    });
+    await delay(waitMs);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -849,8 +934,23 @@ async function acknowledgeQueue(
     } finally {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     }
-    if (retrieved.kind === "deadline") break;
+    if (retrieved.kind === "deadline") {
+      logAgnesProgress("queue_poll_timeout", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        pollNumber,
+        providerStatus: task.status,
+      }, "warn");
+      break;
+    }
     task = retrieved.value;
+    logAgnesProgress("queue_poll_result", {
+      ...assetProgressMetadata(scene),
+      accountId,
+      pollNumber,
+      providerStatus: task.status,
+      progress: task.progress,
+    });
     if (acknowledged()) return task;
   }
   return task;
@@ -997,6 +1097,8 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     submissionBatchSizePerAccount: perAccountConcurrency,
     totalSubmissionConcurrency: Math.max(1, accounts.length * perAccountConcurrency),
     downloadConcurrency: perAccountConcurrency,
+    submissionIntervalMsPerAccount: submissionIntervalMs,
+    statusIntervalMsPerAccount: statusIntervalMs,
     queuePollIntervalMs: options.queuePollIntervalMs ?? CONFIG.agnesQueuePollIntervalMs,
     queuePollWindowMs: options.queuePollWindowMs ?? CONFIG.agnesQueuePollWindowMs,
     attemptedSubmissions: new Set<string>(),
@@ -1115,26 +1217,27 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       {
         kind: "series",
         audio: seriesAudio,
-        characterNames: lockedCharacters.map(({ name }) => name),
-        canonicalPrompt: buildSeriesKeyArtPrompt({
+        characterNames: [protagonist.name],
+        canonicalPrompt: buildSeriesKeyArtVideoPrompt({
           conceptName: seriesTitle,
           conceptSummary: seriesInfo.episodeFormula.trim()
             || `A warm preschool adventure series starring ${lockedCharacters.map(({ name }) => name).join(", ")}.`,
-          characterNames: lockedCharacters.map(({ name }) => name),
-          characterDescriptions: lockedCharacters.map(({ description }) => description),
+          environmentDescription: script.scenes[0]?.environmentDescription,
+          characterNames: [protagonist.name],
+          characterDescriptions: [protagonist.description],
         }),
       },
       {
         kind: "episode",
         audio: episodeAudio,
         characterNames: [protagonist.name],
-        canonicalPrompt: buildEpisodeKeyArtPrompt({
+        canonicalPrompt: buildEpisodeKeyArtVideoPrompt({
           conceptName: seriesTitle,
           episodeTitle,
           episodePremise: episode.premise,
+          environmentDescription: script.scenes[0]?.environmentDescription,
           mainCharacterName: protagonist.name,
           mainCharacterDescription: protagonist.description,
-          otherCharacters: lockedCharacters.filter(({ name }) => name !== protagonist.name),
         }),
       },
     ];
@@ -1274,6 +1377,7 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       `${expectedEpisodeAudioRevision} -> ${verifiedEpisodeAudioRevision}); rerun against the stable audio set.`,
     );
   }
+  for (const scene of prepared) scene.manifestSize = prepared.length;
   return prepared;
 }
 
@@ -1435,7 +1539,7 @@ function isSubmissionCandidate(
   return !task && latestAttempt(envelope)?.state === "submitting";
 }
 
-async function submitOne(
+async function submitOneInternal(
   runtime: WorkflowRuntime,
   scene: PreparedScene,
   seriesId: number,
@@ -1520,6 +1624,10 @@ async function submitOne(
           },
         };
       }
+      logAgnesProgress("submission_slot_wait", {
+        ...assetProgressMetadata(scene),
+        accountId: account.accountId,
+      });
       await account.submissionGate.wait();
       if (runtime.disabledAccounts.has(account.accountId)) {
         return {
@@ -1622,6 +1730,11 @@ async function submitOne(
       const request: AgnesSubmitVideoRequest = {
         mode: "text", prompt: scene.providerPrompt, seconds: scene.providerSeconds, seed: scene.seed,
       };
+      logAgnesProgress("submission_start", {
+        ...assetProgressMetadata(scene),
+        accountId: account.accountId,
+        attemptNumber: claimedAttempt.attemptNumber,
+      });
       try {
         task = await account.client.submitVideo(request);
       } catch (error) {
@@ -1694,18 +1807,29 @@ async function submitOne(
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, dbStatus(task), {
         error: fingerprintMismatch?.message ?? (task.status === "failed" ? safeError(task.error) : null),
       });
+      logAgnesProgress("submission_accepted", {
+        ...assetProgressMetadata(scene),
+        accountId: account.accountId,
+        attemptNumber: attempt.attemptNumber,
+        providerStatus: task.status,
+      });
       // A valid provider id is an accepted remote side effect even when an
       // injected client reports the wrong credential identity. Fail closed only
       // after durably recording it so a rerun can never submit a duplicate.
       if (fingerprintMismatch) throw fingerprintMismatch;
       if (!["queued", "in_progress", "completed", "failed"].includes(String(task.status))) {
         try {
-          task = await acknowledgeQueue(runtime, envelope, task);
+          task = await acknowledgeQueue(runtime, scene, envelope, task);
           attempt.task = task;
           await persistState(runtime, scene, seriesId, episodeNumber, envelope, dbStatus(task), {
             error: task.status === "failed" ? safeError(task.error) : null,
           });
         } catch (error) {
+          logAgnesProgress("queue_poll_error", {
+            ...assetProgressMetadata(scene),
+            accountId: account.accountId,
+            error: safeProgressError(error, scene.providerPrompt),
+          }, "warn");
           // The accepted video_id remains durable. A later verification call
           // uses that exact account receipt and never submits a replacement.
           await persistState(runtime, scene, seriesId, episodeNumber, envelope, "pending", {
@@ -1723,6 +1847,14 @@ async function submitOne(
           };
         }
       }
+      const queueAcknowledged = ["queued", "in_progress", "completed", "failed"]
+        .includes(String(task.status));
+      logAgnesProgress(queueAcknowledged ? "queue_acknowledged" : "queue_acknowledgement_pending", {
+        ...assetProgressMetadata(scene),
+        accountId: account.accountId,
+        providerStatus: task.status,
+        progress: task.progress,
+      }, task.status === "failed" ? "error" : queueAcknowledged ? "info" : "warn");
       return {
         failover: false,
         result: {
@@ -1750,6 +1882,55 @@ async function submitOne(
       ? "Every currently usable Agnes account rejected this scene with a safe key-scoped limit. Retry in a later run."
       : "No untried Agnes account is available in this invocation.",
   };
+}
+
+async function submitOne(
+  runtime: WorkflowRuntime,
+  scene: PreparedScene,
+  seriesId: number,
+  episodeNumber: number,
+  preferredAccountIndex = 0,
+): Promise<Record<string, unknown>> {
+  try {
+    const result = await submitOneInternal(
+      runtime,
+      scene,
+      seriesId,
+      episodeNumber,
+      preferredAccountIndex,
+    );
+    const accountId = typeof result.accountId === "string" ? result.accountId : undefined;
+    const status = typeof result.status === "string" ? result.status : "unknown";
+    const providerStatus = typeof result.providerStatus === "string"
+      ? result.providerStatus
+      : undefined;
+    if (result.error !== undefined) {
+      logAgnesProgress("submission_error", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        status,
+        error: safeProgressError(result.error, scene.providerPrompt),
+      }, status === "failed" || status === "blocked" ? "error" : "warn");
+    }
+    logAgnesProgress("submission_result", {
+      ...assetProgressMetadata(scene),
+      accountId,
+      status,
+      providerStatus,
+      reused: result.reused === true,
+      failoverEligible: result.failoverEligible === true,
+      ambiguousOutcome: result.ambiguousOutcome === true,
+    });
+    return result;
+  } catch (error) {
+    logAgnesProgress("submission_error", {
+      ...assetProgressMetadata(scene),
+      status: "threw",
+      errorKind: error instanceof AgnesError ? error.kind : "unexpected",
+      error: safeProgressError(error, scene.providerPrompt),
+    }, "error");
+    throw error;
+  }
 }
 
 async function initializeAll(
@@ -1795,14 +1976,61 @@ async function ensureRosterBeforeFirstAgnesClaim(
   });
 }
 
+function logAgnesPhaseStart(
+  runtime: WorkflowRuntime,
+  phase: "submit" | "verify" | "download",
+  seriesId: number,
+  episodeNumber: number,
+): void {
+  logAgnesProgress("phase_start", {
+    phase,
+    seriesId,
+    episodeNumber,
+    accountCount: runtime.accounts.length,
+    workersPerAccount: runtime.submissionBatchSizePerAccount,
+    totalConcurrency: runtime.totalSubmissionConcurrency,
+    submissionSpacingSecondsPerAccount: Number(
+      (runtime.submissionIntervalMsPerAccount / 1_000).toFixed(1),
+    ),
+    statusSpacingSecondsPerAccount: Number(
+      (runtime.statusIntervalMsPerAccount / 1_000).toFixed(1),
+    ),
+    queuePollSeconds: Number((runtime.queuePollIntervalMs / 1_000).toFixed(1)),
+    queueWindowSeconds: Number((runtime.queuePollWindowMs / 1_000).toFixed(1)),
+  });
+}
+
+function logPreparedAssets(
+  phase: "submit" | "verify" | "download",
+  scenes: readonly PreparedScene[],
+): void {
+  logAgnesProgress("prepared", {
+    phase,
+    assetCount: scenes.length,
+    sceneCount: scenes.filter(({ assetKind }) => assetKind === "scene").length,
+    keyArtCount: scenes.filter(({ assetKind }) => assetKind !== "scene").length,
+    targetDurationSeconds: Number(
+      scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0).toFixed(3),
+    ),
+  });
+}
+
 async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<string> {
+  logAgnesPhaseStart(runtime, "submit", seriesId, episodeNumber);
   await ensureRosterBeforeFirstAgnesClaim(runtime, seriesId, episodeNumber);
   const scenes = await prepareEpisode(runtime, seriesId, episodeNumber);
+  logPreparedAssets("submit", scenes);
   const states = await initializeAll(runtime, scenes, seriesId, episodeNumber);
   // Snapshot candidates: a retry-safe failure is never re-attempted in this invocation.
   const candidates = states.filter(({ row, envelope }) => (
     isSubmissionCandidate(row, envelope)
   )).map(({ scene }) => scene);
+  logAgnesProgress("submission_plan", {
+    phase: "submit",
+    assetCount: scenes.length,
+    pendingSubmissionCount: candidates.length,
+    alreadyDurableCount: scenes.length - candidates.length,
+  });
   const results = await mapConcurrent(candidates, runtime.totalSubmissionConcurrency, (scene) => (
     submitOne(
       runtime,
@@ -1849,6 +2077,17 @@ async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumb
   }).length;
   const sceneCount = scenes.filter(({ assetKind }) => assetKind === "scene").length;
   const keyArtCount = scenes.length - sceneCount;
+  logAgnesProgress("phase_summary", {
+    phase: "submit",
+    status: failed ? "partial_failure" : pending ? "pending" : "submitted",
+    assetCount: scenes.length,
+    attemptedCount: results.length,
+    alreadyAcceptedCount,
+    acknowledged,
+    awaitingAcknowledgement,
+    pending,
+    failed,
+  });
   return JSON.stringify({
     status: failed ? "partial_failure" : pending ? "pending" : "submitted",
     phase: "submit",
@@ -1880,12 +2119,20 @@ async function runSubmit(runtime: WorkflowRuntime, seriesId: number, episodeNumb
 }
 
 async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<string> {
+  logAgnesPhaseStart(runtime, "verify", seriesId, episodeNumber);
   const scenes = await prepareEpisode(runtime, seriesId, episodeNumber);
+  logPreparedAssets("verify", scenes);
   const states = await initializeAll(runtime, scenes, seriesId, episodeNumber);
   const pendingScenes = states.filter(({ row, envelope }) => (
     isSubmissionCandidate(row, envelope)
   )).map(({ scene }) => scene);
   if (pendingScenes.length) {
+    logAgnesProgress("submission_plan", {
+      phase: "verify",
+      assetCount: scenes.length,
+      pendingSubmissionCount: pendingScenes.length,
+      alreadyDurableCount: scenes.length - pendingScenes.length,
+    });
     const results = await mapConcurrent(pendingScenes, runtime.totalSubmissionConcurrency, (scene) => (
       submitOne(
         runtime,
@@ -1895,6 +2142,13 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
         runtime.accounts.length > 0 ? scene.manifestIndex % runtime.accounts.length : 0,
       )
     ));
+    logAgnesProgress("phase_summary", {
+      phase: "verify",
+      status: "submission_attempted",
+      assetCount: scenes.length,
+      attemptedCount: results.length,
+      pending: pendingScenes.length,
+    });
     return JSON.stringify({
       status: "submission_attempted",
       phase: "verify",
@@ -1908,6 +2162,12 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
     row.status === "failed" || (!activeTask(envelope) && row.status === "submitted")
   ));
   if (blocked.length) {
+    logAgnesProgress("phase_summary", {
+      phase: "verify",
+      status: "blocked",
+      assetCount: scenes.length,
+      failed: blocked.length,
+    }, "warn");
     return JSON.stringify({
       status: "blocked",
       phase: "verify",
@@ -1916,6 +2176,12 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
   }
   const results = await mapConcurrent(states, runtime.totalSubmissionConcurrency, async ({ scene, row, envelope }) => {
     if (await reusableCanonicalVideo(runtime, scene, row, envelope)) {
+      logAgnesProgress("verify_status_result", {
+        ...assetProgressMetadata(scene),
+        providerStatus: "completed",
+        progress: 100,
+        source: "local_video",
+      });
       return {
         sceneNumber: scene.input.sceneNumber,
         status: "completed",
@@ -1925,9 +2191,20 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       };
     }
     const task = activeTask(envelope);
-    if (!task) return { sceneNumber: scene.input.sceneNumber, status: "missing_receipt", downloadReady: false };
+    if (!task) {
+      logAgnesProgress("verify_status_error", {
+        ...assetProgressMetadata(scene),
+        status: "missing_receipt",
+      }, "error");
+      return { sceneNumber: scene.input.sceneNumber, status: "missing_receipt", downloadReady: false };
+    }
     if (task.status === "failed") {
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, "failed", { error: safeError(task.error) });
+      logAgnesProgress("verify_status_result", {
+        ...assetProgressMetadata(scene),
+        providerStatus: "failed",
+        progress: task.progress,
+      }, "error");
       return { sceneNumber: scene.input.sceneNumber, status: "failed", downloadReady: false };
     }
     // Completion is terminal for an accepted Agnes task. Re-querying every
@@ -1941,6 +2218,13 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
           error: null,
         });
       }
+      logAgnesProgress("verify_status_result", {
+        ...assetProgressMetadata(scene),
+        accountId: accountForTask(runtime, latestAttempt(envelope), task)?.accountId,
+        providerStatus: "completed",
+        progress: 100,
+        source: "durable_receipt",
+      });
       return {
         sceneNumber: scene.input.sceneNumber,
         status: "completed",
@@ -1951,12 +2235,24 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       };
     }
     try {
+      const accountId = accountForTask(runtime, latestAttempt(envelope), task)?.accountId;
+      logAgnesProgress("verify_status_start", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        previousProviderStatus: task.status,
+      });
       const latest = await retrieveTaskWithOwningAccount(runtime, envelope, task);
       if (!latest) throw new Error("The Agnes status lane could not reserve a request slot.");
       latestAttempt(envelope)!.task = latest;
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, dbStatus(latest), {
         error: latest.status === "failed" ? safeError(latest.error) : null,
       });
+      logAgnesProgress("verify_status_result", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        providerStatus: latest.status,
+        progress: latest.progress,
+      }, latest.status === "failed" ? "error" : "info");
       return {
         sceneNumber: scene.input.sceneNumber,
         status: latest.status,
@@ -1966,11 +2262,25 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       };
     } catch (error) {
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, dbStatus(task), { error: safeError(error) });
+      logAgnesProgress("verify_status_error", {
+        ...assetProgressMetadata(scene),
+        accountId: accountForTask(runtime, latestAttempt(envelope), task)?.accountId,
+        previousProviderStatus: task.status,
+        error: safeProgressError(error, scene.providerPrompt),
+      }, "warn");
       return { sceneNumber: scene.input.sceneNumber, status: "check_failed", downloadReady: false, error: safeError(error) };
     }
   });
   const ready = results.filter((result) => result.downloadReady).length;
   const failed = results.filter((result) => ["failed", "missing_receipt"].includes(result.status)).length;
+  logAgnesProgress("phase_summary", {
+    phase: "verify",
+    status: failed ? "blocked" : ready === scenes.length ? "ready_to_download" : "awaiting_generation",
+    assetCount: scenes.length,
+    readyToDownload: ready,
+    pending: scenes.length - ready - failed,
+    failed,
+  }, failed ? "warn" : "info");
   return JSON.stringify({
     status: failed ? "blocked" : ready === scenes.length ? "ready_to_download" : "awaiting_generation",
     phase: "verify",
@@ -1987,7 +2297,9 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
 }
 
 async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<string> {
+  logAgnesPhaseStart(runtime, "download", seriesId, episodeNumber);
   const scenes = await prepareEpisode(runtime, seriesId, episodeNumber);
+  logPreparedAssets("download", scenes);
   const states = await initializeAll(runtime, scenes, seriesId, episodeNumber);
   const readiness = await Promise.all(states.map(async ({ scene, row, envelope }) => {
     if (await reusableCanonicalVideo(runtime, scene, row, envelope)) return true;
@@ -1995,6 +2307,14 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
     return task?.status === "completed" && Boolean(task.metadata?.url);
   }));
   if (!readiness.every(Boolean)) {
+    const notReady = readiness.filter((ready) => !ready).length;
+    logAgnesProgress("phase_summary", {
+      phase: "download",
+      status: "not_ready",
+      assetCount: scenes.length,
+      readyToDownload: scenes.length - notReady,
+      pending: notReady,
+    }, "warn");
     return JSON.stringify({
       status: "not_ready",
       phase: "download",
@@ -2008,6 +2328,14 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
     });
   }
   const results = await mapConcurrent(states, runtime.downloadConcurrency, async ({ scene, row, envelope }) => {
+    const existingTask = activeTask(envelope);
+    const accountId = existingTask
+      ? accountForTask(runtime, latestAttempt(envelope), existingTask)?.accountId
+      : undefined;
+    logAgnesProgress("download_start", {
+      ...assetProgressMetadata(scene),
+      accountId,
+    });
     if (await reusableCanonicalVideo(runtime, scene, row, envelope)) {
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, "completed", {
         rawOutputPath: envelope.rawPath,
@@ -2015,6 +2343,11 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
         completedAt: new Date().toISOString(),
         downloadStatus: "downloaded",
         error: null,
+      });
+      logAgnesProgress("download_reused", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        source: "normalized_video",
       });
       return { sceneNumber: scene.input.sceneNumber, status: "completed", path: scene.normalizedPath, reused: true };
     }
@@ -2028,9 +2361,19 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
         });
         envelope.rawPath = scene.rawPath;
         envelope.sha256 = downloaded.sha256;
+        logAgnesProgress("download_raw_complete", {
+          ...assetProgressMetadata(scene),
+          accountId,
+          source: "provider",
+        });
       } else {
         envelope.rawPath = scene.rawPath;
         envelope.sha256 ??= await sha256File(scene.rawPath);
+        logAgnesProgress("download_reused", {
+          ...assetProgressMetadata(scene),
+          accountId,
+          source: "raw_video",
+        });
       }
       const rawDurationSeconds = await runtime.probeMediaDuration(scene.rawPath);
       if (rawDurationSeconds + VIDEO_DURATION_TOLERANCE_SECONDS < scene.durationSeconds) {
@@ -2040,6 +2383,11 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
           "Refusing to add frozen-frame padding; retry the provider generation.",
         );
       }
+      logAgnesProgress("download_normalize_start", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        rawDurationSeconds: Number(rawDurationSeconds.toFixed(3)),
+      });
       await runtime.normalizeVideo({
         inputPath: scene.rawPath,
         outputPath: scene.normalizedPath,
@@ -2053,16 +2401,33 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
         downloadStatus: "downloaded",
         error: null,
       });
+      logAgnesProgress("download_normalized", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        status: "completed",
+      });
       return { sceneNumber: scene.input.sceneNumber, status: "completed", path: scene.normalizedPath };
     } catch (error) {
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, "completed", {
         downloadStatus: "failed",
         error: safeError(error),
       });
+      logAgnesProgress("download_error", {
+        ...assetProgressMetadata(scene),
+        accountId,
+        error: safeProgressError(error, scene.providerPrompt),
+      }, "error");
       return { sceneNumber: scene.input.sceneNumber, status: "pending", error: safeError(error) };
     }
   });
   const completed = results.filter((result) => result.status === "completed").length;
+  logAgnesProgress("phase_summary", {
+    phase: "download",
+    status: completed === scenes.length ? "completed" : "pending",
+    assetCount: scenes.length,
+    completed,
+    pending: scenes.length - completed,
+  }, completed === scenes.length ? "info" : "warn");
   return JSON.stringify({
     status: completed === scenes.length ? "completed" : "pending",
     phase: "download",
@@ -2092,6 +2457,13 @@ async function runWithScriptPreflightResult(
   try {
     return await operation();
   } catch (error) {
+    logAgnesProgress("phase_error", {
+      phase,
+      seriesId,
+      episodeNumber,
+      errorKind: error instanceof AgnesError ? error.kind : error instanceof Error ? error.name : "unknown",
+      error: safeProgressError(error),
+    }, "error");
     if (error instanceof EpisodeAudioMutationInProgressError) {
       return JSON.stringify({
         status: "audio_mutation_deferred",

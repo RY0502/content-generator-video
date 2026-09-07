@@ -62,7 +62,7 @@ function productionScript(label = "Promoted") {
       }],
       supportingEntities: ["Ladybug friend: tiny red ladybug with seven round black spots"],
       continuityAnchors: ["Berry: one glossy raspberry-red berry held above the short grass"],
-      sceneDetails: `Pip remains visible at distinct meadow marker ${index + 1} beside the berry and clubhouse.`,
+      sceneDetails: `Pip and Ladybug friend remain visible at distinct meadow marker ${index + 1} beside the berry and clubhouse.`,
       cameraAngle: "medium wide shot at child eye level",
       lighting: "warm soft morning sunlight",
     })),

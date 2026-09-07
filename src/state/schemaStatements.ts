@@ -41,6 +41,8 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
     uploaded_at TEXT,
     completed_at TEXT,
     completion_local_date TEXT,
+    scheduler_skipped_at TEXT,
+    scheduler_skip_reason TEXT,
     audio_revision INTEGER NOT NULL DEFAULT 0 CHECK (audio_revision >= 0),
     audio_mutation_token TEXT,
     audio_mutation_scene_number INTEGER

@@ -55,6 +55,80 @@ afterEach(async () => {
 });
 
 describe("SeriesState one-episode-per-day selection", () => {
+  it("advances past an intentionally skipped assembled episode without marking it complete", async () => {
+    const { state, seriesId } = await createState();
+    await stateClient(state).execute({
+      sql: `UPDATE episodes
+            SET status = 'assembly', script_json = '{}', output_path = '/tmp/episode-1.mp4'
+            WHERE series_id = ? AND episode_number = 1`,
+      args: [seriesId],
+    });
+
+    const skipped = await state.skipEpisodeFromScheduler(
+      seriesId,
+      1,
+      "Keep the evaluated render but do not publish it.",
+    );
+    expect(skipped).toMatchObject({
+      episodeNumber: 1,
+      status: "assembly",
+      outputPath: "/tmp/episode-1.mp4",
+      schedulerSkipReason: "Keep the evaluated render but do not publish it.",
+      youtubeVideoId: null,
+      uploadedAt: null,
+      completedAt: null,
+    });
+    expect(skipped.schedulerSkippedAt).toBeTruthy();
+    expect(await state.getNextEpisodeAvailability(seriesId, {
+      now: new Date("2026-09-07T12:00:00.000Z"),
+      timeZone: "UTC",
+    })).toMatchObject({
+      kind: "ready",
+      episode: { episodeNumber: 2, status: "pending" },
+    });
+    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 1, {
+      now: new Date("2026-09-07T12:00:00.000Z"),
+      timeZone: "UTC",
+    })).rejects.toThrow("intentionally skipped");
+    await expect(state.recordYoutubeUploadReceipt({
+      seriesId,
+      episodeNumber: 1,
+      videoId: "must-not-upload",
+      url: "https://www.youtube.com/watch?v=must-not-upload",
+    })).rejects.toThrow("intentionally skipped");
+
+    const restored = await state.unskipEpisodeFromScheduler(seriesId, 1);
+    expect(restored.schedulerSkippedAt).toBeNull();
+    expect(await state.getNextEpisodeAvailability(seriesId, {
+      now: new Date("2026-09-07T12:00:00.000Z"),
+      timeZone: "UTC",
+    })).toMatchObject({
+      kind: "ready",
+      episode: { episodeNumber: 1, status: "assembly" },
+    });
+  });
+
+  it("allows scheduler skipping only for assembled episodes with no upload evidence", async () => {
+    const { state, seriesId } = await createState();
+    await expect(state.skipEpisodeFromScheduler(seriesId, 1, "Skip this one."))
+      .rejects.toThrow("only after assembly");
+
+    await stateClient(state).execute({
+      sql: `UPDATE episodes
+            SET status = 'assembly', output_path = '/tmp/episode-1.mp4'
+            WHERE series_id = ? AND episode_number = 1`,
+      args: [seriesId],
+    });
+    await state.recordYoutubeUploadReceipt({
+      seriesId,
+      episodeNumber: 1,
+      videoId: "video-1",
+      url: "https://www.youtube.com/watch?v=video-1",
+    });
+    await expect(state.skipEpisodeFromScheduler(seriesId, 1, "Skip this one."))
+      .rejects.toThrow("recovery receipt");
+  });
+
   it("uses the configured local calendar day across the UTC/IST boundary", async () => {
     const { state, seriesId } = await createState();
     // Both instants are September 5 in India, although the stored UTC date is September 4.

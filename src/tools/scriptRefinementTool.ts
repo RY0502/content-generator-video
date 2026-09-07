@@ -389,10 +389,11 @@ const completeChunkSceneSchema = z.object({
     "TARGET: 120-260 characters of concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500.",
   ),
   action: boundedRequiredText("action", 1_500).describe(
-    "TARGET: 70-180 characters for one visible action and emotion beat; hard maximum 1500. Do not repeat environment or camera prose.",
+    "TARGET: 70-180 characters for one continuous visible action/emotion progression with a clear start, one movement/change, and a readable end state that fits within 12 seconds; hard maximum 1500. No cuts or montage. Do not repeat environment or camera prose.",
   ),
   characterNames: z.array(boundedRequiredText("characterNames entry", 200)).max(12).describe(
-    "Only characters visible in this shot, using exact stored names and no descriptors.",
+    "Only main characters actually visible in this shot, using exact stored names and no descriptors. " +
+    "Together with supportingEntities, this is the complete exact on-screen cast: count every visible individual once and omit every off-screen individual.",
   ),
   characterVisuals: z.array(chunkCharacterVisualSchema).max(12).describe(
     "One compact identity record per characterName in the same order; do not duplicate wardrobe or scene prose here.",
@@ -401,19 +402,25 @@ const completeChunkSceneSchema = z.object({
     boundedRequiredText("supportingEntities entry", 1_000).describe(
       "TARGET: at most 220 characters per stable name + locked visual descriptor; include only visible entities and reuse unchanged text verbatim.",
     ),
-  ).max(12).describe("Usually 0-3 concise visible supporting-entity descriptors."),
+  ).max(12).describe(
+    "Each entry is exactly one named visible individual, never a group/herd/flock/cluster. " +
+    "Together with characterNames, this is the complete exact on-screen cast; do not leave any visible figure uncounted.",
+  ),
   continuityAnchors: z.array(
     boundedRequiredText("continuityAnchors entry", 1_000).describe(
       "TARGET: at most 220 characters per concrete continuing prop/layout/state anchor; reuse unchanged text verbatim.",
     ),
-  ).max(16).describe("Usually 0-3 anchors needed for this shot; avoid duplicating environment prose."),
+  ).max(16).describe(
+    "Usually 0-3 anchors needed for this shot; non-living props/layout/environment state only. " +
+    "Never put a character, animal, living object, pose, or action here; use action/sceneDetails instead.",
+  ),
   sceneDetails: boundedRequiredText("sceneDetails", 2_500).describe(
     "TARGET: 180-360 characters for exact blocking, poses, expressions, prop state, and the new visible beat; hard maximum 2500. " +
     "For scenes with a complex cast or important visual setup, write at least 60 characters and either " +
     "two sentence-like parts or three comma/colon/semicolon-separated visual clauses. Do not repeat the full environment, camera, or lighting text.",
   ),
   cameraAngle: boundedRequiredText("cameraAngle", 500).describe(
-    "TARGET: 25-100 characters naming framing, viewpoint, and any deliberate movement; hard maximum 500.",
+    "TARGET: 25-100 characters naming framing, viewpoint, and exactly one deliberate push/pull/pan/tilt/tracking move or fixed camera; hard maximum 500.",
   ),
   lighting: boundedRequiredText("lighting", 500).describe(
     "TARGET: 30-120 characters naming source, color/quality, and mood; hard maximum 500.",
@@ -449,12 +456,12 @@ export const episodeScriptChunkAuthoringPlanSchema = z.object({
     boundedRequiredText("authoringPlan.supportingEntityBible entry", 1_000).describe(
       "TARGET: at most 220 characters for one reusable stable name + locked visual descriptor.",
     ),
-  ).max(12).describe("Only recurring supporting entities; do not repeat beat prose."),
+  ).max(12).describe("Only recurring single-individual supporting entities; never groups, herds, flocks, families, or clusters."),
   continuityBible: z.array(
     boundedRequiredText("authoringPlan.continuityBible entry", 1_000).describe(
       "TARGET: at most 220 characters for one episode-wide prop/layout/state rule.",
     ),
-  ).max(16).describe("Only continuity rules reused across ranges; avoid duplicates."),
+  ).max(16).describe("Only non-living prop/layout/environment rules reused across ranges; never character or creature state."),
 }).strict();
 
 export type EpisodeScriptChunkAuthoringPlan = z.infer<
@@ -685,6 +692,24 @@ function validateAuthoringPlanCoverage(
   if (plan.beats.at(-1)?.endScene !== targetSceneCount) {
     issues.push(`authoringPlan beats must cover scene 1 through ${targetSceneCount} exactly.`);
   }
+  const supportingIdentities = plan.supportingEntityBible.map(supportingIdentity);
+  plan.supportingEntityBible.forEach((descriptor, index) => {
+    if (COLLECTIVE_SUPPORTING_IDENTITY_PATTERN.test(supportingIdentities[index] ?? "")) {
+      issues.push(
+        `authoringPlan.supportingEntityBible[${index}] must name one individual, not a group/herd/flock/cluster.`,
+      );
+    }
+  });
+  plan.continuityBible.forEach((anchor, index) => {
+    const prefix = supportingIdentity(anchor);
+    if (supportingIdentities.some((identity) => (
+      identity && (prefix === identity || prefix.startsWith(`${identity} `))
+    ))) {
+      issues.push(
+        `authoringPlan.continuityBible[${index}] redefines a supporting figure; continuity rules are non-living only.`,
+      );
+    }
+  });
   return issues;
 }
 
@@ -802,8 +827,35 @@ function normalizeText(value: string | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-function hasMeaningfulContinuityAnchors(scene: EpisodeScene): boolean {
-  return Array.isArray(scene.continuityAnchors) && scene.continuityAnchors.some((anchor) => anchor.trim().length > 0);
+function supportingIdentity(descriptor: string): string {
+  return descriptor.split(":", 1)[0]!.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+const COLLECTIVE_SUPPORTING_IDENTITY_PATTERN =
+  /\b(?:cluster|crowd|duo|family|flock|group|herd|pair|trio)\b/iu;
+const AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN =
+  /\b(?:animals?|bab(?:y|ies)|backpacks?|bags?|boys?|children|companions?|creatures?|crew|dinos?|dinosaurs?|duo|everyone|family|friends?|girls?|groups?|kids?|others?|pair|people|team|trio)\b/iu;
+const UNCOUNTED_BACKGROUND_FIGURE_PATTERN =
+  /\b(?:bystanders?|crowds?|flocks?|herds?|onlookers?|groups? of (?:animals|children|creatures|dinosaurs?|people)|grazing (?:animals|creatures|dinosaurs?|herbivores?))\b/iu;
+
+function withoutStableFigureNames(text: string, names: readonly string[]): string {
+  return [...names]
+    .sort((left, right) => right.length - left.length)
+    .reduce((output, name) => {
+      // Overlong malformed names are validated separately. Avoid constructing
+      // an engine-sized dynamic RegExp before that bounded issue is returned.
+      if (!name || name.length > 500) return output;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      return output.replace(new RegExp(`\\b${escaped}\\b`, "giu"), " ");
+    }, text);
+}
+
+function mentionedStableFigureNames(text: string, names: readonly string[]): string[] {
+  return names.filter((name) => {
+    if (!name || name.length > 500) return false;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "iu").test(text);
+  });
 }
 
 function hasMeaningfulSupportingEntities(scene: EpisodeScene): boolean {
@@ -868,11 +920,11 @@ async function repairSceneFields(params: {
     "Return ONLY valid JSON with this exact shape: {\"continuityAnchors\": string[]?, \"supportingEntities\": string[]?, \"sceneDetails\": string?}. " +
     "Do not rewrite narrationText, environmentDescription, action, characterNames, cameraAngle, or lighting. " +
     "Your job is ONLY to repair continuityAnchors, supportingEntities, and/or sceneDetails. " +
-    "If supportingEntities are needed (e.g. secondary guest characters, guides, scribes, or baby animals mentioned in the action/narration or continuing from previous scenes), include them with locked exact visual descriptions. " +
-    "If continuityAnchors are needed, make them explicit, drawable, and reusable across adjacent scenes using concrete details like color, pattern, material, shape, size, placement, and current state. " +
+    "If supportingEntities are needed, include every visible supporting individual exactly once with a locked exact visual description. Never encode a group, pair, family, herd, flock, crowd, or cluster as one supporting entity. " +
+    "continuityAnchors may describe only non-living props, layout, and environmental state—never a character, animal, living object, pose, or action. Make each needed anchor explicit, drawable, and reusable using concrete details like color, pattern, material, shape, size, placement, and state. " +
     "If sceneDetails are weak, rewrite them into a vivid single-moment visual description that clearly places the required characters and props in the frame. " +
     "Ensure sceneDetails and props strictly respect each character's canonical wardrobe — do not invent unapproved hats, bags, clothing, or accessories for characters who do not have them. " +
-    "Preserve continuity of recurring supportingEntities and continuityAnchors from the previous scene when they continue in the story. " +
+    "Preserve a supportingEntities descriptor only if that same individual remains visible. Preserve a continuityAnchor only if its non-living prop/setup remains visible. " +
     "If the environment changed, do NOT carry forward previous continuityAnchors unless the current scene explicitly preserves a moved/shared object or setup. " +
     "Return one JSON object only, no markdown and no commentary.";
 
@@ -883,8 +935,8 @@ async function repairSceneFields(params: {
     `Issues to fix:\n- ${params.issues.join("\n- ")}\n\n` +
     `Repair only continuityAnchors, supportingEntities, and sceneDetails for the target scene. ` +
     (params.sameEnvironmentAsPrevious
-      ? `If the previous scene contains reusable continuityAnchors or supportingEntities for continuing figures/setups, carry them forward and adapt only if the current narration/action clearly changes their state.`
-      : `Because the environment changed, generate continuityAnchors from the current scene itself unless the current narration/action explicitly preserves a moved/shared object, guide, or setup from the previous scene.`);
+      ? `If the previous scene contains a reusable non-living continuityAnchor or a supporting individual still visible now, carry only that item forward; never copy character state into continuityAnchors.`
+      : `Because the environment changed, use continuityAnchors only for a moved/shared non-living prop or setup explicitly visible in the current scene.`);
 
   const raw = await chatText({
     systemPrompt,
@@ -996,6 +1048,17 @@ export function validateEpisodeScript(
   }
 
   const sceneBeatBySignature = new Map<string, number>();
+  const knownFigureIdentities = new Set(
+    [...(canonicalCast ?? [])].map((name) => name.toLowerCase()),
+  );
+  script.scenes.forEach((scene) => {
+    if (!Array.isArray(scene.supportingEntities)) return;
+    scene.supportingEntities.forEach((descriptor) => {
+      if (typeof descriptor === "string" && descriptor.trim()) {
+        knownFigureIdentities.add(supportingIdentity(descriptor));
+      }
+    });
+  });
   script.scenes.forEach((scene, index) => {
     const label = `Scene ${index + 1}`;
     if (!scene.environmentDescription.trim()) {
@@ -1071,16 +1134,95 @@ export function validateEpisodeScript(
         );
       }
     }
+    if (isFullProduction) {
+      const supportingEntities = Array.isArray(scene.supportingEntities)
+        ? scene.supportingEntities.filter((entity) => typeof entity === "string" && entity.trim())
+        : [];
+      const supportingIdentities = supportingEntities.map(supportingIdentity);
+      if (new Set(supportingIdentities).size !== supportingIdentities.length) {
+        issues.push(`${label} supportingEntities contains the same stable identity more than once.`);
+      }
+      supportingEntities.forEach((descriptor) => {
+        const identity = supportingIdentity(descriptor);
+        if (COLLECTIVE_SUPPORTING_IDENTITY_PATTERN.test(identity)) {
+          issues.push(
+            `${label} supporting entity "${descriptor.split(":", 1)[0]}" is a group. ` +
+            "Each supportingEntities entry must identify exactly one visible individual.",
+          );
+        }
+      });
+      (scene.continuityAnchors ?? []).forEach((anchor) => {
+        const overlappingFigures = mentionedStableFigureNames(anchor, [...knownFigureIdentities]);
+        if (overlappingFigures.length > 0) {
+          issues.push(
+            `${label} continuity anchor "${anchor.split(":", 1)[0]}" redefines a character or living entity. ` +
+            "continuityAnchors are only for non-living props, layout, and environmental state; keep figure state in action or sceneDetails.",
+          );
+        }
+      });
+      const figuresInEnvironment = mentionedStableFigureNames(
+        scene.environmentDescription,
+        [...knownFigureIdentities],
+      );
+      if (figuresInEnvironment.length > 0) {
+        issues.push(
+          `${label} environmentDescription mentions visible figure ${JSON.stringify(figuresInEnvironment[0])}. ` +
+          "Keep environments figure-free and put every visible individual only in characterNames or supportingEntities.",
+        );
+      }
+      if (UNCOUNTED_BACKGROUND_FIGURE_PATTERN.test(scene.environmentDescription)) {
+        issues.push(
+          `${label} environmentDescription introduces uncounted background figures. ` +
+          "Keep environments figure-free and list every visible individual in characterNames or supportingEntities.",
+        );
+      }
+      const exactSceneFigureNames = [
+        ...scene.characterNames,
+        ...supportingEntities.map((descriptor) => descriptor.split(":", 1)[0]!.trim()),
+      ];
+      const declaredButUnstagedFigures = exactSceneFigureNames.filter(
+        (name) => mentionedStableFigureNames(
+          `${scene.action} ${scene.sceneDetails ?? ""}`,
+          [name],
+        ).length === 0,
+      );
+      if (declaredButUnstagedFigures.length > 0) {
+        issues.push(
+          `${label} declares figure ${JSON.stringify(declaredButUnstagedFigures[0])} but never names it in action/sceneDetails. ` +
+          "Explicitly stage every declared visible individual by its exact stable name so the cast count is unambiguous.",
+        );
+      }
+      const exactSceneFigureIdentitySet = new Set(
+        exactSceneFigureNames.map((name) => name.toLowerCase()),
+      );
+      const unlistedKnownFigures = [...knownFigureIdentities].filter(
+        (identity) => !exactSceneFigureIdentitySet.has(identity),
+      );
+      const mentionedUnlistedFigures = mentionedStableFigureNames(
+        `${scene.action} ${scene.sceneDetails ?? ""}`,
+        unlistedKnownFigures,
+      );
+      if (mentionedUnlistedFigures.length > 0) {
+        issues.push(
+          `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(mentionedUnlistedFigures[0])}. ` +
+          "Every visible figure must be counted exactly once in characterNames or supportingEntities for this scene.",
+        );
+      }
+      const visualTextWithoutStableNames = withoutStableFigureNames(
+        `${scene.action} ${scene.sceneDetails ?? ""}`,
+        exactSceneFigureNames,
+      );
+      if (AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN.test(visualTextWithoutStableNames)) {
+        issues.push(
+          `${label} action/sceneDetails uses a collective or generic cast alias. ` +
+          "Use the exact stable name of every visible figure, including object characters, so one alias cannot become a second body.",
+        );
+      }
+    }
     if (countNarrativeBeats(scene.narrationText) >= 2) {
       issues.push(`${label} narration appears overloaded with multiple beats and should be split.`);
     }
     const previousScene = index > 0 ? script.scenes[index - 1] : null;
-    const sameEnvironmentAsPrevious = previousScene
-      ? normalizeText(previousScene.environmentDescription) === normalizeText(scene.environmentDescription)
-      : false;
-    if (sameEnvironmentAsPrevious && !hasMeaningfulContinuityAnchors(scene)) {
-      issues.push(`${label} continues the same setup/location as the previous scene but is missing continuityAnchors.`);
-    }
     if (previousScene && hasMeaningfulSupportingEntities(previousScene) && !hasMeaningfulSupportingEntities(scene)) {
       const combined = `${scene.narrationText} ${scene.action} ${scene.sceneDetails ?? ""}`.toLowerCase();
       if (previousScene.supportingEntities!.some((e) => {
@@ -1091,7 +1233,7 @@ export function validateEpisodeScript(
       }
     }
 
-    const requiresRicherSceneDetails = scene.characterNames.length >= 4 || (scene.characterNames.length > 0 && sceneMentionsVisualSetup(scene));
+    const requiresRicherSceneDetails = scene.characterNames.length >= 3 || (scene.characterNames.length > 0 && sceneMentionsVisualSetup(scene));
     if (requiresRicherSceneDetails && hasWeakSceneDetails(scene)) {
       issues.push(
         `${label} needs richer sceneDetails for reliable video generation because it has a complex cast or important visual setup. ` +
@@ -1141,18 +1283,19 @@ async function rewriteScript(params: {
     `ONE SCENE = ONE AUDIO = ONE VIDEO (CRITICAL): Keep exactly one visible beat per scene. Each narrationText must be one or two concise sentences, no more than ${NARRATION_MAX_RAW_CHARACTERS} raw characters including vocal directions, and no more than ${NARRATION_MAX_SPOKEN_WORDS} spoken words. Aim for ${NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS}-${NARRATION_MAX_SPOKEN_WORDS} spoken words and no more than ${NARRATION_AUTHORING_TARGET_MAX_RAW_CHARACTERS} raw characters so the measured Groq narration normally lands around 7-${NARRATION_TARGET_MAX_AUDIO_SECONDS} seconds and never requires two Agnes clips. ` +
     "Split scenes when a narration paragraph contains multiple visible moments, action changes, emotional turns, time jumps, or too much speech for one clip. Never duplicate or lightly renumber the same narration/action beat to reach the scene or runtime target. " +
     `TOTAL RUNTIME & WORD COUNT DISCIPLINE (CRITICAL): The episode must reach at least ${params.targetRuntimeMinutes} minutes and ${requiredWords} total spoken words across ${params.minScenes}-${params.maxScenes} concise scenes. Add meaningful consecutive visual beats; never lengthen an individual narration beyond the per-scene limits. ` +
-    "SPLIT-METADATA PRESERVATION (CRITICAL): When splitting one source scene into consecutive child scenes, preserve its environmentDescription verbatim while the location is unchanged. Preserve each character's exact characterVisuals entry and keep it aligned with characterNames. Copy every supportingEntities descriptor verbatim into each child where that entity remains present or interacting. Copy continuityAnchors verbatim through all children until the narration explicitly changes that visual state; after a state change, create one concrete replacement anchor and carry that exact replacement forward. Divide action and sceneDetails into one clear visible sub-action and emotion per child. Preserve cameraAngle and lighting unless the new visible beat deliberately requires a change. " +
+    "SPLIT-METADATA PRESERVATION (CRITICAL): When splitting one source scene into consecutive child scenes, preserve its environmentDescription verbatim while the location is unchanged. Preserve each visible character's exact characterVisuals entry and keep it aligned with characterNames. Copy a supportingEntities descriptor only into children where that one individual remains visible. Copy only non-living continuityAnchors through children while that prop/layout/environment state remains visible; never use an anchor for a character, creature, living object, pose, or action. Divide action and sceneDetails into one clear visible sub-action and emotion per child. Preserve cameraAngle and lighting unless the new visible beat deliberately requires a change. " +
     "Preserve the story, characters, tone, and continuity. Expand by splitting overloaded scenes rather than inventing filler. " +
     "Use full character names. Keep narration warm, vivid, and suitable for ages 2-5. " +
-    "CRITICAL CAST DISCIPLINE: characterNames must ONLY contain the main series characters present in that scene. Do NOT invent new character names in characterNames. Any secondary/extra creature or background animal (e.g. baby duck, butterfly, bird) must be placed in supportingEntities (e.g. ['Baby duck: tiny yellow duckling with orange bill']) or described in narrationText/action, never in characterNames. " +
+    "CRITICAL CAST DISCIPLINE: characterNames must contain every main series character actually visible in that shot exactly once and no off-screen roster member. supportingEntities must contain every visible secondary figure exactly once. The combined arrays are the scene's authoritative exact figure count; do not impose an arbitrary cast-size ceiling and do not invent unlisted background figures. Do NOT invent new character names in characterNames. Every visible secondary creature must be placed in supportingEntities (e.g. ['Baby duck: tiny yellow duckling with orange bill']), never merely implied in visual prose. Each supporting entry is exactly one individual, never a family, pair, herd, flock, group, crowd, or cluster. Keep environmentDescription free of people, animals, creatures, living objects, and other background figures. " +
+    "VISUAL NAME DISCIPLINE: In action and sceneDetails, name each visible individual by its exact stable name. Do not use collective or generic aliases such as 'the children', 'the friends', 'everyone', 'the boys', 'the backpack', 'the bag', or 'the baby dinosaur'. " +
     "WARDROBE & ACCESSORY CONTINUITY (CRITICAL): Characters must strictly maintain their canonical appearance and wardrobe across all scenes. Never describe characters acquiring, wearing, or carrying unapproved clothing, hats, sunhats, dresses, shirts, shoes, bags, satchels, or glasses in narrationText, action, or sceneDetails unless explicitly defined in their canonical character description or introduced as an explicit episodic plot prop. " +
-    "SUPPORTING ENTITY CONTINUITY (CRITICAL): When an episode features guest characters, guides, scribes, baby animals, or secondary recurring figures, define them in supportingEntities with locked visual descriptions (e.g. ['Cleo the Scribe: young Egyptian girl with straight black hair, white linen tunic, blue beaded collar, holding a tablet']). Carry that EXACT supportingEntities descriptor forward across EVERY scene where that guest figure appears or interacts with the group. Never drop supportingEntities from intermediate scenes. " +
-    "OBJECT CHARACTERS & COMPANIONS (CRITICAL): When an object character (e.g. a living backpack, talking clock, animated toy, companion item) is in the scene, always refer to it consistently by its character name. Avoid ambiguous phrasing that implies both a generic personal possession and a separate character in the same sentence (e.g., write 'Tara zipped up Bobo and gave him a pat' instead of 'Tara zipped up her backpack and gave Bobo a pat') to prevent the video model from creating two separate items in the scene. " +
+    "SUPPORTING ENTITY CONTINUITY (CRITICAL): When an episode features a guest character, guide, scribe, baby animal, or secondary recurring figure, define that one individual in supportingEntities with a locked visual description (e.g. ['Cleo the Scribe: young Egyptian girl with straight black hair, white linen tunic, blue beaded collar, holding a tablet']). Carry that EXACT descriptor only across scenes where the same individual remains visible, and omit it whenever off-camera. " +
+    "OBJECT CHARACTERS & COMPANIONS (CRITICAL): When an object character (e.g. Bobo, a talking clock, animated toy, companion item) is visible, refer to it only by its exact character name in action and sceneDetails. Never call it 'the backpack', 'the bag', or a generic possession, and never imply it is both worn/carried and freestanding in the same shot. " +
     "For every scene, include characterVisuals for every character in the same order as characterNames. characterVisuals is mandatory; output [] when characterNames is empty. sceneDetails, cameraAngle, and lighting are also mandatory and non-empty. " +
     "Use visualForm to explicitly define body ontology so the video model does not guess: real_creature, humanoid, anthropomorphic_creature, object_character, or fantasy_creature. " +
     "Use speciesOrType when helpful, such as 'butterfly', 'sparrow', 'little girl', 'talking teapot', or 'dragon'. " +
     "Set humanoidAllowed to false for real animals/insects/birds that must not become humanoid, and true only when a humanoid body plan is intentionally allowed by the story. " +
-    "When a prop, layout, setup, or visual state continues across adjacent scenes, use continuityAnchors to carry that continuity explicitly. " +
+    "When a non-living prop, layout, setup, or environmental state continues visibly across adjacent scenes, use continuityAnchors to carry that continuity explicitly. " +
     "Each continuityAnchors entry must be a short exact visual descriptor that includes concrete appearance details whenever applicable: color, pattern, material, shape, size, placement, and current state/change. " +
     "Good example: 'Picnic setup: red-and-white checkered blanket spread flat on green grass with three round yellow apple slices, two brown cookies, and pale green leaf cups near the top edge.' " +
     "Reuse the exact same continuityAnchors strings across continuing scenes. Only remove or replace an anchor when the narration clearly changes or removes that setup.";
@@ -1169,15 +1312,15 @@ async function rewriteScript(params: {
     `Mode: ${params.mode}\n` +
     `Target scene count: ${params.minScenes}-${params.maxScenes}\n` +
     `Target runtime: at least ${params.targetRuntimeMinutes} minutes (minimum ${requiredWords} total spoken words)\n` +
-    `Per-scene narration contract: 1-2 sentences, <=${NARRATION_MAX_RAW_CHARACTERS} raw characters, <=${NARRATION_MAX_SPOKEN_WORDS} spoken words, authored for <=${NARRATION_MAX_AUDIO_SECONDS} seconds of measured Groq audio.\n` +
+    `Per-scene narration contract: 1-2 sentences, <=${NARRATION_MAX_RAW_CHARACTERS} raw characters, <=${NARRATION_MAX_SPOKEN_WORDS} spoken words, authored for <=${NARRATION_MAX_AUDIO_SECONDS} seconds of measured Groq audio. Visual cast contract: characterNames plus supportingEntities declares the exact number of visible individuals, each exactly once, with no unlisted figures.\n` +
     `Fixed main-character roster (characterNames may contain ONLY these exact names): ${JSON.stringify(params.mainCharacterNames ?? [])}\n` +
     canonicalContextText +
     (params.issues && params.issues.length > 0 ? `Deterministic issues to fix:\n- ${params.issues.join("\n- ")}\n\n` : "") +
     `Current script JSON:\n${JSON.stringify(params.script)}\n\n` +
     `Task: Review this episode and refine it so the final result lands in the target scene range, uses one visual beat and one bounded narration per scene, and preserves the complete story by splitting overloaded scenes into smaller consecutive scenes. ` +
     `Also ensure every scene contains characterVisuals entries aligned 1:1 with characterNames so each character's visual ontology is explicit instead of inferred. ` +
-    `For every split, preserve the source environmentDescription, exact characterVisuals entries, supportingEntities descriptors, continuityAnchors, cameraAngle, and lighting according to the split-metadata rules above; rewrite only what must change to express each child's visible sub-action. ` +
-    `Also add or preserve continuityAnchors whenever a visual setup should continue across adjacent scenes. Make every continuity anchor concretely drawable by explicitly naming visual attributes like color, pattern, material, shape, placement, and current state when relevant, and ensure recurring guest figures or secondary characters have their supportingEntities descriptor preserved across all scenes where they appear. Return the full updated JSON only.`;
+    `For every split, preserve the source environmentDescription, exact visible characterVisuals entries, on-screen supportingEntities descriptors, non-living continuityAnchors, cameraAngle, and lighting according to the split-metadata rules above; rewrite only what must change to express each child's visible sub-action. ` +
+    `Add or preserve a continuityAnchor only while a non-living prop/layout/environment setup stays visible. Make it concretely drawable by naming color, pattern, material, shape, placement, and current state when relevant. Preserve each recurring supporting descriptor only in scenes where that individual is actually visible. Return the full updated JSON only.`;
 
   const raw = await chatText({
     systemPrompt: baseSystemPrompt,
@@ -2424,6 +2567,8 @@ export function buildEpisodeScriptChunkTool(
           nextAction: "Start a fresh run and reload the ready episode with get_next_episode.",
         });
       }
+      const characters = await seriesState.getSeriesCharacters(episode.seriesId);
+      const mainCharacterNames = characters.map((character) => character.name);
 
       let currentDraft = await seriesState.getEpisodeScriptDraft(input.episodeId);
       let currentEnvelope = currentDraft
@@ -2569,6 +2714,50 @@ export function buildEpisodeScriptChunkTool(
             currentDraft,
           });
         }
+        const existingPrefixValidation = validateEpisodeScriptChunkPrefix({
+          script: {
+            title: currentEnvelope.title,
+            premise: currentEnvelope.premise,
+            scenes: currentEnvelope.scenes as EpisodeScene[],
+          },
+          targetSceneCount: currentEnvelope.authoring.targetSceneCount,
+          mainCharacterNames,
+        });
+        if (!existingPrefixValidation.pass) {
+          return JSON.stringify({
+            status: "script_chunk_restart_required",
+            persisted: false,
+            scenePrefixPreserved: true,
+            retryable: true,
+            retryThisInvocation: false,
+            noProgress: true,
+            episodeId: input.episodeId,
+            draftRevision: currentDraft.revision,
+            validation: publicValidationReceipt(
+              compactProductionValidationEnvelope({
+                title: currentEnvelope.title,
+                premise: currentEnvelope.premise,
+                scenes: currentEnvelope.scenes as EpisodeScene[],
+              }, existingPrefixValidation),
+            ),
+            restartPlan: {
+              targetSceneCount: currentEnvelope.authoring.targetSceneCount,
+              authoringPlan: currentEnvelope.authoring.plan,
+              nextSceneNumber: 1,
+              nextSceneEnd: Math.min(
+                EPISODE_SCRIPT_SCENES_PER_CHUNK,
+                currentEnvelope.authoring.targetSceneCount,
+              ),
+            },
+            nextAction:
+              `Start a fresh run and call write_episode_script_chunk with operation=restart, ` +
+              `episodeId=${input.episodeId}, expectedDraftRevision=${currentDraft.revision}, ` +
+              `the returned targetSceneCount and authoringPlan, and corrected scenes 1-${Math.min(
+                EPISODE_SCRIPT_SCENES_PER_CHUNK,
+                currentEnvelope.authoring.targetSceneCount,
+              )}. The old prefix predates the current direct-video cast contract.`,
+          });
+        }
         writeKind = "revise";
         writeExpectedRevision = currentDraft.revision;
         baseEnvelope = currentEnvelope;
@@ -2581,22 +2770,36 @@ export function buildEpisodeScriptChunkTool(
           });
         }
         if (currentEnvelope) {
-          return JSON.stringify({
-            status: "restart_blocked",
-            persisted: false,
-            retryable: true,
-            retryThisInvocation: false,
-            noProgress: true,
-            episodeId: input.episodeId,
-            draftRevision: currentDraft.revision,
-            authoringProgress: chunkProgressReceipt(currentDraft),
-            nextAction: "This draft is already being assembled in chunks; append its exact next range instead.",
+          const currentPrefixValidation = validateEpisodeScriptChunkPrefix({
+            script: {
+              title: currentEnvelope.title,
+              premise: currentEnvelope.premise,
+              scenes: currentEnvelope.scenes as EpisodeScene[],
+            },
+            targetSceneCount: currentEnvelope.authoring.targetSceneCount,
+            mainCharacterNames,
           });
+          if (currentPrefixValidation.pass) {
+            return JSON.stringify({
+              status: "restart_blocked",
+              persisted: false,
+              retryable: true,
+              retryThisInvocation: false,
+              noProgress: true,
+              episodeId: input.episodeId,
+              draftRevision: currentDraft.revision,
+              authoringProgress: chunkProgressReceipt(currentDraft),
+              nextAction: "This valid draft is already being assembled in chunks; append its exact next range instead.",
+            });
+          }
         }
         if (
-          !isRecord(currentDraft.validation)
-          || currentDraft.validation.pass !== false
-          || draftHasDurableOverlongNarration(currentDraft)
+          !currentEnvelope
+          && (
+            !isRecord(currentDraft.validation)
+            || currentDraft.validation.pass !== false
+            || draftHasDurableOverlongNarration(currentDraft)
+          )
         ) {
           return JSON.stringify({
             status: "restart_blocked",
@@ -2680,8 +2883,6 @@ export function buildEpisodeScriptChunkTool(
         premise: episode.premise,
         scenes: [...baseEnvelope.scenes, ...submittedScenes] as EpisodeScene[],
       };
-      const characters = await seriesState.getSeriesCharacters(episode.seriesId);
-      const mainCharacterNames = characters.map((character) => character.name);
       const isComplete = candidate.scenes.length === targetSceneCount;
       const validation = isComplete
         ? validateProductionRefinementCandidate({

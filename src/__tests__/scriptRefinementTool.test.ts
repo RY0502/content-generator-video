@@ -54,11 +54,16 @@ function validFiveMinuteScript(
       narrationText: narration,
       environmentDescription: `A distinct moonlit meadow clearing number ${index + 1}.`,
       action: `Mia watches the lantern in clearing ${index + 1}.`,
-      characterNames: [],
-      characterVisuals: [],
+      characterNames: ["Mia"],
+      characterVisuals: [{
+        name: "Mia",
+        visualForm: "humanoid" as const,
+        speciesOrType: "young girl",
+        humanoidAllowed: true,
+      }],
       supportingEntities: [],
       continuityAnchors: [],
-      sceneDetails: `The golden lantern and friendly fireflies fill clearing ${index + 1} with a gentle welcoming glow.`,
+      sceneDetails: `Mia stands left of the golden lantern in clearing ${index + 1}. Friendly fireflies trace one gentle arc above the quiet grass.`,
       cameraAngle: "medium wide shot at child eye level",
       lighting: "soft golden lantern light beneath a deep blue moonlit sky",
     })),
@@ -152,7 +157,7 @@ function chunkAuthoringPlan(targetSceneCount = DEFAULT_PRODUCTION_MIN_SCENES) {
     endingInsight: "Careful observation and teamwork help friends find a safe path.",
     beats,
     supportingEntityBible: [
-      "Firefly cluster: seven tiny golden lights with two pale wings each",
+      "Luma the Firefly: one tiny golden firefly with two pale wings",
     ],
     continuityBible: [
       "Golden lantern: one round brass lantern with a star-shaped window and warm amber flame",
@@ -334,7 +339,12 @@ describe("scriptRefinementTool", () => {
     expect(sceneSchema.properties.narrationText.description).toContain("TARGET: 15-20 spoken words");
     expect(sceneSchema.properties.environmentDescription.description).toContain("TARGET: 120-260 characters");
     expect(sceneSchema.properties.action.description).toContain("TARGET: 70-180 characters");
+    expect(sceneSchema.properties.action.description).toContain("clear start, one movement/change, and a readable end state");
+    expect(sceneSchema.properties.characterNames.description).toContain("complete exact on-screen cast");
+    expect(sceneSchema.properties.supportingEntities.description).toContain("never a group/herd/flock/cluster");
+    expect(sceneSchema.properties.continuityAnchors.description).toContain("Never put a character, animal, living object");
     expect(sceneSchema.properties.cameraAngle.description).toContain("TARGET: 25-100 characters");
+    expect(sceneSchema.properties.cameraAngle.description).toContain("push/pull/pan/tilt/tracking move or fixed camera");
     expect(sceneSchema.properties.lighting.description).toContain("TARGET: 30-120 characters");
     expect(sceneSchema.properties.sceneDetails.description).toContain("at least 60 characters");
     expect(sceneSchema.properties.sceneDetails.description).toContain("three comma/colon/semicolon-separated");
@@ -1366,6 +1376,75 @@ describe("scriptRefinementTool", () => {
     });
   });
 
+  it("routes a legacy ambiguously counted chunk prefix to one deliberate restart instead of an endless append repair", async () => {
+    const plan = chunkAuthoringPlan();
+    const legacyScenes = chunkScenes(1, 8).map((scene) => ({
+      ...scene,
+      characterNames: ["Mia", "Leo", "Tara", "Bobo"],
+      characterVisuals: [
+        { name: "Mia", visualForm: "humanoid" as const },
+        { name: "Leo", visualForm: "humanoid" as const },
+        { name: "Tara", visualForm: "humanoid" as const },
+        { name: "Bobo", visualForm: "object_character" as const },
+      ],
+      sceneDetails: `${scene.sceneDetails} Mia points; Leo watches; Tara smiles; Bobo waits; the children watch the bag.`,
+    }));
+    const initialDraft = {
+      episodeId: 17,
+      revision: 4,
+      contentDigest: "legacy-crowded-prefix",
+      scriptJson: {
+        title: "The Golden Lantern",
+        premise: "Mia helps the meadow friends find their way home.",
+        scenes: legacyScenes,
+        authoring: {
+          protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
+          targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+          plan,
+        },
+      },
+      validation: { pass: true, issues: [] },
+      createdAt: "2026-09-06T00:00:00.000Z",
+      updatedAt: "2026-09-06T00:00:00.000Z",
+    };
+    const fixture = chunkStateForEpisode(initialDraft);
+    fixture.state.getSeriesCharacters.mockResolvedValue([
+      { name: "Mia" }, { name: "Leo" }, { name: "Tara" }, { name: "Bobo" },
+    ]);
+
+    const appendResult = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: 4,
+      scenes: chunkScenes(9, 8),
+    }));
+
+    expect(appendResult).toMatchObject({
+      status: "script_chunk_restart_required",
+      persisted: false,
+      retryThisInvocation: false,
+      draftRevision: 4,
+      restartPlan: { nextSceneNumber: 1, nextSceneEnd: 8 },
+    });
+    expect(appendResult.validation.issues.join(" ")).toContain("collective or generic cast alias");
+    expect(fixture.reviseEpisodeScriptDraft).not.toHaveBeenCalled();
+
+    const restartResult = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "restart",
+      episodeId: 17,
+      expectedDraftRevision: 4,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: plan,
+      scenes: chunkScenes(1, 8),
+    }));
+    expect(restartResult).toMatchObject({
+      status: "script_chunk_appended",
+      persisted: true,
+      draftRevision: 5,
+      authoringProgress: { completedSceneCount: 8, nextSceneNumber: 9 },
+    });
+  });
+
   it("stages a double-encoded detailed draft once without dropping any scene-generation fields", async () => {
     const script = validFiveMinuteScript();
     script.scenes[0] = {
@@ -2338,15 +2417,15 @@ describe("scriptRefinementTool", () => {
     expect(request.systemPrompt).toContain("characterVisuals");
     expect(request.systemPrompt).toContain("visualForm");
     expect(request.systemPrompt).toContain("color, pattern, material, shape, size, placement, and current state/change");
-    expect(request.userText).toContain("add or preserve continuityAnchors");
+    expect(request.userText).toContain("Add or preserve a continuityAnchor only while a non-living prop/layout/environment setup stays visible");
     expect(request.userText).toContain("characterVisuals entries aligned 1:1 with characterNames");
     expect(request.userText).toContain("color, pattern, material, shape, placement, and current state");
     expect(request.systemPrompt).toContain("ONE SCENE = ONE AUDIO = ONE VIDEO");
     expect(request.systemPrompt).toContain(`no more than ${NARRATION_MAX_RAW_CHARACTERS} raw characters`);
     expect(request.systemPrompt).toContain(`no more than ${NARRATION_MAX_SPOKEN_WORDS} spoken words`);
     expect(request.systemPrompt).toContain("preserve its environmentDescription verbatim");
-    expect(request.systemPrompt).toContain("Copy every supportingEntities descriptor verbatim");
-    expect(request.systemPrompt).toContain("Copy continuityAnchors verbatim through all children");
+    expect(request.systemPrompt).toContain("Copy a supportingEntities descriptor only into children where that one individual remains visible");
+    expect(request.systemPrompt).toContain("Copy only non-living continuityAnchors through children");
     expect(request.userText).toContain("For every split, preserve the source environmentDescription");
   });
 
@@ -2621,7 +2700,7 @@ describe("scriptRefinementTool", () => {
     expect(parsed.warnings[1]).toContain("Repair pass failed; keeping last valid script.");
   });
 
-  it("flags continuing setups without continuity anchors and weak sceneDetails for complex scenes", async () => {
+  it("does not manufacture anchors for a repeated environment and still flags weak sceneDetails", async () => {
     chatTextMock
       .mockResolvedValueOnce("not json")
       .mockResolvedValueOnce("still not json")
@@ -2676,9 +2755,7 @@ describe("scriptRefinementTool", () => {
 
     const parsed = JSON.parse(result);
     expect(parsed.validation.pass).toBe(false);
-    expect(parsed.validation.issues).toContain(
-      "Scene 2 continues the same setup/location as the previous scene but is missing continuityAnchors."
-    );
+    expect(parsed.validation.issues.join(" ")).not.toContain("missing continuityAnchors");
     expect(parsed.validation.issues).toContain(
       "Scene 2 needs richer sceneDetails for reliable video generation because it has a complex cast or important visual setup. " +
       "Use at least 60 characters and either two sentence-like parts or at least three comma/colon/semicolon-separated visual clauses."
@@ -2846,7 +2923,7 @@ describe("scriptRefinementTool", () => {
     )?.[0];
     expect(targetedRepairRequest).toBeDefined();
     expect(targetedRepairRequest.userText).toContain("Same environment as previous scene: no");
-    expect(targetedRepairRequest.userText).toContain("Because the environment changed, generate continuityAnchors from the current scene itself");
+    expect(targetedRepairRequest.userText).toContain("Because the environment changed, use continuityAnchors only for a moved/shared non-living prop or setup explicitly visible in the current scene");
     expect(parsed.validation.issues.some((issue: string) => issue.includes("sceneDetails"))).toBe(true);
   });
 
@@ -3035,9 +3112,14 @@ describe("scriptRefinementTool", () => {
       narrationText: boundedNarration,
       environmentDescription: `A distinct moonlit meadow clearing number ${index + 1}.`,
       action: `Mia watches the lantern in clearing ${index + 1}.`,
-      characterNames: [],
-      characterVisuals: [],
-      sceneDetails: "The golden lantern remains centered while soft fireflies trace one gentle arc above the quiet grass.",
+      characterNames: ["Mia"],
+      characterVisuals: [{
+        name: "Mia",
+        visualForm: "humanoid" as const,
+        speciesOrType: "young girl",
+        humanoidAllowed: true,
+      }],
+      sceneDetails: "Mia stands left of the centered golden lantern. Soft fireflies trace one gentle arc above the quiet grass.",
       cameraAngle: "medium wide child-eye-level shot",
       lighting: "warm golden twilight",
     }));
@@ -3051,6 +3133,97 @@ describe("scriptRefinementTool", () => {
     );
 
     expect(validation).toEqual({ pass: true, issues: [] });
+  });
+
+  it("accepts a four-figure production scene when all four are counted and named exactly", () => {
+    const narration =
+      "Mia watches the golden lantern glow softly while friendly fireflies dance above the quiet meadow and everyone smiles together happily.";
+    const scenes = Array.from({ length: DEFAULT_PRODUCTION_MIN_SCENES }, (_, index) => ({
+      sceneNumber: index + 1,
+      narrationText: narration,
+      environmentDescription: `A distinct moonlit meadow clearing number ${index + 1}.`,
+      action: `Mia points while Leo, Tara, and Bobo stand beside marker ${index + 1}.`,
+      characterNames: ["Mia", "Leo", "Tara", "Bobo"],
+      characterVisuals: [
+        { name: "Mia", visualForm: "humanoid" as const },
+        { name: "Leo", visualForm: "humanoid" as const },
+        { name: "Tara", visualForm: "humanoid" as const },
+        { name: "Bobo", visualForm: "object_character" as const },
+      ],
+      supportingEntities: [],
+      continuityAnchors: [],
+      sceneDetails: `Mia points at marker ${index + 1}; Leo stands left; Tara stands right; Bobo waits behind Mia.`,
+      cameraAngle: "wide fixed camera",
+      lighting: "warm golden twilight",
+    }));
+
+    const validation = validateEpisodeScript(
+      { title: "Ensemble Lantern Trail", scenes },
+      DEFAULT_PRODUCTION_MIN_SCENES,
+      DEFAULT_PRODUCTION_MAX_SCENES,
+      5,
+      ["Mia", "Leo", "Tara", "Bobo"],
+    );
+
+    expect(validation).toEqual({ pass: true, issues: [] });
+  });
+
+  it("rejects a declared ensemble member that is absent from visual staging", () => {
+    const validation = validateEpisodeScript({
+      title: "Unstaged Ensemble Member",
+      scenes: [{
+        sceneNumber: 1,
+        narrationText: "Mia studies the little lantern while the moonlit garden becomes quiet and still around her.",
+        environmentDescription: "A moonlit garden beside a small blue gate.",
+        action: "Mia raises the lantern and studies its star-shaped window.",
+        characterNames: ["Mia", "Leo"],
+        characterVisuals: [
+          { name: "Mia", visualForm: "humanoid", speciesOrType: "young girl", humanoidAllowed: true },
+          { name: "Leo", visualForm: "humanoid", speciesOrType: "young boy", humanoidAllowed: true },
+        ],
+        supportingEntities: [],
+        continuityAnchors: [],
+        sceneDetails: "Mia stands left of the blue gate. The lantern glows between Mia's hands while the garden remains still.",
+        cameraAngle: "medium fixed child-eye-level shot",
+        lighting: "soft silver moonlight with a warm lantern glow",
+      }],
+    }, 1, DEFAULT_PRODUCTION_MAX_SCENES, 5, ["Mia", "Leo"], {
+      productionSceneContract: true,
+      deferAggregateMinimums: true,
+    });
+
+    expect(validation.pass).toBe(false);
+    expect(validation.issues.join(" ")).toContain(
+      "declares figure \"Leo\" but never names it in action/sceneDetails",
+    );
+  });
+
+  it("rejects known figures mentioned outside a scene's exact cast arrays", () => {
+    const validation = validateEpisodeScript({
+      title: "Exact Cast Test",
+      scenes: [{
+        sceneNumber: 1,
+        narrationText: "Mia lifts the glowing map and studies its bright trail beside the quiet garden gate.",
+        environmentDescription: "A moonlit garden where Tara waits beside a small blue gate.",
+        action: "Mia lifts the map while Leo waves from the path.",
+        characterNames: ["Mia"],
+        characterVisuals: [{ name: "Mia", visualForm: "humanoid", speciesOrType: "young girl", humanoidAllowed: true }],
+        supportingEntities: [],
+        continuityAnchors: ["Map position: the glowing map rests beside Leo near the blue gate."],
+        sceneDetails: "Mia stands left of the gate; Leo stays on the path; the map glows between them; the garden remains still.",
+        cameraAngle: "medium fixed child-eye-level shot",
+        lighting: "soft silver moonlight with a warm map glow",
+      }],
+    }, 1, DEFAULT_PRODUCTION_MAX_SCENES, 5, ["Mia", "Leo", "Tara"], {
+      productionSceneContract: true,
+      deferAggregateMinimums: true,
+    });
+
+    const text = validation.issues.join(" ");
+    expect(validation.pass).toBe(false);
+    expect(text).toContain("environmentDescription mentions visible figure");
+    expect(text).toContain("action/sceneDetails mentions unlisted figure");
+    expect(text).toContain("continuityAnchors are only for non-living props");
   });
 
   it("rejects a renumbered duplicate narration/action beat", () => {

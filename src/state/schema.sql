@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS episodes (
   uploaded_at TEXT,
   completed_at TEXT,
   completion_local_date TEXT,
+  scheduler_skipped_at TEXT,
+  scheduler_skip_reason TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (series_id, episode_number)
 );
