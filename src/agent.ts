@@ -26,8 +26,9 @@ import {
 import { runWithFinalizer } from "./services/runLifecycle.js";
 import { selectiveCleanupNeon } from "./state/selectiveCleanup.js";
 import { SeriesState } from "./state/seriesState.js";
-import { SYSTEM_PROMPT_EXTENSION } from "./systemPrompt.js";
+import { buildSystemPromptExtension } from "./systemPrompt.js";
 import { buildAgnesSceneVideoTools } from "./tools/agnesSceneVideoTool.js";
+import { buildAgnesVideoQaTool } from "./tools/agnesVideoQaTool.js";
 import { buildCaptionTool } from "./tools/captionTool.js";
 import { buildEnsureSeriesCharacterSheetsTool } from "./tools/characterSheetTool.js";
 import { buildEpisodeAssemblyTool } from "./tools/episodeAssemblyTool.js";
@@ -72,7 +73,7 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
     run: async () => {
       const customState = new CustomStateStore(db);
       const promptHash = hashUserPrompt(conceptPrompt);
-    const youtubeUploadTool = buildYoutubeUploadTool({
+    const youtubeUploadTool = CONFIG.youtubeUploadEnabled ? buildYoutubeUploadTool({
       getExistingUpload: async ({ seriesId, episodeNumber }) => {
         const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
         const episodeReceipt = episode?.uploadedAt && episode.youtubeVideoId && episode.youtubeUrl
@@ -121,11 +122,14 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
       onUploaded: async ({ seriesId, episodeNumber, videoId, url }) => {
         await seriesState.finalizeEpisodeUpload({ seriesId, episodeNumber, videoId, url });
       },
-    });
+    }) : null;
+    const systemPromptExtension = buildSystemPromptExtension(CONFIG.youtubeUploadEnabled);
 
     const runner = new DeepAgentRunner(db, {
       extraTools: [
-        ...buildSeriesStateTools(seriesState),
+        ...buildSeriesStateTools(seriesState, {
+          youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
+        }),
         buildEnsureSeriesCharacterSheetsTool(seriesState, customState, promptHash),
         guardTerminalEpisodeInvocationReceipts(buildEpisodeScriptChunkTool(seriesState)),
         guardTerminalEpisodeInvocationReceipts(buildScriptRefinementTool(seriesState)),
@@ -138,13 +142,18 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
           characterSheetCustomState: customState,
           characterSheetPromptHash: promptHash,
         }),
+        buildAgnesVideoQaTool(seriesState),
         buildEpisodeAssemblyTool(seriesState, { includeKeyArt: true }),
-        buildYoutubeEpisodeMetadataTool(seriesState),
-        buildYoutubeSeriesMetadataTool(seriesState),
-        youtubeUploadTool,
+        ...(youtubeUploadTool
+          ? [
+              buildYoutubeEpisodeMetadataTool(seriesState),
+              buildYoutubeSeriesMetadataTool(seriesState),
+              youtubeUploadTool,
+            ]
+          : []),
       ],
       extraSubagents: [],
-      systemPromptExtension: SYSTEM_PROMPT_EXTENSION,
+      systemPromptExtension,
       callbacks: [new AgentProgressCallback()],
       recursionLimit: 120,
     });
@@ -158,7 +167,8 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
     await seriesState.initialize();
     console.log("[episode-agent] Starting compact production flow", {
       conceptPromptChars: conceptPrompt.length,
-      productionContractChars: SYSTEM_PROMPT_EXTENSION.length,
+      productionContractChars: systemPromptExtension.length,
+      youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
     });
     const result = await runner.run(conceptPrompt);
     await selectiveCleanupNeon({ preserveAgentRuns: true, preserveCustomState: true });

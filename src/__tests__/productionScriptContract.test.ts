@@ -102,6 +102,22 @@ describe("productionScriptContract", () => {
     expect(text).toContain("uses a collective or generic cast alias");
   });
 
+  it("rejects plural supporting identities that can expand into duplicate bodies", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.supportingEntities = ["Mammoths: cinnamon wool, curved ivory tusks, and round brown eyes"];
+    scene.action = "Pip the Ant waves while Mammoths stop beside the berry.";
+    scene.sceneDetails =
+      "Pip the Ant remains left of the berry while Mammoths occupy the right side. " +
+      "The clubhouse and short grass remain clear behind them.";
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain(
+      "Each supportingEntities entry must identify exactly one visible individual",
+    );
+  });
+
   it("does not mistake an exact object-character name for a generic alias", () => {
     const script = productionScript();
     const scene = script.scenes[0]!;
@@ -117,6 +133,55 @@ describe("productionScriptContract", () => {
 
     const result = inspectProductionScript(script, ["Pip the Ant", "Bobo the Backpack"]);
     expect(result.issues.join(" ")).not.toContain("collective or generic cast alias");
+  });
+
+  it("does not treat a legacy short identity inside a declared canonical name as another body", () => {
+    const script = productionScript();
+    script.scenes[0] = {
+      ...script.scenes[0]!,
+      action: "Pip the Ant points while Bobo nudges snow beside the berry.",
+      supportingEntities: [
+        "Bobo: a playful magical living backpack with button eyes and yellow straps",
+      ],
+      sceneDetails:
+        "Pip the Ant stands left of the berry while Bobo waits on the right. " +
+        "Both remain fully visible beside the clubhouse.",
+    };
+    script.scenes[1] = {
+      ...script.scenes[1]!,
+      action: "Pip the Ant points while Bobo the Backpack nudges snow beside the berry.",
+      characterNames: ["Pip the Ant", "Bobo the Backpack"],
+      characterVisuals: [
+        script.scenes[1]!.characterVisuals[0]!,
+        {
+          name: "Bobo the Backpack",
+          visualForm: "object_character",
+          speciesOrType: "living backpack",
+          humanoidAllowed: false,
+        },
+      ],
+      supportingEntities: [],
+      sceneDetails:
+        "Pip the Ant stands left of the berry while Bobo the Backpack waits on the right. " +
+        "Both remain fully visible beside the clubhouse.",
+    };
+
+    const result = inspectProductionScript(
+      script,
+      ["Pip the Ant", "Bobo the Backpack"],
+    );
+    expect(result.issues.join(" ")).not.toContain(
+      'action/sceneDetails mentions unlisted figure "bobo"',
+    );
+
+    script.scenes[1]!.action =
+      "Bobo watches while Bobo the Backpack nudges snow beside Pip the Ant.";
+    expect(inspectProductionScript(
+      script,
+      ["Pip the Ant", "Bobo the Backpack"],
+    ).issues.join(" ")).toContain(
+      'action/sceneDetails mentions unlisted figure "bobo"',
+    );
   });
 
   it("rejects a declared figure that is not explicitly staged by exact name", () => {

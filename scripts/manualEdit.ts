@@ -222,7 +222,7 @@ export async function runManualEdit() {
   if (CONFIG.anyApiKeys.length > 0) {
     for (const key of CONFIG.anyApiKeys) {
       strategies.push({
-        name: `AnyAPI (google/gemini-3.1-flash-image) [key: ...${key.slice(-4)}]`,
+        name: `AnyAPI (${CONFIG.anyApiImageModel}) [key: ...${key.slice(-4)}]`,
         authHeader: `Bearer ${key}`,
         send: () =>
           fetch("https://api.anyapi.ai/v1/chat/completions", {
@@ -232,7 +232,7 @@ export async function runManualEdit() {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              model: "google/gemini-3.1-flash-image",
+              model: CONFIG.anyApiImageModel,
               messages: [
                 {
                   role: "user",

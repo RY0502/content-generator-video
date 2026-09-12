@@ -4,7 +4,10 @@ import {
   type SceneCharacterVisual,
 } from "../promptBuilder.js";
 import type { SeriesState } from "../state/seriesState.js";
-import { ensureCharacterBibleEntry } from "./characterSheetService.js";
+import {
+  buildLockedCharacterIdentity,
+  ensureCharacterBibleEntry,
+} from "./characterSheetService.js";
 
 export interface ScenePromptInput {
   seriesId: number;
@@ -25,6 +28,8 @@ export interface MaterializedScenePrompt {
   prompt: string;
   characterNames: string[];
   characterDescriptions: string[];
+  /** Approved portraits in the same order as characterNames when available. */
+  characterReferenceSources: Array<{ name: string; source: string }>;
 }
 
 /**
@@ -44,12 +49,14 @@ export async function materializeScenePrompt(params: {
   const { seriesState, input, customState, promptHash } = params;
   const characterNames: string[] = [];
   const characterDescriptions: string[] = [];
+  const characterReferenceSources: Array<{ name: string; source: string }> = [];
+  const roster = await seriesState.getSeriesCharacters(input.seriesId);
+  const canonicalDescriptions = new Map(
+    roster.map((character) => [character.name.trim(), character.description.trim()] as const),
+  );
   const canonicalNames = params.allowCharacterSheetGeneration
     ? null
-    : new Set(
-        (await seriesState.getSeriesCharacters(input.seriesId))
-          .map((character) => character.name.trim()),
-      );
+    : new Set(canonicalDescriptions.keys());
 
   for (const rawCharacterName of input.characterNames) {
     // Preserve the scene tool's historical sanitization so old/refined scripts
@@ -71,6 +78,7 @@ export async function materializeScenePrompt(params: {
       (item) => item.name.trim() === characterName,
     );
     let generationPrompt: string;
+    let portraitSource: string | undefined;
     if (params.allowCharacterSheetGeneration) {
       generationPrompt = await ensureCharacterBibleEntry({
         seriesState,
@@ -81,6 +89,9 @@ export async function materializeScenePrompt(params: {
         promptHash,
         requestedBy: params.requestedBy ?? `scene ${input.sceneNumber}`,
       });
+      portraitSource = (
+        await seriesState.getCharacterSheet(input.seriesId, characterName)
+      )?.referenceImagePaths?.portrait?.path;
     } else {
       const sheet = await seriesState.getCharacterSheet(input.seriesId, characterName);
       if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
@@ -90,14 +101,26 @@ export async function materializeScenePrompt(params: {
         );
       }
       generationPrompt = sheet.generationPrompt.trim();
+      portraitSource = sheet.referenceImagePaths?.portrait?.path;
     }
+    const sourceDescription = canonicalDescriptions.get(characterName)
+      ?? (await seriesState.getCharacterSheet(input.seriesId, characterName))?.description?.trim()
+      ?? characterName;
     characterNames.push(characterName);
-    characterDescriptions.push(generationPrompt);
+    characterDescriptions.push(buildLockedCharacterIdentity({
+      characterName,
+      characterDescription: sourceDescription,
+      generationPrompt,
+    }));
+    if (portraitSource?.trim()) {
+      characterReferenceSources.push({ name: characterName, source: portraitSource.trim() });
+    }
   }
 
   return {
     characterNames,
     characterDescriptions,
+    characterReferenceSources,
     prompt: buildStylizedScenePrompt({
       characterNames,
       characterVisuals: input.characterVisuals,

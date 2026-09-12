@@ -6,6 +6,7 @@ import path from "node:path";
 vi.mock("../config.js", () => ({
   CONFIG: {
     assetsDir: "",
+    anyApiImageModel: "google/gemini-3.1-flash-image",
   },
 }));
 
@@ -27,7 +28,9 @@ import {
 } from "../tools/characterSheetTool.js";
 import { CONFIG } from "../config.js";
 import {
+  CHARACTER_SIGNATURE_SCHEMA_VERSION,
   PORTRAIT_MODEL,
+  buildLockedCharacterIdentity,
   characterPortraitStorage,
   conflictsWithCharacterVisual,
   createCharacterPortraitRequestDigest,
@@ -133,6 +136,7 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
       requestDigest,
       detailedDescription: "Small ant with a crimson-red shell and deep-blue backpack.",
       generationPrompt: validSignature,
+      signatureSchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
     });
 
     const tool = buildCharacterSheetTool(seriesState, customState, promptHash);
@@ -172,7 +176,12 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
     seriesState.getCharacterSheet.mockResolvedValue({
       approvedAt: new Date(),
       description,
-      referenceImagePaths: { portrait: { path: storage.portraitPath } },
+      referenceImagePaths: {
+        portrait: {
+          path: storage.portraitPath,
+          identitySchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
+        },
+      },
       generationPrompt: validSignature,
     });
 
@@ -216,7 +225,12 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
     seriesState.getCharacterSheet.mockResolvedValue({
       approvedAt: new Date(),
       description: canonicalDescription,
-      referenceImagePaths: { portrait: { path: storage.portraitPath } },
+      referenceImagePaths: {
+        portrait: {
+          path: storage.portraitPath,
+          identitySchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
+        },
+      },
       generationPrompt: validSignature,
     });
     const tool = buildCharacterSheetTool(seriesState, customState, promptHash);
@@ -256,9 +270,14 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
     sheets.set("Mia", {
       approvedAt: new Date().toISOString(),
       description: roster[0].description,
-      referenceImagePaths: { portrait: { path: miaStorage.portraitPath } },
+      referenceImagePaths: {
+        portrait: {
+          path: miaStorage.portraitPath,
+          identitySchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
+        },
+      },
       generationPrompt:
-        "Young girl, dark-brown hair, teal jacket, warm brown eyes. Always same colors.",
+        "Young girl (female child), dark-brown hair, teal jacket, warm brown eyes. Always same colors.",
     });
     seriesState.seriesExists.mockResolvedValue(true);
     seriesState.getSeriesCharacters.mockResolvedValue(roster);
@@ -296,6 +315,9 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
         { name: "Bobo the Backpack", status: "generated" },
       ],
     });
+    expect(first.nextAction).toContain("next assistant action must be write_episode_script_chunk(operation=start)");
+    expect(first.nextAction).toContain("only opening scenes 1-8");
+    expect(first.nextAction).toContain("emit no visible planning, manual counting, draft, JSON, or preamble");
     expect(generateAnyApiSceneImageMock).toHaveBeenCalledTimes(1);
     expect(sheets.has("Bobo the Backpack")).toBe(true);
 
@@ -330,9 +352,11 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
         generationPrompt,
       });
     });
-    chatTextMock.mockResolvedValue(
-      "Friendly character, cobalt-blue details, amber eyes, cheerful pose. Always same colors.",
-    );
+    chatTextMock.mockImplementation(async ({ userText }: { userText: string }) => (
+      userText.includes("young girl")
+        ? "Young girl (female child), dark-brown hair, teal jacket, warm brown eyes. Always same colors."
+        : "Friendly character, cobalt-blue details, amber eyes, cheerful pose. Always same colors."
+    ));
     const providerFailure = new Error("temporary portrait provider failure");
     generateAnyApiSceneImageMock
       .mockResolvedValueOnce(Buffer.from("mia-portrait"))
@@ -379,6 +403,85 @@ describe("characterSheetTool (single Gemini portrait, vision detail extraction)"
       generationPrompt:
         "Young girl fairy, amber dress, long black hair, green eyes. Always same colors.",
     })).toBe(true);
+  });
+
+  it("refreshes a legacy signature from the existing portrait without regenerating that portrait", async () => {
+    const description = "Mia is a 5-year-old girl with chestnut-brown bob hair and a yellow shirt.";
+    const requestDigest = createCharacterPortraitRequestDigest({
+      characterDescription: description,
+      model: PORTRAIT_MODEL,
+    });
+    const storage = characterPortraitStorage({
+      assetsDir,
+      seriesId: 13,
+      characterName: "Mia",
+      requestDigest,
+    });
+    await mkdir(path.dirname(storage.portraitPath), { recursive: true });
+    await writeFile(storage.portraitPath, Buffer.from("existing-approved-mia-portrait"));
+    seriesState.getSeriesCharacters.mockResolvedValue([{ name: "Mia", description }]);
+    seriesState.getCharacterSheet.mockResolvedValue({
+      approvedAt: new Date().toISOString(),
+      description,
+      // No identitySchemaVersion: this is a legacy signature that must refresh.
+      referenceImagePaths: { portrait: { path: storage.portraitPath } },
+      generationPrompt:
+        "Young girl, chestnut-brown bob, yellow shirt, cheerful smile. Always same colors.",
+    });
+    chatTextMock.mockResolvedValue(
+      "Young girl (female child), 5-year-old, chestnut-brown bob, yellow shirt, cheerful smile. Always same colors.",
+    );
+
+    const result = JSON.parse(await (buildCharacterSheetTool(
+      seriesState,
+      customState,
+      promptHash,
+    ) as any).func({
+      seriesId: 13,
+      characterName: "Mia",
+      characterDescription: description,
+    }));
+
+    expect(result.status).toBe("generated");
+    expect(generateAnyApiSceneImageMock).not.toHaveBeenCalled();
+    expect(chatVisionFrameworkOnlyMock).toHaveBeenCalledOnce();
+    expect(chatTextMock).toHaveBeenCalledOnce();
+    expect(seriesState.upsertCharacterSheet).toHaveBeenCalledWith(
+      13,
+      "Mia",
+      description,
+      {
+        portrait: {
+          path: storage.portraitPath,
+          identitySchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
+        },
+      },
+      expect.stringContaining("5-year-old"),
+    );
+  });
+
+  it("requires exact human age/gender and carries the immutable source into scene identity", () => {
+    const characterDescription =
+      "Mia is a 5-year-old girl with chestnut-brown bob hair, golden eyes, and a bright yellow shirt.";
+    const weak = inspectCharacterSignaturePrompt(
+      "Young girl, chestnut-brown bob, golden eyes, yellow shirt. Always same colors.",
+      { characterDescription },
+    );
+    expect(weak.pass).toBe(false);
+    expect(weak.issues.join(" ")).toContain("5-year-old");
+    expect(weak.issues.join(" ")).toContain("Young girl (female child)");
+
+    const signature =
+      "Young girl (female child), 5-year-old, chestnut-brown bob, golden eyes, yellow shirt. Always same colors.";
+    expect(inspectCharacterSignaturePrompt(signature, { characterDescription }).pass).toBe(true);
+    const locked = buildLockedCharacterIdentity({
+      characterName: "Mia",
+      characterDescription,
+      generationPrompt: signature,
+    });
+    expect(locked).toContain(characterDescription);
+    expect(locked).toContain("EXACT AGE LOCK: 5-year-old; never older or younger.");
+    expect(locked).toContain("APPROVED PORTRAIT APPEARANCE");
   });
 
   it("scopes portrait storage by series and description/model digest", async () => {

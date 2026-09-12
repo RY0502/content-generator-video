@@ -3,6 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const ensureCharacterBibleEntryMock = vi.fn();
 vi.mock("../services/characterSheetService.js", () => ({
   ensureCharacterBibleEntry: (...args: unknown[]) => ensureCharacterBibleEntryMock(...args),
+  buildLockedCharacterIdentity: ({
+    characterName,
+    characterDescription,
+    generationPrompt,
+  }: {
+    characterName: string;
+    characterDescription: string;
+    generationPrompt: string;
+  }) => `CANONICAL IDENTITY FOR ${characterName}: ${characterDescription} APPROVED PORTRAIT APPEARANCE: ${generationPrompt}`,
 }));
 
 import { materializeScenePrompt } from "../services/scenePromptService.js";
@@ -72,7 +81,9 @@ describe("scenePromptService production character gate", () => {
     });
     expect(result.characterNames).toEqual(["Pip the Ant"]);
     expect(result.prompt).toContain("Tiny ruby-red ant");
-    expect(result.prompt).toContain("VISIBLE ACTION");
+    expect(result.prompt).toContain("ONE CONTINUOUS BEAT");
+    expect(result.prompt).toContain("CANONICAL IDENTITY FOR Pip the Ant: A red ant.");
+    expect(result.characterReferenceSources).toEqual([]);
     expect(ensureCharacterBibleEntryMock).not.toHaveBeenCalled();
   });
 });

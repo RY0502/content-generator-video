@@ -47,7 +47,7 @@ export class AnyApiModelBusyError extends Error {
 async function generateWithAnyApiKey(
   prompt: string,
   apiKey: string,
-  model: string = "google/gemini-3.1-flash-image",
+  model: string = CONFIG.anyApiImageModel,
   size: string = "1792x1024"
 ): Promise<Buffer> {
   // Extract key identifier for logging (first 8 chars + last 4 chars)
@@ -227,7 +227,7 @@ async function editWithAnyApiKey(params: {
   apiKey: string;
   model?: string;
 }): Promise<Buffer> {
-  const { prompt, imageBytes, apiKey, model = CONFIG.anyApiModel } = params;
+  const { prompt, imageBytes, apiKey, model = CONFIG.anyApiImageModel } = params;
   const keyId = apiKey.length > 12 ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : "unknown";
 
   const base64Image = imageBytes.toString("base64");
@@ -458,7 +458,7 @@ async function editWithReferenceAnyApiKey(params: {
   apiKey: string;
   model?: string;
 }): Promise<Buffer> {
-  const { prompt, imageBytes, referenceImageBytes, apiKey, model = CONFIG.anyApiModel } = params;
+  const { prompt, imageBytes, referenceImageBytes, apiKey, model = CONFIG.anyApiImageModel } = params;
   const keyId = apiKey.length > 12 ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : "unknown";
 
   const base64Reference = referenceImageBytes.toString("base64");

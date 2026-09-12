@@ -18,8 +18,10 @@ import { logStep } from "../utils/logger.js";
 import type { CustomStateStore } from "freetier-deepagent-framework";
 
 /** Portrait generation model — Google Gemini for high-quality character art. */
-export const PORTRAIT_MODEL = "google/gemini-3.1-flash-image";
+export const PORTRAIT_MODEL = CONFIG.anyApiImageModel;
 export const CHARACTER_PORTRAIT_REQUEST_SCHEMA_VERSION = 1 as const;
+/** Bump only when existing portrait signatures need a one-time refresh. */
+export const CHARACTER_SIGNATURE_SCHEMA_VERSION = 2 as const;
 export const CHARACTER_SIGNATURE_REQUIRED_ENDING = "Always same colors.";
 
 const CHARACTER_SIGNATURE_COLOR_PATTERN =
@@ -34,6 +36,7 @@ export interface PortraitCheckpoint {
   detailedDescription?: string;
   /** Compact signature prompt distilled from detailedDescription. */
   generationPrompt?: string;
+  signatureSchemaVersion?: number;
 }
 
 export interface EnsureCharacterSheetResult {
@@ -61,6 +64,59 @@ export interface CharacterSignatureInspection {
   normalized: string;
   pass: boolean;
   issues: string[];
+}
+
+export interface CharacterSignatureContext {
+  characterName?: string;
+  characterDescription?: string;
+}
+
+const NUMBER_WORD_PATTERN =
+  "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen";
+
+/** Returns a canonical exact-age phrase when the immutable roster provides one. */
+export function extractCanonicalCharacterAge(characterDescription: string): string | null {
+  const normalized = characterDescription.replace(/[\u2010-\u2015]/gu, "-");
+  const yearOld = normalized.match(
+    new RegExp(`\\b(\\d{1,2}|${NUMBER_WORD_PATTERN})\\s*(?:-\\s*)?years?\\s*(?:-\\s*)?old\\b`, "iu"),
+  );
+  if (yearOld?.[1]) return `${yearOld[1].toLowerCase()}-year-old`;
+  const ageLabel = normalized.match(
+    new RegExp(`\\b(?:aged?|age)\\s*[:=-]?\\s*(\\d{1,2}|${NUMBER_WORD_PATTERN})\\b`, "iu"),
+  );
+  return ageLabel?.[1] ? `${ageLabel[1].toLowerCase()}-year-old` : null;
+}
+
+function canonicalHumanIdentityPrefix(characterDescription: string): string | null {
+  const normalized = characterDescription.toLowerCase();
+  if (/\b(?:girl|female child|daughter)\b/u.test(normalized)) {
+    return "Young girl (female child)";
+  }
+  if (/\b(?:boy|male child|son)\b/u.test(normalized)) {
+    return "Young boy (male child)";
+  }
+  return null;
+}
+
+/**
+ * Combines the immutable story identity with the portrait-derived appearance.
+ * The roster text is deliberately retained verbatim: it is where exact ages
+ * and authored traits live, while the compact signature records what the
+ * approved portrait actually looks like.
+ */
+export function buildLockedCharacterIdentity(params: {
+  characterName: string;
+  characterDescription: string;
+  generationPrompt: string;
+}): string {
+  const source = params.characterDescription.replace(/\s+/gu, " ").trim();
+  const signature = normalizeCharacterSignatureResponse(params.generationPrompt);
+  const age = extractCanonicalCharacterAge(source);
+  return [
+    `CANONICAL IDENTITY FOR ${params.characterName}: ${source}`,
+    age ? `EXACT AGE LOCK: ${age}; never older or younger.` : "",
+    `APPROVED PORTRAIT APPEARANCE: ${signature}`,
+  ].filter(Boolean).join(" ");
 }
 
 /** Stable identity for a portrait request; paths and checkpoints use this digest. */
@@ -118,7 +174,10 @@ function normalizeCharacterSignatureResponse(raw: string): string {
 }
 
 /** Deterministic gate for the compact identity reused in every Agnes prompt. */
-export function inspectCharacterSignaturePrompt(raw: string): CharacterSignatureInspection {
+export function inspectCharacterSignaturePrompt(
+  raw: string,
+  context: CharacterSignatureContext = {},
+): CharacterSignatureInspection {
   const normalized = normalizeCharacterSignatureResponse(raw);
   const issues: string[] = [];
   if (!normalized) issues.push("Signature prompt is empty.");
@@ -140,6 +199,16 @@ export function inspectCharacterSignaturePrompt(raw: string): CharacterSignature
   }
   if (identityText && !CHARACTER_SIGNATURE_COLOR_PATTERN.test(identityText)) {
     issues.push("Signature prompt must retain at least one explicit character color.");
+  }
+
+  const sourceDescription = context.characterDescription?.trim() ?? "";
+  const exactAge = extractCanonicalCharacterAge(sourceDescription);
+  if (exactAge && !normalized.toLowerCase().includes(exactAge)) {
+    issues.push(`Signature prompt must preserve the canonical exact age '${exactAge}'.`);
+  }
+  const humanPrefix = canonicalHumanIdentityPrefix(sourceDescription);
+  if (humanPrefix && !normalized.toLowerCase().includes(humanPrefix.toLowerCase())) {
+    issues.push(`Signature prompt must identify the character as '${humanPrefix}'.`);
   }
 
   return { normalized, pass: issues.length === 0, issues };
@@ -195,11 +264,13 @@ function compactSignaturePunctuationSpacing(signature: string): string {
 function recoverSignatureLengthOverflow(
   inspection: CharacterSignatureInspection,
   allowWordBoundaryTrim: boolean,
+  context: CharacterSignatureContext = {},
 ): CharacterSignatureInspection | null {
   if (!hasOnlySignatureLengthOverflow(inspection)) return null;
 
   const compactedInspection = inspectCharacterSignaturePrompt(
     compactSignaturePunctuationSpacing(inspection.normalized),
+    context,
   );
   if (compactedInspection.pass) return compactedInspection;
   if (!allowWordBoundaryTrim || !hasOnlySignatureLengthOverflow(compactedInspection)) return null;
@@ -215,7 +286,7 @@ function recoverSignatureLengthOverflow(
     .trim();
   if (!trimmedIdentity) return null;
 
-  const trimmedInspection = inspectCharacterSignaturePrompt(`${trimmedIdentity}. ${suffix}`);
+  const trimmedInspection = inspectCharacterSignaturePrompt(`${trimmedIdentity}. ${suffix}`, context);
   return trimmedInspection.pass ? trimmedInspection : null;
 }
 
@@ -363,9 +434,20 @@ async function extractDetailedDescription(params: {
  * Distills the exhaustive description into the compact character bible entry
  * that gets embedded in every scene prompt.
  */
-async function distillSignaturePrompt(detailedDescription: string): Promise<string> {
+async function distillSignaturePrompt(
+  detailedDescription: string,
+  characterDescription: string,
+): Promise<string> {
   const systemPrompt = buildCharacterSignatureDistillSystemPrompt();
-  const userText = buildCharacterSignatureDistillUserText(detailedDescription);
+  const exactAge = extractCanonicalCharacterAge(characterDescription);
+  const humanPrefix = canonicalHumanIdentityPrefix(characterDescription);
+  const identityRequirements = [
+    humanPrefix ? `Begin with exactly: ${humanPrefix}.` : "",
+    exactAge ? `Include the exact age phrase ${exactAge}.` : "",
+  ].filter(Boolean).join(" ");
+  const userText = buildCharacterSignatureDistillUserText(
+    `${detailedDescription}\n\nIMMUTABLE ORIGINAL STORY IDENTITY: ${characterDescription}`,
+  ) + (identityRequirements ? `\n\nMANDATORY IDENTITY REQUIREMENTS: ${identityRequirements}` : "");
   let lastFailure = "No response was returned.";
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -378,9 +460,13 @@ async function distillSignaturePrompt(detailedDescription: string): Promise<stri
           ? userText
           : `${userText}\n\nPrevious validation failure: ${lastFailure}\nReturn a corrected compact signature only.`,
       });
-      const inspection = inspectCharacterSignaturePrompt(rawSignature);
+      const inspection = inspectCharacterSignaturePrompt(rawSignature, { characterDescription });
       if (inspection.pass) return inspection.normalized;
-      const recovered = recoverSignatureLengthOverflow(inspection, attempt === 3);
+      const recovered = recoverSignatureLengthOverflow(
+        inspection,
+        attempt === 3,
+        { characterDescription },
+      );
       if (recovered?.pass) return recovered.normalized;
       lastFailure = inspection.issues.join(" ");
     } catch (error) {
@@ -476,15 +562,20 @@ export async function ensureCharacterSheet(params: {
     generationPrompt: existing?.generationPrompt,
   });
   const existingSignature = existing?.generationPrompt
-    ? inspectCharacterSignaturePrompt(existing.generationPrompt)
+    ? inspectCharacterSignaturePrompt(existing.generationPrompt, {
+        characterName,
+        characterDescription: baseCharacterDescription,
+      })
     : null;
-  const existingPortraitPath = existing?.referenceImagePaths?.portrait?.path;
+  const existingPortrait = existing?.referenceImagePaths?.portrait;
+  const existingPortraitPath = existingPortrait?.path;
   const existingMatchesRequest = Boolean(
     existing?.approvedAt &&
     existingSignature?.pass &&
     existing?.description.trim() === baseCharacterDescription &&
     existingPortraitPath &&
     path.resolve(existingPortraitPath) === path.resolve(portraitPath) &&
+    existingPortrait.identitySchemaVersion === CHARACTER_SIGNATURE_SCHEMA_VERSION &&
     !existingConflictsWithVisual,
   );
   if (existingMatchesRequest) {
@@ -584,12 +675,16 @@ export async function ensureCharacterSheet(params: {
 
   // Step 3: distill it into the compact character bible entry.
   const checkpointSignature = checkpoint?.generationPrompt
-    ? inspectCharacterSignaturePrompt(checkpoint.generationPrompt)
+    && checkpoint.signatureSchemaVersion === CHARACTER_SIGNATURE_SCHEMA_VERSION
+    ? inspectCharacterSignaturePrompt(checkpoint.generationPrompt, {
+        characterName,
+        characterDescription: baseCharacterDescription,
+      })
     : null;
   let generationPrompt = checkpointSignature?.pass ? checkpointSignature.normalized : undefined;
   if (!generationPrompt) {
     logStep(`Distilling signature prompt for ${characterName}`);
-    generationPrompt = await distillSignaturePrompt(detailedDescription);
+    generationPrompt = await distillSignaturePrompt(detailedDescription, baseCharacterDescription);
   }
 
   if (customState && promptHash) {
@@ -599,10 +694,16 @@ export async function ensureCharacterSheet(params: {
       requestDigest,
       detailedDescription,
       generationPrompt,
+      signatureSchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
     });
   }
 
-  const referenceImagePaths: Record<string, ReferenceImage> = { portrait: { path: portraitPath } };
+  const referenceImagePaths: Record<string, ReferenceImage> = {
+    portrait: {
+      path: portraitPath,
+      identitySchemaVersion: CHARACTER_SIGNATURE_SCHEMA_VERSION,
+    },
+  };
 
   await seriesState.upsertCharacterSheet(
     seriesId,

@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -156,6 +157,9 @@ describe("SeriesState Agnes persistence", () => {
     const names = columns.rows.map((row) => String(row.name));
     expect(names).toContain("request_digest");
     expect(names).toContain("attempt_count");
+    expect(names).toContain("render_revision");
+    expect(names).toContain("qa_status");
+    expect(names).toContain("qa_video_sha256");
 
     const episodeColumns = await client.execute("PRAGMA table_info('episodes')");
     const episodeColumnNames = episodeColumns.rows.map((row) => String(row.name));
@@ -165,6 +169,188 @@ describe("SeriesState Agnes persistence", () => {
       "audio_mutation_scene_number",
       "audio_mutation_expires_at_ms",
     ]));
+  });
+
+  it("archives one QA-rejected completed render and permits exactly one CAS-controlled rerender", async () => {
+    const state = await createStateWithEpisode();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "qa-requeue-state-"));
+    const videoPath = path.join(directory, "scene_001.mp4");
+    await writeFile(videoPath, "rejected-video");
+    const originalDigest = "1".repeat(64);
+    await state.upsertAgnesSceneGeneration({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      status: "completed",
+      downloadStatus: "downloaded",
+      prompt: "Original prompt",
+      requestDigest: originalDigest,
+      attemptCount: 1,
+      seed: 100,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+      providerTaskId: "provider-task-1",
+      providerReceipt: { accepted: true, task: "provider-task-1" },
+      normalizedOutputPath: videoPath,
+    });
+    await state.upsertEpisodeVideoOutput({
+      seriesId: 1,
+      episodeNumber: 2,
+      variant: "agnes_text",
+      status: "completed",
+      outputPath: path.join(directory, "old-final.mp4"),
+      durationSeconds: 6,
+    });
+    const client = (state as unknown as {
+      client: { execute(statement: string | { sql: string; args: unknown[] }): Promise<{ rows: any[] }> };
+    }).client;
+    await client.execute("UPDATE episodes SET status = 'assembly' WHERE id = 1");
+    const requeued = await state.requeueAgnesSceneAfterQaFailure({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      expectedRequestDigest: originalDigest,
+      expectedRenderRevision: 0,
+      expectedNormalizedOutputPath: videoPath,
+      expectedQaStatus: "pending",
+      expectedQaRequestDigest: null,
+      qaRequestDigest: "2".repeat(64),
+      videoSha256: createHash("sha256").update("rejected-video").digest("hex"),
+      result: {
+        pass: false,
+        issues: [{ code: "duplicate_entity", description: "Pip appears twice." }],
+      },
+      contactSheetPath: path.join(directory, "sheet.jpg"),
+      model: "openai/gpt-5-image",
+      retryPrompt: "Original prompt QA RERENDER CORRECTION",
+      retryRequestDigest: "3".repeat(64),
+      retrySeed: 200,
+      archivedVideoPath: path.join(directory, "rejected-copy.mp4"),
+    });
+
+    expect(requeued.requeued).toBe(true);
+    expect(requeued.row).toMatchObject({
+      status: "pending",
+      downloadStatus: "pending",
+      renderRevision: 1,
+      qaStatus: "awaiting_regeneration",
+      providerTaskId: null,
+      normalizedOutputPath: null,
+      seed: 200,
+      requestDigest: "3".repeat(64),
+    });
+    expect(await state.listEpisodeVideoOutputs(1, 2)).toEqual([]);
+    expect((await state.getEpisodeByNumber(1, 2))?.status).toBe("audio");
+    const history = await client.execute(
+      "SELECT render_revision, request_digest, archived_video_path FROM agnes_scene_generation_history",
+    );
+    expect(history.rows).toEqual([expect.objectContaining({
+      render_revision: 0,
+      request_digest: originalDigest,
+      archived_video_path: path.join(directory, "rejected-copy.mp4"),
+    })]);
+    await expect(state.requeueAgnesSceneAfterQaFailure({
+      ...({} as any),
+      expectedRenderRevision: 1,
+    })).rejects.toThrow("exactly one rerender");
+  });
+
+  it("keeps a first QA verdict when stale verdict, error, and requeue writers arrive later", async () => {
+    const state = await createStateWithEpisode();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "qa-first-writer-state-"));
+    const videoPath = path.join(directory, "scene_001.mp4");
+    await writeFile(videoPath, "current-video");
+    const requestDigest = "4".repeat(64);
+    const videoSha256 = createHash("sha256").update("current-video").digest("hex");
+    await state.upsertAgnesSceneGeneration({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      status: "completed",
+      downloadStatus: "downloaded",
+      prompt: "Current prompt",
+      requestDigest,
+      attemptCount: 1,
+      seed: 100,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+      normalizedOutputPath: videoPath,
+    });
+    const expectedSnapshot = {
+      expectedRequestDigest: requestDigest,
+      expectedRenderRevision: 0,
+      expectedNormalizedOutputPath: videoPath,
+      expectedQaStatus: "pending" as const,
+      expectedQaRequestDigest: null,
+    };
+    const first = await state.recordAgnesVideoQaVerdict({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...expectedSnapshot,
+      qaRequestDigest: "5".repeat(64),
+      videoSha256,
+      result: { policyVersion: 1, pass: true },
+      contactSheetPath: path.join(directory, "passing-sheet.jpg"),
+      model: "openai/gpt-5-image",
+      status: "passed",
+    });
+    expect(first.recorded).toBe(true);
+
+    const staleVerdict = await state.recordAgnesVideoQaVerdict({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...expectedSnapshot,
+      qaRequestDigest: "6".repeat(64),
+      videoSha256,
+      result: { policyVersion: 1, pass: false },
+      contactSheetPath: path.join(directory, "stale-sheet.jpg"),
+      model: "openai/gpt-5-image",
+      status: "exhausted",
+    });
+    expect(staleVerdict.recorded).toBe(false);
+
+    await state.recordAgnesVideoQaError({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...expectedSnapshot,
+      error: "late batch failure",
+    });
+    const staleRequeue = await state.requeueAgnesSceneAfterQaFailure({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...expectedSnapshot,
+      qaRequestDigest: "7".repeat(64),
+      videoSha256,
+      result: { policyVersion: 1, pass: false },
+      contactSheetPath: path.join(directory, "stale-sheet.jpg"),
+      model: "openai/gpt-5-image",
+      retryPrompt: "Stale retry prompt",
+      retryRequestDigest: "8".repeat(64),
+      retrySeed: 200,
+    });
+    expect(staleRequeue.requeued).toBe(false);
+    expect(await state.getAgnesSceneGeneration(1, 2, 1, "text")).toMatchObject({
+      renderRevision: 0,
+      qaStatus: "passed",
+      qaRequestDigest: "5".repeat(64),
+      qaError: null,
+      normalizedOutputPath: videoPath,
+    });
+    const client = (state as unknown as {
+      client: { execute(sql: string): Promise<{ rows: any[] }> };
+    }).client;
+    expect((await client.execute("SELECT id FROM agnes_scene_generation_history")).rows).toEqual([]);
   });
 
   it("leases narration mutations, advances revisions on commit, and fences expired owners", async () => {
@@ -875,6 +1061,21 @@ describe("SeriesState Agnes persistence", () => {
     const captionsPath = path.join(episodeDir, "captions.srt");
     await mkdir(path.dirname(captionsPath), { recursive: true });
     await writeFile(captionsPath, "1\n00:00:00,000 --> 00:00:07,500\nPip begins.\n", "utf8");
+    const portraitPath = path.join(outputDir, "pip_portrait.png");
+    await writeFile(portraitPath, "valid-pip-portrait", "utf8");
+    await state.upsertCharacterSheet(
+      1,
+      "Pip the Ant",
+      "A small red ant.",
+      { portrait: { path: portraitPath } },
+      "One small red ant with an exact locked preschool design.",
+    );
+    const portraitSetDigest = createHash("sha256").update(JSON.stringify([{
+      name: "Pip the Ant",
+      sha256: createHash("sha256").update("valid-pip-portrait").digest("hex"),
+    }])).digest("hex");
+    const referenceBoardSha256 = createHash("sha256").update("reference-board").digest("hex");
+    const contactSheetSha256 = createHash("sha256").update("contact-sheet").digest("hex");
 
     for (const scene of scenes) {
       const stem = `scene_${String(scene.sceneNumber).padStart(3, "0")}`;
@@ -900,6 +1101,7 @@ describe("SeriesState Agnes persistence", () => {
         durationSeconds: 7.5,
         durationStatus: "ready",
       }), "utf8");
+      const requestDigest = `digest-${scene.sceneNumber}`;
       await state.upsertAgnesSceneGeneration({
         seriesId: 1,
         episodeNumber: 2,
@@ -908,10 +1110,41 @@ describe("SeriesState Agnes persistence", () => {
         status: "completed",
         downloadStatus: "downloaded",
         prompt: `Complete animation ${scene.sceneNumber}`,
-        requestDigest: `digest-${scene.sceneNumber}`,
+        requestDigest,
         requestedDurationSeconds: 7.5,
         providerDurationSeconds: 8,
         normalizedOutputPath: videoPath,
+      });
+      const qaRequestDigest = createHash("sha256").update(`qa-${scene.sceneNumber}`).digest("hex");
+      const videoSha256 = createHash("sha256").update("valid-video").digest("hex");
+      await state.recordAgnesVideoQaVerdict({
+        seriesId: 1,
+        episodeNumber: 2,
+        sceneNumber: scene.sceneNumber,
+        variant: "text",
+        expectedRequestDigest: requestDigest,
+        expectedRenderRevision: 0,
+        expectedNormalizedOutputPath: videoPath,
+        expectedQaStatus: "pending",
+        expectedQaRequestDigest: null,
+        qaRequestDigest,
+        videoSha256,
+        result: {
+          policyVersion: 1,
+          model: CONFIG.anyApiVideoQaModel,
+          sceneNumber: scene.sceneNumber,
+          pass: true,
+          generationRequestDigest: requestDigest,
+          renderRevision: 0,
+          qaRequestDigest,
+          videoSha256,
+          portraitSetDigest,
+          referenceBoardSha256,
+          contactSheetSha256,
+        },
+        contactSheetPath: "/tmp/contact-sheet.jpg",
+        model: CONFIG.anyApiVideoQaModel,
+        status: "passed",
       });
     }
 
@@ -952,6 +1185,7 @@ describe("SeriesState Agnes persistence", () => {
         durationSeconds: 7.5,
         durationStatus: "ready",
       }), "utf8");
+      const requestDigest = `${spec.kind}-key-art-digest`;
       await state.upsertAgnesSceneGeneration({
         seriesId: 1,
         episodeNumber: 2,
@@ -960,10 +1194,41 @@ describe("SeriesState Agnes persistence", () => {
         status: "completed",
         downloadStatus: "downloaded",
         prompt: `${spec.kind} key-art animation`,
-        requestDigest: `${spec.kind}-key-art-digest`,
+        requestDigest,
         requestedDurationSeconds: 7.5,
         providerDurationSeconds: 8,
         normalizedOutputPath: paths.normalizedVideoPath,
+      });
+      const qaRequestDigest = createHash("sha256").update(`qa-${spec.kind}`).digest("hex");
+      const videoSha256 = createHash("sha256").update("valid-key-art-video").digest("hex");
+      await state.recordAgnesVideoQaVerdict({
+        seriesId: 1,
+        episodeNumber: 2,
+        sceneNumber: spec.trackingSceneNumber,
+        variant: "text",
+        expectedRequestDigest: requestDigest,
+        expectedRenderRevision: 0,
+        expectedNormalizedOutputPath: paths.normalizedVideoPath,
+        expectedQaStatus: "pending",
+        expectedQaRequestDigest: null,
+        qaRequestDigest,
+        videoSha256,
+        result: {
+          policyVersion: 1,
+          model: CONFIG.anyApiVideoQaModel,
+          sceneNumber: spec.trackingSceneNumber,
+          pass: true,
+          generationRequestDigest: requestDigest,
+          renderRevision: 0,
+          qaRequestDigest,
+          videoSha256,
+          portraitSetDigest,
+          referenceBoardSha256,
+          contactSheetSha256,
+        },
+        contactSheetPath: "/tmp/contact-sheet.jpg",
+        model: CONFIG.anyApiVideoQaModel,
+        status: "passed",
       });
     }
 
@@ -1008,6 +1273,21 @@ describe("SeriesState Agnes persistence", () => {
     } finally {
       (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
       (CONFIG as { ffprobePath: string }).ffprobePath = previousFfprobePath;
+    }
+  });
+
+  it("invalidates prior video QA when an approved character portrait changes", async () => {
+    const state = await createStateWithEpisode();
+    const previousOutputDir = CONFIG.outputDir;
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "qa-portrait-binding-"));
+    (CONFIG as { outputDir: string }).outputDir = outputDir;
+    try {
+      await prepareProductionEpisode(state, outputDir);
+      await writeFile(path.join(outputDir, "pip_portrait.png"), "changed-pip-portrait", "utf8");
+      await expect(state.assertAgnesVideoQaReady(1, 2))
+        .rejects.toThrow("stale or incompletely bound");
+    } finally {
+      (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
     }
   });
 

@@ -8,12 +8,17 @@ import {
 import {
   inspectProductionScriptReadiness,
 } from "../services/productionScriptContract.js";
-import { getEpisodeScriptChunkAuthoringProgress } from "./scriptRefinementTool.js";
+import {
+  buildEpisodeScriptPendingRepairPayload,
+  episodeScriptChunkDraftRequiresRestart,
+  getEpisodeScriptChunkAuthoringProgress,
+} from "./scriptRefinementTool.js";
 import {
   SERIES_EPISODE_COUNT,
   EpisodeAudioReadinessError,
   SeriesState,
   type EpisodeScriptDraftValidation,
+  type EpisodeScriptPendingChunkRow,
 } from "../state/seriesState.js";
 
 const INVALID_STATUS_UPDATE = Symbol("invalid-status-update");
@@ -33,14 +38,22 @@ function isInvalidStatusUpdate(value: unknown): value is InvalidStatusUpdate {
 
 function publicDraftValidation(
   validation: EpisodeScriptDraftValidation | null,
-  options: { authoringInProgress?: boolean } = {},
+  options: {
+    authoringInProgress?: boolean;
+    pendingRepair?: boolean;
+    restartRequired?: boolean;
+  } = {},
 ): unknown {
   if (!validation) return validation;
   const { repairEvidence, ...summary } = validation;
   if (options.authoringInProgress) {
     return {
       ...summary,
-      requiredAction: "continue_authoring",
+      requiredAction: options.restartRequired
+        ? "restart_script_authoring"
+        : options.pendingRepair
+        ? "correct_pending_chunk"
+        : "continue_authoring",
     };
   }
   if (!repairEvidence) {
@@ -75,13 +88,43 @@ function publicDraftValidation(
   };
 }
 
+function pendingChunkValidationMessages(
+  pendingChunk: EpisodeScriptPendingChunkRow,
+): string[] {
+  const messages: string[] = [];
+  for (const issue of pendingChunk.structuredIssues) {
+    const issueMessages = Array.isArray(issue.messages)
+      ? issue.messages.filter((message): message is string => (
+          typeof message === "string" && Boolean(message.trim())
+        ))
+      : [];
+    if (issueMessages.length > 0) {
+      messages.push(...issueMessages);
+      continue;
+    }
+    if (typeof issue.message === "string" && issue.message.trim()) {
+      messages.push(issue.message);
+    }
+  }
+  return [...new Set(messages)];
+}
+
 /**
  * Deep-agent tools exposing the durable series/episode state (Turso/libSQL-backed,
  * see src/state/seriesState.ts). These are the tools the main agent must call
  * FIRST each run to determine which episode to work on and resume correctly
  * across separate invocations (see systemPromptExtension in src/index.ts).
  */
-export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructuredTool[] {
+export interface SeriesStateToolsOptions {
+  /** When false, assembled episodes remain resumable but cannot route to an upload capability. */
+  youtubeUploadEnabled?: boolean;
+}
+
+export function buildSeriesStateTools(
+  seriesState: SeriesState,
+  options: SeriesStateToolsOptions = {},
+): DynamicStructuredTool[] {
+  const youtubeUploadEnabled = options.youtubeUploadEnabled ?? true;
   const tryParseJson = (value: string) => {
     try {
       return JSON.parse(value);
@@ -261,7 +304,8 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
       "On a rerun, send seriesId only to verify the stored season. If status=manifest_required, call it again with " +
       `exactly ${SERIES_EPISODE_COUNT} episodes numbered 1-${SERIES_EPISODE_COUNT}; it validates and atomically inserts them. ` +
       `each with a non-empty title (at most ${KEY_ART_TITLE_MAX_RAW_CHARACTERS} characters and ` +
-      `${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words) and premise. Stored seasons are never overwritten.`,
+      `${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words) and premise. Stored seasons are never overwritten. ` +
+      "If status=invalid_series_id, call get_or_create_series before retrying this tool.",
     schema: z.object({
       seriesId: z.number().int().positive(),
       episodes: z.preprocess(
@@ -271,6 +315,19 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
     }),
     func: async ({ seriesId, episodes }) => {
       const manifestStatus = await seriesState.bulkInsertEpisodesIfEmpty(seriesId, episodes);
+      if (manifestStatus === "series_missing") {
+        return JSON.stringify({
+          // Keep this distinct from get_next_episode.kind=series_missing,
+          // which is a terminal availability result. A stale bootstrap id is
+          // recoverable in this invocation by resolving the concept again.
+          status: "invalid_series_id",
+          persisted: false,
+          seriesId,
+          retryThisInvocation: true,
+          nextAction:
+            "Call get_or_create_series with the requested concept before calling bulk_insert_episode_list again with its returned seriesId.",
+        });
+      }
       if (manifestStatus === "manifest_required") {
         return JSON.stringify({
           status: "manifest_required",
@@ -289,14 +346,19 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
     name: "get_next_episode",
     description:
       "Returns the next resumable episode and a compact resumeAction. Obey that action exactly. " +
+      "When scriptDraft.pendingRepair is present, copy and resubmit only its requiredSceneNumbers from candidateScenes; " +
+      "change only its per-scene editableFields because every other pending scene and field is retained durably. " +
       "daily_limit, series_complete, no_episodes, series_missing, and resumeAction=stop end the invocation. " +
+      (youtubeUploadEnabled
+        ? "A validated assembled episode may return youtube_upload. "
+        : "YouTube upload is disabled; a validated assembled episode returns stop and remains at assembly for later enablement. ") +
       "The production script stays in Turso; this receipt never retransmits it.",
     schema: z.object({ seriesId: z.number().int().positive() }),
     func: async ({ seriesId }) => {
       const availability = await seriesState.getNextEpisodeAvailability(seriesId);
       if (availability.kind !== "ready") return JSON.stringify(availability);
 
-      const [characters, agnesRows, privateDraft] = await Promise.all([
+      const [characters, agnesRows, privateDraft, storedPendingChunk] = await Promise.all([
         seriesState.getSeriesCharacters(seriesId),
         seriesState.listAgnesSceneGenerations(
           seriesId,
@@ -305,17 +367,57 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
         typeof seriesState.getEpisodeScriptDraft === "function"
           ? seriesState.getEpisodeScriptDraft(availability.episode.id)
           : Promise.resolve(null),
+        typeof seriesState.getEpisodeScriptPendingChunk === "function"
+          ? seriesState.getEpisodeScriptPendingChunk(availability.episode.id)
+          : Promise.resolve(null),
       ]);
       const scriptValidation = inspectProductionScriptReadiness(
         availability.episode.scriptJson,
         characters.map((character) => character.name),
         agnesRows,
       );
-      const scriptAuthoringProgress = privateDraft
+      const baseScriptAuthoringProgress = privateDraft
         ? getEpisodeScriptChunkAuthoringProgress(
             privateDraft.scriptJson,
             privateDraft.validation,
           )
+        : null;
+      const restartRequired = Boolean(
+        privateDraft
+        && baseScriptAuthoringProgress?.status === "in_progress"
+        && episodeScriptChunkDraftRequiresRestart(privateDraft.validation),
+      );
+      const pendingChunk = privateDraft
+        && !restartRequired
+        && storedPendingChunk
+        && storedPendingChunk.episodeId === privateDraft.episodeId
+        && storedPendingChunk.acceptedDraftRevision === privateDraft.revision
+        && storedPendingChunk.acceptedDraftDigest === privateDraft.contentDigest
+          ? storedPendingChunk
+          : null;
+      const pendingValidationMessages = pendingChunk
+        ? pendingChunkValidationMessages(pendingChunk)
+        : [];
+      const pendingRepair = pendingChunk
+        ? buildEpisodeScriptPendingRepairPayload(pendingChunk)
+        : null;
+      const scriptAuthoringProgress = baseScriptAuthoringProgress
+        ? restartRequired
+          ? {
+              ...baseScriptAuthoringProgress,
+              requiredAction: "restart_script_authoring",
+              nextSceneNumber: 1,
+              nextSceneEnd: Math.min(8, baseScriptAuthoringProgress.targetSceneCount),
+            }
+          : pendingChunk
+            ? {
+                ...baseScriptAuthoringProgress,
+                requiredAction: "correct_pending_chunk",
+                nextSceneNumber: pendingChunk.sceneStart,
+                nextSceneEnd: pendingChunk.sceneEnd,
+                validationIssues: pendingValidationMessages.slice(0, 8),
+              }
+            : baseScriptAuthoringProgress
         : null;
       const scriptDraft = privateDraft
         ? {
@@ -324,10 +426,15 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
             contentDigest: privateDraft.contentDigest,
             validation: publicDraftValidation(privateDraft.validation, {
               authoringInProgress: scriptAuthoringProgress?.status === "in_progress",
+              pendingRepair: pendingChunk !== null,
+              restartRequired,
             }),
             ...(scriptAuthoringProgress === null
               ? {}
               : { authoringProgress: scriptAuthoringProgress }),
+            ...(pendingRepair === null
+              ? {}
+              : { pendingRepair }),
             createdAt: privateDraft.createdAt,
             updatedAt: privateDraft.updatedAt,
           }
@@ -338,6 +445,7 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
       let resumeAction: "stop" | "repair_script" | "script_and_audio" | "script_authoring" | "audio_repair" | "agnes" | "youtube_upload";
       let audioValidation: unknown = null;
       let assemblyValidation: unknown = null;
+      let youtubeUploadValidation: unknown = null;
       if (scriptValidation.status === "repair_blocked") {
         resumeAction = "stop";
       } else if (
@@ -392,7 +500,17 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
             try {
               await seriesState.assertEpisodeReadyForDone(availability.episode.id);
               assemblyValidation = { status: "ready" };
-              resumeAction = "youtube_upload";
+              if (youtubeUploadEnabled) {
+                resumeAction = "youtube_upload";
+              } else {
+                resumeAction = "stop";
+                youtubeUploadValidation = {
+                  status: "disabled",
+                  enabled: false,
+                  message:
+                    "YouTube upload is disabled. The assembled episode remains at status=assembly and is not marked complete.",
+                };
+              }
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               assemblyValidation = {
@@ -445,7 +563,7 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
               pass: false,
               sceneCount: 0,
               nextAction:
-                "Plan the complete episode, then call write_episode_script_chunk with operation=start and scenes 1-8 as real arrays/objects, never an encoded scriptJson string.",
+                "After the one roster preflight, immediately call write_episode_script_chunk with operation=start. Put the complete plan for scenes 1-targetSceneCount and only opening scenes 1-8 directly in its tool arguments. Emit no visible planning, manual counting, draft, JSON, or preamble.",
             }
           : scriptAuthoringProgress?.status === "in_progress"
             ? {
@@ -453,15 +571,32 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
                 pass: false,
                 sceneCount: scriptAuthoringProgress.completedSceneCount,
                 targetSceneCount: scriptAuthoringProgress.targetSceneCount,
-                nextAction:
-                  `Obey resumeAction=script_authoring and append only scenes ` +
-                  `${scriptAuthoringProgress.nextSceneNumber}-${scriptAuthoringProgress.nextSceneEnd} ` +
-                  `to draft revision ${privateDraft!.revision}. Do not call refinement yet.`,
+                nextAction: restartRequired
+                  ? `Your next assistant action must be write_episode_script_chunk with no visible planning or preamble. ` +
+                    `Restart authoring with operation=restart, episodeId=${availability.episode.id}, ` +
+                    `expectedDraftRevision=${privateDraft!.revision}, targetSceneCount=` +
+                    `${scriptAuthoringProgress.targetSceneCount}, the complete immutable authoringPlan returned in ` +
+                    `scriptDraft.authoringProgress, and corrected scenes 1-${Math.min(
+                      8,
+                      scriptAuthoringProgress.targetSceneCount,
+                    )}. Do not append to the legacy prefix.`
+                  : pendingChunk
+                  ? `Your next assistant action must be write_episode_script_chunk with no visible planning or preamble. ` +
+                    `Against draft revision ${privateDraft!.revision}, copy and resubmit only complete scenes ` +
+                    `${pendingRepair!.requiredSceneNumbers.join(", ")} from ` +
+                    `scriptDraft.pendingRepair.candidateScenes. Change only each scene's fields listed in ` +
+                    `scriptDraft.pendingRepair.editableFields; every other pending scene and field stays durable. ` +
+                    `Do not resend accepted scenes, targetSceneCount, authoringPlan, ` +
+                    `or call refinement yet.`
+                  : `Your next assistant action must be write_episode_script_chunk with no visible planning or preamble. Append only scenes ` +
+                    `${scriptAuthoringProgress.nextSceneNumber}-${scriptAuthoringProgress.nextSceneEnd} ` +
+                    `to draft revision ${privateDraft!.revision}. Do not call refinement yet.`,
               }
           : scriptValidation,
         scriptDraft,
         ...(audioValidation === null ? {} : { audioValidation }),
         ...(assemblyValidation === null ? {} : { assemblyValidation }),
+        ...(youtubeUploadValidation === null ? {} : { youtubeUploadValidation }),
       });
     },
   });
@@ -495,9 +630,9 @@ export function buildSeriesStateTools(seriesState: SeriesState): DynamicStructur
       "Persists only an episode's lightweight resumable stage (pending/audio/assembly/failed) and optional " +
       "assembled output path. It never accepts or persists script content: write_episode_script_chunk and " +
       "refine_episode_script exclusively own draft storage, validation, and promotion to the production script. " +
-      "The terminal done transition is " +
-      "intentionally unavailable here: upload_to_youtube records the durable receipt, marks done, and cleans " +
-      "per-episode Agnes tracking after a successful upload.",
+      (youtubeUploadEnabled
+        ? "The terminal done transition is intentionally unavailable here: upload_to_youtube records the durable receipt, marks done, and cleans per-episode Agnes tracking after a successful upload."
+        : "The terminal done transition is intentionally unavailable. YouTube upload is disabled, so a finished episode remains safely at assembly and is never marked done."),
     schema: updateEpisodeStatusSchema,
     func: async (input) => {
       if (isInvalidStatusUpdate(input)) {

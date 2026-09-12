@@ -36,21 +36,47 @@ vi.mock("googleapis", () => ({
 
 vi.mock("../config.js", () => ({
   CONFIG: {
+    youtubeUploadEnabled: true,
     youtubeClientId: "client-id",
     youtubeClientSecret: "client-secret",
     youtubeRefreshToken: "refresh-token",
   },
 }));
 
+import { CONFIG } from "../config.js";
 import { buildYoutubeUploadTool } from "../tools/youtubeUploadTool.js";
 
 describe("youtubeUploadTool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (CONFIG as { youtubeUploadEnabled: boolean }).youtubeUploadEnabled = true;
     statSyncMock.mockReturnValue({ isFile: () => true, size: 1024 });
     createReadStreamMock.mockReturnValue({});
     readFileMock.mockResolvedValue(Buffer.from("png"));
     thumbnailSetMock.mockResolvedValue({});
+  });
+
+  it("fails closed without touching YouTube when uploads are disabled", async () => {
+    (CONFIG as { youtubeUploadEnabled: boolean }).youtubeUploadEnabled = false;
+    const getExistingUpload = vi.fn();
+    const beforeUpload = vi.fn();
+    const onUploaded = vi.fn();
+    const tool = buildYoutubeUploadTool({ getExistingUpload, beforeUpload, onUploaded });
+
+    const result = JSON.parse(await (tool as any).call({
+      seriesId: 7,
+      episodeNumber: 4,
+      videoPath: "/tmp/video.mp4",
+      title: "Disabled upload",
+      description: "This must stay local.",
+    }));
+
+    expect(result).toMatchObject({ status: "disabled", uploaded: false, retryUpload: false });
+    expect(getExistingUpload).not.toHaveBeenCalled();
+    expect(beforeUpload).not.toHaveBeenCalled();
+    expect(onUploaded).not.toHaveBeenCalled();
+    expect(statSyncMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
   });
 
   it("normalizes stringified tags via the tool schema", async () => {

@@ -1,4 +1,12 @@
 import { getHarnessProfile, registerHarnessProfile } from "deepagents";
+import {
+  createProductionToolProtocolMiddleware,
+  PRODUCTION_TOOL_PROTOCOL_MIDDLEWARE_NAME,
+} from "./productionToolProtocolMiddleware.js";
+import {
+  createProductionModelCallFailoverMiddleware,
+  PRODUCTION_MODEL_CALL_FAILOVER_MIDDLEWARE_NAME,
+} from "./productionModelCallFailoverMiddleware.js";
 
 /**
  * This workflow is fully represented by domain tools and durable database
@@ -49,6 +57,10 @@ export function configureProductionHarness(): void {
   registerHarnessProfile("openai", {
     excludedTools: [...PRODUCTION_EXCLUDED_AGENT_TOOLS],
     excludedMiddleware: [...PRODUCTION_EXCLUDED_AGENT_MIDDLEWARE],
+    extraMiddleware: () => [
+      createProductionToolProtocolMiddleware(),
+      createProductionModelCallFailoverMiddleware(),
+    ],
     generalPurposeSubagent: { enabled: false },
   });
   configured = true;
@@ -63,15 +75,32 @@ export function assertProductionHarnessConfigured(): void {
   const missingMiddleware = PRODUCTION_EXCLUDED_AGENT_MIDDLEWARE.filter(
     (middlewareName) => !profile?.excludedMiddleware.has(middlewareName),
   );
+  const extraMiddleware = typeof profile?.extraMiddleware === "function"
+    ? profile.extraMiddleware()
+    : profile?.extraMiddleware ?? [];
+  const expectedMiddlewareOrder = [
+    PRODUCTION_TOOL_PROTOCOL_MIDDLEWARE_NAME,
+    PRODUCTION_MODEL_CALL_FAILOVER_MIDDLEWARE_NAME,
+  ];
+  const actualMiddlewareOrder = extraMiddleware.map(
+    (middleware) => middleware.name,
+  );
+  const middlewareOrderCorrect = expectedMiddlewareOrder.length
+    === actualMiddlewareOrder.length
+    && expectedMiddlewareOrder.every(
+      (name, index) => actualMiddlewareOrder[index] === name,
+    );
   if (
     missing.length > 0
     || missingMiddleware.length > 0
+    || !middlewareOrderCorrect
     || profile?.generalPurposeSubagent?.enabled !== false
   ) {
     throw new Error(
       "Production DeepAgent harness is incomplete; " +
       `missing tool exclusions: ${missing.join(", ") || "none"}; ` +
-      `missing middleware exclusions: ${missingMiddleware.join(", ") || "none"}.`,
+      `missing middleware exclusions: ${missingMiddleware.join(", ") || "none"}; ` +
+      `extra middleware order: ${actualMiddlewareOrder.join(" -> ") || "none"}.`,
     );
   }
 }

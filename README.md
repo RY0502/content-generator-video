@@ -19,20 +19,30 @@ portraits are the only generated images in the production pipeline.
    key-art clips.
 6. Generate captions and optional sound assets.
 7. Submit two Agnes key-art title-card requests (series, then episode) and one
-   Agnes text-to-video request for every scene.
+   Agnes request for every scene. New assets use all visible approved character
+   portraits in reference mode when public HTTPS references are available; an
+   incomplete or unconfigured reference set falls back atomically to text mode.
 8. In the next phase, verify the persisted Agnes jobs (usually on later runs,
    but immediately when submission already reports every job complete); download
    only after all jobs are provider-complete.
-9. Normalize every muted Agnes clip to its exact matching Groq duration,
-   assemble `series key art -> episode key art -> scenes -> subscribe outro`,
+9. Normalize every muted Agnes clip to its exact matching Groq duration. Build
+   high-resolution start/middle/end contact sheets and have Gemini on AnyAPI
+   compare every clip with the approved portrait board and exact scene contract.
+10. If QA rejects an asset, archive that render and send only that asset through
+   the normal Agnes scheduler once more. A second rejection stops for manual
+   review. Once every current render passes, assemble
+   `series key art -> episode key art -> scenes -> subscribe outro`,
    and hold only the last scene frame behind the existing outro.
-10. Upload the canonical Agnes episode to YouTube. Only a successful YouTube
+11. Upload the canonical Agnes episode to YouTube. Only a successful YouTube
     receipt can finalize the episode as `done`; finalization records the upload
     and completion timestamps and removes transient episode-generation rows.
 
-There are no key-art images, scene images, image QA, final collage QA,
-static-video branch, or image-reference Agnes branch in the registered
-production tools. Both key arts are direct Agnes videos.
+There are no generated key-art images, generated scene images, image-edit QA,
+or static-video branch in the registered production tools. Both key arts are
+direct Agnes videos. The post-download contact-sheet review judges video frames
+but never creates or edits scene art. Approved reusable character portraits may
+also be passed as Agnes identity references; no scene frame is generated for
+that use.
 
 ## Daily episode gate
 
@@ -89,9 +99,10 @@ species/body form, and no double, extra, fused, or conjoined heads/faces.
 Series and episode titles are trimmed and limited to 100 characters/12 spoken
 words; their Groq WAVs must also measure at most 12 seconds.
 
-## Agnes lifecycle
+## Agnes lifecycle and video QA
 
-The agent exposes three separate resumable tools:
+The agent exposes three separate resumable generation tools followed by one QA
+gate:
 
 - `submit_agnes_scene_videos`: schedules both key arts and every scene across the configured account
   lanes, with at most two submission workers per account, and persists a
@@ -100,6 +111,25 @@ The agent exposes three separate resumable tools:
   exact accepted task using the account/key that created it.
 - `download_agnes_scene_videos`: runs only when both key arts and every scene are
   provider-complete, then downloads and duration-normalizes the clips.
+- `qa_agnes_episode_videos`: samples start/middle/end frames at 1024x576 per
+  tile, normally reviews three target clips per 3072-pixel-wide sheet, and sends
+  the sheet plus one high-resolution labeled portrait board to Gemini through
+  AnyAPI. For a 50-scene episode plus both titles this is normally 18 calls;
+  batching automatically grows to remain within `VIDEO_QA_MAX_VISION_CALLS`.
+
+QA checks exact cast counts, duplicate people/creatures/object characters,
+identity and age drift, anatomy, locked 2D painterly style, scene/action match,
+neighboring-scene reuse, and title correctness. Each verdict is bound to the
+normalized MP4 SHA-256, Gemini model, portrait-board digest, and QA policy.
+Judgments below `VIDEO_QA_MIN_CONFIDENCE` remain pending for another analysis
+and do not consume the one Agnes rerender. Sheets are capped at 8192 pixels in
+height; incompatible call-limit/batch settings fail before a request rather
+than silently reducing review quality.
+Passed assets are skipped on later runs. A first failure archives the completed
+receipt/video and atomically creates deterministic render revision 1 with a new
+seed plus bounded category-specific correction text. A revision-1 failure is
+marked `exhausted`; it cannot enter an automatic rerender loop. Assembly and
+terminal completion both fail closed unless every current asset has passed.
 
 Each configured Agnes account has independent durable submission and status
 gates. Both default to two request starts per minute per account, and their
@@ -118,14 +148,16 @@ errors, or malformed-success ambiguity. A provider `retryAfter` cools only the
 rejected account. Accepted tasks remain bound to the exact account/key that
 created them and are never resubmitted merely to move them between lanes.
 
-Every series stores one deterministic Agnes seed. `AGNES_SEED`, when supplied,
-is only the preferred value while that series has no stored seed; otherwise a
-random seed is created. The first committed value wins and is reused on every
-later run, so changing the environment variable does not rewrite an existing
-series. That same stored value is sent for both key arts and every scene,
-account, episode, and rerun in the series. Character continuity primarily comes from the persisted
-character descriptions, supporting-entity descriptors, continuity anchors,
-environment, camera, lighting, and complete scene prompt.
+Every series stores one deterministic Agnes root seed. `AGNES_SEED`, when
+supplied, is only the preferred value while that series has no stored seed;
+otherwise a random root is created. The first committed value wins. Each key
+art and numbered scene receives its own deterministic seed derived from that
+root, episode number, and asset identity. This preserves exact rerun behavior
+without forcing adjacent, highly similar prompts toward the same composition.
+Character continuity comes from the immutable source identity, refreshed
+portrait signature, optional approved portrait references, supporting-entity
+descriptors, continuity anchors, environment, camera, and lighting—not from
+reusing one sampling seed for every shot.
 
 Agnes Flash receives an integer duration from 4 through 12 seconds:
 
@@ -155,7 +187,8 @@ groups are:
 - Turso/libSQL for durable series, episode, Agnes, output, and upload state.
 - `EPISODE_DAILY_TIMEZONE`, an IANA timezone for the per-series daily boundary
   (defaults to `Asia/Kolkata`).
-- AnyAPI and OpenRouter/framework vision for initial character sheets.
+- AnyAPI for main-character portrait generation and Gemini video contact-sheet QA;
+  OpenRouter/framework vision remains limited to character-sheet extraction.
 - Groq Orpheus for the single narrator voice.
 - Up to five documented/tested independent Agnes lanes via `AGNES_API_KEY`
   (or `_1`) through `AGNES_API_KEY_5`, with matching optional stable
@@ -215,7 +248,37 @@ AGNES_STATUS_RPM_PER_ACCOUNT=2
 AGNES_SUBMISSION_INTERVAL_MS=0
 AGNES_MAX_DOWNLOAD_BYTES=500000000
 AGNES_SEED=
+# Optional, only when approved local portraits should be published for Agnes:
+# AGNES_REFERENCE_UPLOAD_BASE_URL=https://uploads.example.com/agnes-references
+# AGNES_REFERENCE_PUBLIC_BASE_URL=https://cdn.example.com/agnes-references
+# AGNES_REFERENCE_UPLOAD_BEARER_TOKEN=
 ```
+
+Video QA uses the same numbered `ANYAPI_KEY` pool but a separate analysis model:
+
+```bash
+ANYAPI_BASE_URL=https://api.anyapi.ai
+ANYAPI_IMAGE_MODEL=google/gemini-3.1-flash-image
+ANYAPI_VIDEO_QA_MODEL=google/gemini-3.1-pro-preview
+VIDEO_QA_SCENES_PER_SHEET=3
+VIDEO_QA_MAX_VISION_CALLS=20
+VIDEO_QA_REQUEST_TIMEOUT_MS=120000
+VIDEO_QA_ANYAPI_RPM_PER_KEY=9
+VIDEO_QA_MIN_CONFIDENCE=0.8
+VIDEO_QA_MAX_REGENERATIONS=1
+```
+
+The analysis request uses AnyAPI's OpenAI-compatible chat-completions endpoint,
+multiple base64 `image_url` inputs, a strict JSON-only prompt, and local schema
+validation. `ANYAPI_IMAGE_MODEL` controls portrait generation only, while
+`ANYAPI_VIDEO_QA_MODEL` controls the contact-sheet judge only. The deprecated
+`ANYAPI_MODEL` name remains a fallback only when `ANYAPI_IMAGE_MODEL` is absent.
+`ANYAPI_BASE_URL` must be HTTPS and cannot contain credentials, query parameters,
+or a fragment. Request starts rotate across the numbered key pool and default
+to nine per minute per key, leaving headroom below the documented free limit.
+See AnyAPI's [vision input guide](https://docs.anyapi.ai/api-reference/models/vision-models/overview),
+[Gemini 3.1 Pro model page](https://anyapi.ai/ai-models/google-gemini-3-1-pro-preview),
+and [parameter guide](https://docs.anyapi.ai/guides/parameters).
 
 The unsuffixed key and account ID are lane 1 aliases for their `_1` forms.
 Every numbered key must belong to a separately approved Agnes account; multiple
@@ -226,6 +289,15 @@ replaced, but retain the exact old credential until all tasks submitted with it
 are terminal because status retrieval is fingerprint-bound. Conflicting
 aliases, duplicate keys/IDs, malformed IDs, and IDs with no matching key are
 rejected during configuration loading.
+
+If every approved portrait path is already a public HTTPS URL, reference mode
+needs no publisher configuration. Local portraits require both reference base
+URLs above. The upload endpoint must accept HTTP `PUT`; the public endpoint must
+serve the same object key anonymously over HTTPS until Agnes finishes. The
+bearer token, when present, is sent only to the upload endpoint. If any visible
+portrait cannot be resolved, that whole asset remains text-to-video rather than
+mixing referenced and unreferenced main characters. Accepted/in-flight legacy
+text jobs are never upgraded or resubmitted.
 
 `AGNES_SUBMISSION_RPM_PER_ACCOUNT` and `AGNES_STATUS_RPM_PER_ACCOUNT` both
 default to two. Legacy interval settings are additional minimum spacing, never

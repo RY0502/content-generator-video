@@ -1,9 +1,9 @@
 import { inspectEpisodeNarrationManifest } from "./narrationContract.js";
-
-const COLLECTIVE_SUPPORTING_IDENTITY_PATTERN =
-  /\b(?:cluster|crowd|duo|family|flock|group|herd|pair|trio)\b/iu;
-const AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN =
-  /\b(?:animals?|bab(?:y|ies)|backpacks?|bags?|boys?|children|companions?|creatures?|crew|dinos?|dinosaurs?|duo|everyone|family|friends?|girls?|groups?|kids?|others?|pair|people|team|trio)\b/iu;
+import {
+  findGenericVisualCastAliases,
+  findMentionedUnlistedFigureNames,
+  isCollectiveSupportingIdentity,
+} from "./sceneCastCanonicalizer.js";
 const UNCOUNTED_BACKGROUND_FIGURE_PATTERN =
   /\b(?:bystanders?|crowds?|flocks?|herds?|onlookers?|groups? of (?:animals|children|creatures|dinosaurs?|people)|grazing (?:animals|creatures|dinosaurs?|herbivores?))\b/iu;
 
@@ -178,18 +178,6 @@ function descriptorIdentity(descriptor: string): string {
   return descriptor.split(":", 1)[0]!.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
 }
 
-function withoutStableFigureNames(text: string, names: readonly string[]): string {
-  return [...names]
-    .sort((left, right) => right.length - left.length)
-    .reduce((output, name) => {
-      // Malformed overlong names are reported elsewhere; never let one create
-      // an engine-sized dynamic RegExp while producing a bounded verdict.
-      if (!name || name.length > 500) return output;
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      return output.replace(new RegExp(`\\b${escaped}\\b`, "giu"), " ");
-    }, text);
-}
-
 function mentionedStableFigureNames(text: string, names: readonly string[]): string[] {
   return names.filter((name) => {
     if (!name || name.length > 500) return false;
@@ -339,7 +327,7 @@ export function inspectProductionScript(
         );
       }
       const identity = descriptorIdentity(descriptor);
-      if (COLLECTIVE_SUPPORTING_IDENTITY_PATTERN.test(identity)) {
+      if (isCollectiveSupportingIdentity(identity)) {
         issues.push(
           `${label} supporting entity "${descriptor.split(":", 1)[0]}" is a group. ` +
           "Each supportingEntities entry must identify exactly one visible individual.",
@@ -395,35 +383,31 @@ export function inspectProductionScript(
     const declaredButUnstagedFigures = exactSceneFigureNames.filter(
       (name) => mentionedStableFigureNames(`${action} ${sceneDetails}`, [name]).length === 0,
     );
-    if (declaredButUnstagedFigures.length > 0) {
+    for (const unstagedName of declaredButUnstagedFigures) {
       issues.push(
-        `${label} declares figure ${JSON.stringify(declaredButUnstagedFigures[0])} but never names it in action/sceneDetails. ` +
+        `${label} declares figure ${JSON.stringify(unstagedName)} but never names it in action/sceneDetails. ` +
         "Explicitly stage every declared visible individual by its exact stable name so the cast count is unambiguous.",
       );
     }
-    const exactSceneFigureIdentitySet = new Set(
-      exactSceneFigureNames.map((name) => name.toLocaleLowerCase()),
-    );
-    const unlistedKnownFigures = [...knownFigureIdentities].filter(
-      (identity) => !exactSceneFigureIdentitySet.has(identity),
-    );
-    const mentionedUnlistedFigures = mentionedStableFigureNames(
+    const mentionedUnlistedFigures = findMentionedUnlistedFigureNames(
       `${action} ${sceneDetails}`,
-      unlistedKnownFigures,
+      [...knownFigureIdentities],
+      exactSceneFigureNames,
     );
-    if (mentionedUnlistedFigures.length > 0) {
+    for (const unlistedName of mentionedUnlistedFigures) {
       issues.push(
-        `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(mentionedUnlistedFigures[0])}. ` +
+        `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(unlistedName)}. ` +
         "Every visible figure must be counted exactly once in characterNames or supportingEntities for this scene.",
       );
     }
-    const visualTextWithoutStableNames = withoutStableFigureNames(
+    const ambiguousAliases = findGenericVisualCastAliases(
       `${action} ${sceneDetails}`,
       exactSceneFigureNames,
     );
-    if (AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN.test(visualTextWithoutStableNames)) {
+    if (ambiguousAliases.length > 0) {
       issues.push(
-        `${label} action/sceneDetails uses a collective or generic cast alias. ` +
+        `${label} action/sceneDetails uses a collective or generic cast alias ` +
+        `(${ambiguousAliases.map((alias) => JSON.stringify(alias)).join(", ")}). ` +
         "Use the exact stable name of every visible figure, including object characters, so one alias cannot become a second body.",
       );
     }

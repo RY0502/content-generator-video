@@ -29,7 +29,7 @@ import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
 export const PORTRAIT_MODEL = "flux";
 
 // After:
-export const PORTRAIT_MODEL = "google/gemini-3.1-flash-image";
+export const PORTRAIT_MODEL = "openai/gpt-5-image";
 ```
 
 **Line 209**: Portrait generation call
@@ -57,7 +57,7 @@ portraitBytes = await generateAnyApiSceneImage(prompt, PORTRAIT_MODEL);
 ## Configuration
 
 ### AnyAPI Model Used
-- **Model**: `google/gemini-3.1-flash-image`
+- **Model**: `openai/gpt-5-image`
 - **Provider**: AnyAPI
 - **Type**: Single call per character
 - **Fallback**: Cloudflare (for scene images only, character portraits use AnyAPI only)

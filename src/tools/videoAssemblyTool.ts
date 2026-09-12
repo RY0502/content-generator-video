@@ -882,7 +882,15 @@ export function buildVideoAssemblyTool(
       }
 
       // All fallible rendering and validation completed against the temporary
-      // candidate. Remove intermediates before atomically publishing it.
+      // candidate. Revalidate the exact hash-bound QA inputs at the publication
+      // boundary so a concurrent QA rerender cannot publish an assembly made
+      // from superseded clips.
+      if (seriesState
+        && typeof (seriesState as Partial<SeriesState>).assertAgnesVideoQaReady === "function") {
+        await seriesState.assertAgnesVideoQaReady(seriesId, episodeNumber);
+      }
+
+      // Remove intermediates before atomically publishing the candidate.
       await rm(workDir, { recursive: true, force: true });
       await rename(temporaryFinalPath, finalPath);
       logVideoAssembled({

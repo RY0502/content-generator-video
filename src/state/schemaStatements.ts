@@ -67,6 +67,31 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
 
+  // A rejected chunk remains private and non-authoritative, but retaining its
+  // exact candidate lets a later invocation patch only the failing fields
+  // instead of asking the model to recreate an otherwise-good scene range.
+  // The accepted draft identity is an optimistic-concurrency boundary: a
+  // candidate can never be applied after its durable prefix has advanced.
+  `CREATE TABLE IF NOT EXISTS episode_script_pending_chunks (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    accepted_draft_revision INTEGER NOT NULL CHECK (accepted_draft_revision >= 1),
+    accepted_draft_digest TEXT NOT NULL CHECK (length(accepted_draft_digest) = 64),
+    operation TEXT NOT NULL CHECK (operation IN ('start', 'append', 'restart')),
+    scene_start INTEGER NOT NULL CHECK (scene_start >= 1),
+    scene_end INTEGER NOT NULL CHECK (scene_end >= scene_start),
+    candidate_scenes_json TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL CHECK (length(candidate_digest) = 64),
+    structured_issues_json TEXT NOT NULL,
+    issue_fingerprint TEXT NOT NULL CHECK (length(issue_fingerprint) = 64),
+    consecutive_no_progress_attempts INTEGER NOT NULL DEFAULT 0
+      CHECK (consecutive_no_progress_attempts >= 0),
+    total_correction_attempts INTEGER NOT NULL DEFAULT 0
+      CHECK (total_correction_attempts >= 0),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (consecutive_no_progress_attempts <= total_correction_attempts)
+  )`,
+
   `CREATE TABLE IF NOT EXISTS character_sheets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
@@ -116,6 +141,16 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
     normalized_output_path TEXT,
     download_status TEXT NOT NULL DEFAULT 'pending'
       CHECK (download_status IN ('pending', 'downloaded', 'failed')),
+    render_revision INTEGER NOT NULL DEFAULT 0 CHECK (render_revision BETWEEN 0 AND 1),
+    qa_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (qa_status IN ('pending', 'passed', 'awaiting_regeneration', 'exhausted')),
+    qa_request_digest TEXT,
+    qa_video_sha256 TEXT,
+    qa_result_json TEXT,
+    qa_contact_sheet_path TEXT,
+    qa_model TEXT,
+    qa_error TEXT,
+    qa_checked_at TEXT,
     error TEXT,
     submitted_at TEXT,
     completed_at TEXT,
@@ -124,6 +159,27 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY (series_id, episode_number)
       REFERENCES episodes(series_id, episode_number) ON DELETE CASCADE,
     UNIQUE (series_id, episode_number, scene_number, variant)
+  )`,
+
+  // A QA rejection is the only transition allowed to supersede a completed
+  // Agnes render. Preserve its full durable snapshot before the active row is
+  // reset so retries remain auditable without weakening the normal monotonic
+  // generation state machine.
+  `CREATE TABLE IF NOT EXISTS agnes_scene_generation_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id INTEGER NOT NULL,
+    episode_number INTEGER NOT NULL,
+    scene_number INTEGER NOT NULL,
+    variant TEXT NOT NULL CHECK (variant IN ('text', 'reference')),
+    render_revision INTEGER NOT NULL CHECK (render_revision BETWEEN 0 AND 1),
+    request_digest TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    qa_result_json TEXT NOT NULL,
+    archived_video_path TEXT,
+    archived_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (series_id, episode_number)
+      REFERENCES episodes(series_id, episode_number) ON DELETE CASCADE,
+    UNIQUE (series_id, episode_number, scene_number, variant, render_revision)
   )`,
 
   `CREATE TABLE IF NOT EXISTS episode_video_outputs (

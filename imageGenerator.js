@@ -11,7 +11,11 @@ if (!fs.existsSync(outputDir)) {
   console.log(`Created output directory: ${outputDir}`);
 }
 
-async function generateImage(prompt, model = 'google/gemini-3.1-flash-image', size = '1024x1024') {
+async function generateImage(
+  prompt,
+  model = process.env.ANYAPI_IMAGE_MODEL || process.env.ANYAPI_MODEL || 'google/gemini-3.1-flash-image',
+  size = '1024x1024'
+) {
   const apiKey = process.env.ANYAPI_KEY || 'any api key';
   
   try {

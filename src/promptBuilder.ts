@@ -34,31 +34,26 @@ export interface StylizedImageSpec {
 
 /** Visual style — the single most important series-level appearance anchor. */
 const STYLE_BIBLE =
-  "Premium children's storybook visual design. Modern 2D animated style. " +
-  "Soft painterly digital art, hand-painted appearance, matte finish. " +
-  "Rounded appealing character designs, large expressive eyes, child-friendly proportions, " +
-  "readable silhouettes and warm friendly body language. " +
-  "Vibrant cheerful colours with natural saturation, soft global illumination. " +
-  "Rich detailed environment with clear foreground, middle ground and background depth. " +
-  "16:9 landscape composition. Stable artistic style for the entire shot and across scenes.";
+  "SERIES LOOK LOCK: modern 2D hand-painted children's storybook animation; matte painted surfaces, " +
+  "soft brush texture, clean rounded shapes, simple facial planes, large expressive eyes, readable silhouettes, " +
+  "child-friendly proportions, and vibrant naturally saturated colors. Use the same linework, two-tone painterly " +
+  "shading, texture density, color grade, and character proportions in every scene. 16:9 landscape.";
 
 /** Character/color lock belongs in Agnes's final consistency section. */
 const CHARACTER_APPEARANCE_BIBLE =
-  "CRITICAL: Every character must match their given description EXACTLY " +
-  "in every scene — same gender presentation, hairstyle, fur/skin/body colors, eye color, clothing, accessories, " +
-  "markings, proportions, and body form. Never change a character's color palette between scenes. " +
-  "Characters must wear or carry ONLY what is explicitly specified in their locked description — " +
-  "never add unrequested clothing, hats, caps, sunhats, dresses, shirts, shoes, bags, satchels, or glasses.";
+  "IDENTITY LOCK: each named figure must match its appearance entry exactly from first frame to last: same exact " +
+  "age, gender presentation, face, hair, eyes, body form, proportions, colors, markings, clothing, and accessories. " +
+  "Do not add, remove, exchange, recolor, or redesign identity traits or wardrobe.";
 
 /** Locked rendering — prevents Pixar / CGI drift. */
 const RENDERING_BIBLE =
-  "No 3D. No CGI. No photorealism. No anime.";
+  "2D PAINTERLY RENDERING ONLY. Never switch to 3D, CGI, plastic volumetric rendering, photorealism, anime, " +
+  "cel-shaded vector art, or another illustration medium.";
 
 /** Video-only defects which static-image negative prompts cannot cover. */
 export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
-  "No flicker, jitter, strobing, melting, warping, temporal morphing, identity drift, color drift, " +
-  "wardrobe drift, sudden popping, teleporting, disappearing figures, discontinuous prop or background changes, " +
-  "jump cuts, unintended camera shake, looped or repeated action, or frozen holds.";
+  "No flicker, jitter, strobing, melting, warping, morphing, identity/color/wardrobe drift, popping, teleporting, " +
+  "disappearing figures, discontinuous props or backgrounds, jump cuts, repeated action, or unintended camera shake.";
 
 /**
  * Shared character-integrity exclusions for every scene and key-art video.
@@ -67,22 +62,16 @@ export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
  * The appendage wording remains species-safe for insects, birds, snakes, etc.
  */
 export const CHARACTER_INTEGRITY_NEGATIVE_BIBLE =
-  "No duplicate characters, cloned characters, duplicate living objects, or duplicate companion characters. " +
-  "No extra limbs or duplicated appendages beyond each character's locked species and body form. " +
-  "No double heads, extra heads, duplicated faces, fused heads, or conjoined heads.";
+  "No duplicate characters, clones, duplicate living objects, or duplicate companions. " +
+  "No extra limbs or duplicated appendages beyond the locked species/body form. " +
+  "No double heads or extra heads, duplicated faces, fused heads, or conjoined bodies.";
 
 /** Negative prompt — critical constraints, stated once, at the end. */
 const NEGATIVE_BIBLE =
-  "Avoid: any floating text overlays, subtitles, captions, digital UI text, character name tags, stamped titles, or watermarks; " +
-  "split panels, stacked views, collage, comic-strip layout, before/after layout, frame-within-frame compositions, or repeated side-by-side views; " +
-  "wings or feathers on non-bird land mammals (such as winged monkeys or winged squirrels); chimera body parts; " +
-  "the same character appearing more than once at the same time; duplicate or cloned characters; duplicate living objects or companion characters; characters wearing an item while a duplicate living version is nearby; multiple copies of the same named or described individual (distinct required characters of the same species are allowed); " +
-  "gender swap, depicting girls as boys, depicting boys as girls, wrong character gender, opposite gender appearance; " +
-  "floating characters, cropped bodies, missing body parts, extra or duplicated appendages beyond the character's locked species and body form, malformed limbs, deformed anatomy, bad anatomy, mutated body parts, headshots; " +
-  "unrequested hats, sunhats, unrequested dresses, unrequested shirts, unrequested clothing or outfits on non-clothed characters, unrequested extra backpacks or bags; " +
-  "extra or wrong characters beyond those explicitly required for the scene; logos; watermarks; " +
-  "spark symbols, sparkle marks, glowing stars, or any decorative symbols/emblems on characters' faces or foreheads. " +
-  CHARACTER_INTEGRITY_NEGATIVE_BIBLE;
+  "NEGATIVE: no text, captions, logos, watermarks, panels, split-screen, collage, mirrors, character-shaped " +
+  "reflections, portraits, statues, screens, silhouettes, crowds, bystanders, unlisted figures, gender or age changes, " +
+  "wrong anatomy, fused bodies, missing body parts, unlisted wardrobe/accessories/markings, chimera traits, or cropped " +
+  `identity-defining features. ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
 
 // ---------------------------------------------------------------------------
 // Camera presets — only 3 allowed, no freeform strings
@@ -93,14 +82,11 @@ export type CameraPreset = "establishing" | "medium" | "close";
 
 const CAMERA_PRESETS: Record<CameraPreset, string> = {
   establishing:
-    "Wide storybook scene. Camera slightly above eye level. " +
-    "Characters occupy 35-45% of frame. Large environment visible.",
+    "wide 16:9 establishing composition with the environment readable and every declared figure spatially separated",
   medium:
-    "Medium storybook shot. Characters occupy 55% of frame. " +
-    "Environment still visible. No portrait composition.",
+    "medium-wide 16:9 group composition with every declared figure spatially separated and the environment readable",
   close:
-    "Medium-close storybook shot. Character occupies 60%. " +
-    "Background remains visible. No headshot. No portrait. No cropped body.",
+    "medium-close 16:9 single-figure composition with the face, silhouette, and setting context readable",
 };
 
 /**
@@ -112,6 +98,62 @@ export function resolveCameraPreset(raw: string): CameraPreset {
   if (lower.includes("close")) return "close";
   if (lower.includes("medium") || lower.includes("two-shot")) return "medium";
   return "establishing";
+}
+
+export type SceneLightingProfile = "daylight" | "dusk" | "night" | "interior" | "underwater";
+
+const LIGHTING_PROFILES: Record<SceneLightingProfile, string> = {
+  daylight: "soft warm diffused daylight, gentle neutral shadows, bright friendly exposure",
+  dusk: "soft warm amber dusk light, gentle muted-violet shadows, bright friendly exposure",
+  night: "soft cool blue moonlight with a gentle warm fill, readable faces, no harsh darkness",
+  interior: "soft warm practical key light with neutral fill, readable faces, gentle shadows",
+  underwater: "soft aqua filtered light with gentle blue-green shadows, readable faces, bright exposure",
+};
+
+/**
+ * Reduces free-form lighting prose to a small episode-wide palette. Equivalent
+ * wording therefore produces identical grading instead of making adjacent
+ * shots drift between unrelated cinematic looks.
+ */
+export function resolveSceneLightingProfile(
+  rawLighting: string,
+  environmentDescription = "",
+): SceneLightingProfile {
+  const text = `${rawLighting} ${environmentDescription}`.toLocaleLowerCase();
+  if (/\b(?:underwater|submerged|ocean floor|sea floor)\b/u.test(text)) return "underwater";
+  if (/\b(?:indoor|interior|inside|lamp|lantern|candle|torch|firelight|cave|tomb|temple chamber)\b/u.test(text)) {
+    return "interior";
+  }
+  if (/\b(?:night|midnight|moonlight|moonlit|starlight|starlit)\b/u.test(text)) return "night";
+  if (/\b(?:dusk|sunset|twilight|late[- ]afternoon|golden[- ]hour|evening)\b/u.test(text)) return "dusk";
+  return "daylight";
+}
+
+type CameraMovement = "fixed camera" | "slow straight push-in" | "slow straight pull-back" | "slow pan left" |
+  "slow pan right" | "slow tilt up" | "slow tilt down" | "slow track left" | "slow track right";
+
+function resolveCameraMovement(raw: string): CameraMovement {
+  const text = raw.toLocaleLowerCase();
+  // An explicit static/fixed request wins over any incidental motion word.
+  if (/\b(?:fixed|static|locked[- ]?off|tripod)\b/u.test(text)) return "fixed camera";
+  if (/\b(?:pull(?:s|ing)? back|pull[- ]?out|dolly out|zoom out)\b/u.test(text)) return "slow straight pull-back";
+  if (/\b(?:push(?:es|ing)? in|push[- ]?in|dolly in|zoom in)\b/u.test(text)) return "slow straight push-in";
+  if (/\bpan(?:s|ning)?\s+(?:to\s+the\s+)?left\b/u.test(text)) return "slow pan left";
+  if (/\bpan(?:s|ning)?\s+(?:to\s+the\s+)?right\b/u.test(text)) return "slow pan right";
+  if (/\btilt(?:s|ing)?\s+(?:up|upward)\b/u.test(text)) return "slow tilt up";
+  if (/\btilt(?:s|ing)?\s+(?:down|downward)\b/u.test(text)) return "slow tilt down";
+  if (/\b(?:track|tracking|dolly)(?:s|ing)?\b[^.!;]{0,40}\b(?:left|leftward)\b/u.test(text)) return "slow track left";
+  if (/\b(?:track|tracking|dolly)(?:s|ing)?\b[^.!;]{0,40}\b(?:right|rightward)\b/u.test(text)) return "slow track right";
+  return "fixed camera";
+}
+
+function resolveCameraViewpoint(raw: string): string {
+  const text = raw.toLocaleLowerCase();
+  if (/\b(?:bird'?s[- ]?eye|overhead|top[- ]?down)\b/u.test(text)) return "gentle overhead viewpoint";
+  if (/\b(?:low[- ]?angle|ground[- ]?level|creek[- ]?level)\b/u.test(text)) return "gentle low-angle viewpoint";
+  if (/\b(?:high[- ]?angle|slightly above)\b/u.test(text)) return "slightly elevated viewpoint";
+  if (/\b(?:side|profile)\b/u.test(text)) return "clean side viewpoint";
+  return "natural eye-level viewpoint";
 }
 
 // Legacy constants kept for the portrait and generic builders that still
@@ -237,7 +279,7 @@ export function buildCharacterSignatureDistillSystemPrompt(): string {
     "You are a character-design prompt engineer. Distill the detailed character description into a " +
     `compact Character Bible entry (MAXIMUM ${CHARACTER_SIGNATURE_MAX_CHARS} characters). ` +
     "Include these traits in strict priority order: " +
-    "1. Exact Gender & Species/Type: For humans, MUST explicitly begin with 'Young girl (female child)' or 'Young boy (male child)' — NEVER write just 'Human' " +
+    "1. Exact Age, Gender & Species/Type: preserve any numeric or written age phrase exactly; for humans, MUST explicitly begin with 'Young girl (female child)' or 'Young boy (male child)' — NEVER write just 'Human' " +
     "2. Exact Hairstyle, Hair Cut & Hair Length (e.g. 'short chin-length chestnut-brown bob hair' or 'long jet-black hair in high ponytail with purple band' or 'short messy black hair') " +
     "3. EXACT primary body/fur/skin color — use specific shade names (e.g. 'golden-amber', 'light-beige skin') " +
     "4. Eye color and eye shape " +
@@ -306,17 +348,16 @@ function buildCreatureIdentityGuard(characterVisuals: SceneCharacterVisual[] | u
   );
 
   return [
-    `CREATURE IDENTITY GUIDE — ${guarded.map(label).join(", ")} must remain recognizable as their specified types and retain species-correct anatomy.`,
+    `BODY-FORM LOCK — ${guarded.map(label).join(", ")} ${guarded.length === 1 ? "retains its" : "retain their"} specified non-human ${guarded.length === 1 ? "type" : "types"} and species-correct anatomy.`,
     realCreatures.length > 0
-      ? `REAL CREATURE BODY RULE — ${realCreatures.map(label).join(", ")} must keep natural species anatomy, body plan, stance, and locomotion; never give a real creature an upright anthropomorphic or human-shaped body, human arms, or human hands.`
+      ? `${realCreatures.map(label).join(", ")} use natural species body plans, stance, and locomotion, never humanoid arms or hands.`
       : "",
     anthropomorphicCreatures.length > 0
-      ? `ANTHROPOMORPHIC CREATURE BODY RULE — ${anthropomorphicCreatures.map(label).join(", ")} may stand or walk upright and use expressive human-like poses, while keeping the correct species head, features, colors, and authored body proportions.`
+      ? `${anthropomorphicCreatures.map(label).join(", ")} may pose upright but retain the exact species head, features, colors, and authored proportions.`
       : "",
     otherNonHumans.length > 0
-      ? `AUTHORED NON-HUMAN FORM RULE — ${otherNonHumans.map(label).join(", ")} must keep the exact body form stated in their locked descriptions; do not humanize or animalize them.`
+      ? `${otherNonHumans.map(label).join(", ")} keep the exact authored non-human form; do not humanize or animalize them.`
       : "",
-    "All guarded characters must wear or carry ONLY accessories or clothing specified in their locked descriptions; do not add unrequested hats, shirts, dresses, shoes, or backpacks.",
   ].filter(Boolean).join(" ");
 }
 
@@ -338,11 +379,8 @@ function buildExactCastLedger(
   if (names.length === 0) return "";
 
   return (
-    `EXACT ON-SCREEN CAST LEDGER — ${names.length} TOTAL CHARACTER ${names.length === 1 ? "FIGURE" : "FIGURES"}, AND NO OTHERS: ` +
-    `${names.map((name) => `[${name}] × 1`).join("; ")}. ` +
-    "These are the only animate figures in the entire shot. Every later name, pronoun, role, collective label such as friends/children/group, " +
-    "or object-type alias refers only to the matching single ledger individual; it never authorizes another figure. " +
-    "The background contains no crowds, bystanders, unnamed people or animals, character-shaped reflections, portraits, statues, screens, or silhouettes."
+    `VISIBLE CAST — EXACTLY ${names.length} ${names.length === 1 ? "FIGURE" : "FIGURES"}, NO OTHERS: ` +
+    `${names.map((name) => `[${name}] × 1`).join("; ")}. This ledger is authoritative for the complete shot.`
   );
 }
 
@@ -353,18 +391,22 @@ function buildObjectCharacterInstanceLock(
   if (objects.length === 0) return "";
 
   return (
-    "OBJECT-CHARACTER SINGLE-INSTANCE LOCK — " +
+    "OBJECT-CHARACTER LOCK — " +
     objects.map((item) => {
       const name = item.name.replace(/\s+/g, " ").trim();
       const type = item.speciesOrType?.replace(/\s+/g, " ").trim() || "object";
-      return `[${name}] × 1 is the one physical ${type}; references to ${name}, the ${type}, its body/material, or its parts all mean that same one instance`;
+      return `[${name}] is the one physical ${type}; its name, type, body, and parts always mean this same instance`;
     }).join(" | ") +
-    ". Each object-character occupies exactly one place and one state at a time. If carried or worn, it cannot also stand elsewhere; " +
-    "if freestanding, it cannot also be carried or worn. Do not add an ordinary duplicate of the same object type."
+    ". It occupies one place and one state: carried/worn OR freestanding, never both, and no ordinary duplicate of its object type."
   );
 }
 
-/** Keeps authored camera motion/viewpoint while preventing impossible cast crops. */
+/**
+ * Converts authored camera prose into one safe shot size, viewpoint, and move.
+ * We deliberately do not echo the raw text: old scripts can contain
+ * split-screen, over-the-shoulder, or several competing camera moves, all of
+ * which make a text-to-video model invent foreground copies.
+ */
 function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number): string {
   const authoredIntent = rawCameraAngle.replace(/\s+/g, " ").trim() || "wide establishing shot";
   const requestedPreset = resolveCameraPreset(authoredIntent);
@@ -373,18 +415,12 @@ function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number)
     : totalFigureCount >= 2 && requestedPreset === "close"
       ? "medium"
       : requestedPreset;
-  const framingAdjustment = effectivePreset === requestedPreset
-    ? "Preserve that authored viewpoint, shot size, and camera movement."
-    : `Preserve its viewpoint and movement, but widen its shot size to ${effectivePreset} framing so all ${totalFigureCount} required figures stay fully visible and uncropped.`;
+  const castFraming = totalFigureCount > 0
+    ? `Keep all ${totalFigureCount} ledger figures readable and spatially distinct without reflections, repeated foreground faces, or over-the-shoulder body doubles.`
+    : "Keep the environment empty of figures.";
 
-  return [
-    `CAMERA — ${CAMERA_PRESETS[effectivePreset]}`,
-    `Authored camera intent: ${authoredIntent}.`,
-    framingAdjustment,
-    /\b(?:fixed|locked[- ]?off|static|tripod)\b/i.test(authoredIntent)
-      ? "Keep the camera fixed as authored; do not add camera drift."
-      : "Use only the authored push, pull, pan, tilt, tracking, or other camera movement; if none is stated, keep the camera stable.",
-  ].join(" ");
+  return `CAMERA — ${CAMERA_PRESETS[effectivePreset]}; ${resolveCameraViewpoint(authoredIntent)}; ` +
+    `${resolveCameraMovement(authoredIntent)}. One unbroken shot. ${castFraming}`;
 }
 
 /**
@@ -420,21 +456,35 @@ export function buildStylizedScenePrompt(params: {
   characterMovements?: string[];
   objectInteractions?: string;
 }): string {
-  const lighting = params.lighting?.replace(/\s+/g, " ").trim();
-  const envLayer = `SETTING: ${params.environmentDescription.replace(/\s+/g, " ").trim()}`;
+  const environment = params.environmentDescription.replace(/\s+/g, " ").trim();
+  const envLayer = `SETTING — ${environment}`;
 
   const normalizedSupportingEntities = (params.supportingEntities ?? [])
     .map((entity) => entity.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  // SUBJECT — main characters with strict identity anchoring and locked gender.
+  if (params.characterDescriptions.length !== (params.characterNames?.length ?? params.characterDescriptions.length)) {
+    throw new Error("Scene characterNames and characterDescriptions must align 1:1.");
+  }
+  const normalizedCharacterNames = params.characterDescriptions.map((_, index) => (
+    params.characterNames?.[index]?.replace(/\s+/g, " ").trim() || `Character ${index + 1}`
+  ));
+  if (new Set(normalizedCharacterNames.map((name) => name.toLocaleLowerCase())).size !== normalizedCharacterNames.length) {
+    throw new Error("Scene visible cast must contain each main character exactly once.");
+  }
+  const supportingNames = normalizedSupportingEntities.map(supportingEntityName);
+  const allCastNames = [...normalizedCharacterNames, ...supportingNames];
+  if (new Set(allCastNames.map((name) => name.toLocaleLowerCase())).size !== allCastNames.length) {
+    throw new Error("Scene visible cast must contain each main or supporting figure exactly once.");
+  }
+
+  // SUBJECT — preserve each locked identity entry verbatim apart from whitespace.
+  // These entries may contain exact age and portrait-derived traits and must not
+  // be summarized again at the provider boundary.
   const characters = params.characterDescriptions
     .map((description, index) => {
       const compactDescription = description.replace(/\s+/g, " ").trim();
-      const characterName = params.characterNames?.[index]?.replace(/\s+/g, " ").trim();
-      return characterName
-        ? `[${characterName} appearance]: ${compactDescription}`
-        : `[Character ${index + 1} appearance]: ${compactDescription}`;
+      return `[${normalizedCharacterNames[index]}]: ${compactDescription}`;
     })
     .join(" | ");
   const charCount = params.characterDescriptions.length;
@@ -446,27 +496,23 @@ export function buildStylizedScenePrompt(params: {
     normalizedSupportingEntities,
   );
   const charLayer = charCount > 0
-    ? `MAIN CHARACTERS — exactly ${charCount} visible named ${charCount === 1 ? "character" : "characters"}, each appearing once: ${characters}. ` +
-      "Keep every complete body readable in the shot and let the characters interact naturally with each other and the setting."
+    ? `IDENTITY REFERENCES — ${characters}`
     : supportingCount > 0
-      ? `MAIN CHARACTERS — exactly 0 main-series character figures. Do not add any member of the main cast. This is NOT a scenery-only scene: the ${supportingCount} supporting ${supportingCount === 1 ? "entity" : "entities"} below are required.`
-      : `CHARACTERS — SCENERY / ENVIRONMENT ONLY. Exactly 0 characters. No people, no children, no kids, no humans, no animals, no figures, no characters of any kind. The scene is completely empty of people and characters, showing only the pure landscape and environment.`;
+      ? "MAIN-CAST EXCLUSION — no main-series character is visible; only the supporting figures in the ledger appear."
+      : "EMPTY-SCENE LOCK — exactly zero people, animals, creatures, living objects, silhouettes, or other figures.";
 
   // SUBJECT — episode-local supporting entities.
   const supportingEntities = normalizedSupportingEntities
-    .map((entity, index) => `[Supporting entity ${index + 1}]: ${entity}`)
+    .map((entity, index) => `[${supportingEntityName(entity, index)}]: ${entity.includes(":") ? entity.slice(entity.indexOf(":") + 1).trim() : entity}`)
     .join(" | ");
   const supportingLayer = supportingEntities
-    ? `SUPPORTING ENTITIES — required visible episode-local figures, each appearing once with a complete readable body: ${supportingEntities}.`
+    ? `SUPPORTING IDENTITY REFERENCES — ${supportingEntities}`
     : "";
 
   const figureCountLayer = totalFigureCount > 0
-    ? `EXACT TOTAL FIGURE COUNT RULE — show exactly ${totalFigureCount} individual character ${totalFigureCount === 1 ? "figure" : "figures"} total: ` +
-      `${charCount} main-character ${charCount === 1 ? "figure" : "figures"} plus ${supportingCount} supporting-entity ${supportingCount === 1 ? "figure" : "figures"}. ` +
-      `Every required main or supporting individual appears exactly once with complete, species-correct anatomy and the natural or authored number and type of appendages; insects may have six legs, snakes may have no legs, and birds have wings plus legs. ` +
-      `Keep exactly the same ${totalFigureCount} identities from first frame to last, with one continuous trajectory per identity. ` +
-      `No identity may split, fork, enter twice, or reappear as a second copy after motion, occlusion, camera movement, or a portal crossing. ` +
-      `Do not add anonymous figures, helper children, background animals, clones, or a second copy of any individual, including during teamwork actions.`
+    ? `COUNT AND TRAJECTORY LOCK — keep those same ${totalFigureCount} ledger ${totalFigureCount === 1 ? "identity" : "identities"} ` +
+      "from first frame to last, each on one continuous trajectory with species-correct anatomy. No identity splits, forks, " +
+      "re-enters, appears in two depth planes, or gains a second copy after movement, occlusion, or portal crossing."
     : "";
 
   // CONSISTENCY — episode-local recurring props/setup continuity.
@@ -476,38 +522,41 @@ export function buildStylizedScenePrompt(params: {
     .map((anchor, index) => `[Anchor ${index + 1}]: ${anchor}`)
     .join(" | ");
   const continuityLayer = continuityAnchors
-    ? `NON-CHARACTER CONTINUITY ANCHORS — these describe only inanimate props, layout, or environmental state and never authorize another living or object-character figure: ${continuityAnchors}.`
+    ? `INANIMATE CONTINUITY — ${continuityAnchors}. These anchors never authorize another figure.`
     : "";
 
   const creatureIdentityLayer = buildCreatureIdentityGuard(params.characterVisuals);
   const objectCharacterInstanceLayer = buildObjectCharacterInstanceLock(params.characterVisuals);
 
-  // ACTION AND CHANGE — the one filmable beat, before camera/style constraints.
-  const actionParts = [
-    `VISIBLE ACTION: ${params.action}`,
+  // ACTION is the only dynamic instruction. DETAILS supplies blocking and the
+  // desired end-state, so legacy prose cannot accidentally introduce a second
+  // camera move, cut, or sequential story beat.
+  const blockingParts = [
     params.sceneDetails
-      ? `DETAILS: ${params.sceneDetails}`
+      ? params.sceneDetails
       : "",
     !params.sceneDetails && params.characterEmotions && params.characterEmotions.length > 0
-      ? `EMOTIONS: ${params.characterEmotions.join(", ")}`
+      ? `Emotions: ${params.characterEmotions.join(", ")}`
       : "",
     !params.sceneDetails && params.characterPoses && params.characterPoses.length > 0
-      ? `POSES: ${params.characterPoses.join(", ")}`
+      ? `Poses: ${params.characterPoses.join(", ")}`
       : "",
     !params.sceneDetails && params.characterMovements && params.characterMovements.length > 0
-      ? `MOVEMENTS: ${params.characterMovements.join(", ")}`
+      ? `Movement reference: ${params.characterMovements.join(", ")}`
       : "",
     !params.sceneDetails && params.objectInteractions
-      ? `PROPS/INTERACTIONS: ${params.objectInteractions}`
+      ? `Props/interactions: ${params.objectInteractions}`
       : "",
   ].filter(Boolean);
-  const actionLayer = "ACTION AND CHANGE — " + actionParts.join(". ") +
-    ". Animate this single visible beat as one coherent shot with one primary moving figure; any other listed figures remain spatially separated and use only subtle reactions. " +
-    "Use clear expressions, natural body language, and only subtle physically plausible environmental motion. Do not introduce a second action, cut, montage, or time jump.";
+  const action = params.action.replace(/\s+/g, " ").trim();
+  const actionLayer = `ACTION AND CHANGE — ONE CONTINUOUS BEAT: ${action}. ` +
+    (blockingParts.length > 0 ? `STATIC BLOCKING AND END-STATE REFERENCE: ${blockingParts.join(". ")}. ` : "") +
+    "Animate only the movement explicitly stated in the continuous beat. Every other ledger figure keeps its assigned " +
+    "position with a subtle natural reaction. No extra entrance, exit, replay, cut, montage, or time jump.";
 
   // CONSISTENCY — static and temporal exclusions, stated once at the end.
   const negativeLayer = totalFigureCount === 0
-    ? `${NEGATIVE_BIBLE} Avoid: any people, humans, persons, children, kids, toddlers, boys, girls, babies, animals, creatures, characters, figures, silhouettes of people.`
+    ? `${NEGATIVE_BIBLE} No people, children, animals, creatures, living objects, or figures.`
     : NEGATIVE_BIBLE;
 
   const subjectAndSettingLayer = [
@@ -516,16 +565,17 @@ export function buildStylizedScenePrompt(params: {
     charLayer,
     supportingLayer,
     envLayer,
-  ].filter(Boolean).join(" ");
+  ].filter(Boolean).join("\n");
   const cameraLayer = buildSceneCameraLayer(params.cameraAngle, totalFigureCount);
+  const lightingProfile = resolveSceneLightingProfile(params.lighting, environment);
   const visualStyleLayer = [
     "VISUAL STYLE —",
     STYLE_BIBLE,
-    lighting ? `LIGHTING, COLOR, AND ATMOSPHERE: ${lighting} Keep it stable throughout the shot.` : "",
+    `LIGHTING PROFILE (${lightingProfile.toUpperCase()}) — ${LIGHTING_PROFILES[lightingProfile]}. Keep this profile, exposure, and color grade unchanged for the full shot.`,
     RENDERING_BIBLE,
   ].filter(Boolean).join(" ");
   const soundAndRhythmLayer =
-    "SOUND AND RHYTHM — Silent visual-only shot with gentle readable pacing. No narration, dialogue, music, or sound effects.";
+    "SOUND AND RHYTHM — silent visual-only shot; gentle readable pacing; no speech, music, or sound effects.";
   const consistencyLayer = [
     "CONSISTENCY REQUIREMENTS —",
     totalFigureCount > 0 ? CHARACTER_APPEARANCE_BIBLE : "",
@@ -548,7 +598,7 @@ export function buildStylizedScenePrompt(params: {
     consistencyLayer,
   ]
     .filter(Boolean)
-    .join(" ");
+    .join("\n");
 }
 
 /**
@@ -661,9 +711,9 @@ export function buildEpisodeKeyArtPrompt(params: {
 // ---------------------------------------------------------------------------
 
 const TITLE_CARD_NEGATIVE_BIBLE =
-  "No text except the one required title. No subtitles, captions, extra lettering, misspelled or changing letters, " +
-  "logos, watermarks, digital UI, split screen, collage, comic-strip panels, random background figures, scary elements, " +
-  "harsh dark shadows, gender swaps, cropped bodies, malformed anatomy, unrequested clothing, or unrequested accessories. " +
+  "No text except the one required title; no subtitles, extra lettering, misspelled/changing letters, logos, watermarks, " +
+  "UI, panels, split-screen, collage, mirrors, reflections, portraits, statues, silhouettes, background figures, gender/age " +
+  "changes, malformed anatomy, unlisted wardrobe, or unlisted accessories. " +
   CHARACTER_INTEGRITY_NEGATIVE_BIBLE;
 
 function lockedSeriesCharacterText(params: {
@@ -712,11 +762,11 @@ export function buildSeriesKeyArtVideoPrompt(params: {
     `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${characters.name}] × 1.`,
     `REQUIRED FOREGROUND PROTAGONIST — show that one ${characters.name}, fully visible and prominent: [${characters.name} appearance]: ${characters.appearance}.`,
     "The title words are typography only and never authorize another person, creature, living object, or depiction.",
-    "ACTION AND CHANGE — Use only gentle breathing, blinking, and one small friendly gesture by the single protagonist, plus subtle physically plausible environmental motion. Keep the title and layout unchanged; no entrance, exit, plot action, cut, montage, morph, or time jump.",
-    "CAMERA — Medium-wide 16:9 shot with the single protagonist in the center and lower half, environment readable around them, and clear open space for the title. Use a very slow straight push-in; keep the title plane stable and undistorted.",
-    `VISUAL STYLE — ${STYLE_BIBLE} Bright high-key color, warm friendly atmosphere, clean readable silhouettes, polished cinematic depth. ${RENDERING_BIBLE}`,
-    "SOUND AND RHYTHM — Silent visual-only title card with calm, gentle movement. No narration, dialogue, music, or sound effects.",
-    `CONSISTENCY REQUIREMENTS — Keep the exact title spelling, placement, letter shapes, and readability stable for the full shot; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep exactly one complete protagonist from first frame to last on one continuous trajectory. No other people, animals, living objects, background figures, reflections, portraits, statues, screens, silhouettes, entrances, or re-entry copies. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
+    "ACTION AND CHANGE — ONE CONTINUOUS BEAT: gentle breathing, one blink, and one small friendly gesture by the protagonist; subtle environmental motion only. Keep title and layout unchanged; no entrance, exit, plot beat, replay, cut, montage, or time jump.",
+    "CAMERA — medium-wide eye-level 16:9 shot; protagonist centered in the lower half; environment readable; open title space above; one slow straight push-in; no other camera move.",
+    `VISUAL STYLE — ${STYLE_BIBLE} LIGHTING PROFILE (DAYLIGHT) — ${LIGHTING_PROFILES.daylight}. ${RENDERING_BIBLE}`,
+    "SOUND AND RHYTHM — silent visual-only title card; calm motion; no speech, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — Preserve the exact title spelling, placement, letter shapes, and readability; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep the one protagonist on one continuous trajectory; never duplicate it in another depth plane. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
   ].join(" ");
 }
 
@@ -744,10 +794,10 @@ export function buildEpisodeKeyArtVideoPrompt(params: {
     `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${protagonistName}] × 1.`,
     `REQUIRED FOREGROUND PROTAGONIST — show that one ${protagonistName}, fully visible and prominent: ${protagonist}.`,
     "The series and episode title words are typography only and never authorize another person, creature, living object, or depiction.",
-    "ACTION AND CHANGE — The protagonist holds one readable pose connected to the premise, with gentle breathing, blinking, one small friendly gesture, and subtle physically plausible environmental motion. Keep the title and layout unchanged; no new plot beat, cut, montage, morph, or time jump.",
-    "CAMERA — Medium-wide 16:9 title-card shot with the protagonist centered in the lower half, the episode setting readable, and clear open space for the title. Use a very slow straight push-in; keep the title plane stable and undistorted.",
-    `VISUAL STYLE — ${STYLE_BIBLE} Bright high-key color, warm friendly atmosphere, clean readable silhouette, polished cinematic depth. ${RENDERING_BIBLE}`,
-    "SOUND AND RHYTHM — Silent visual-only title card with calm, gentle movement. No narration, dialogue, music, or sound effects.",
-    `CONSISTENCY REQUIREMENTS — Keep the exact episode-title spelling, placement, letter shapes, and readability stable for the full shot; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep exactly one complete protagonist from first frame to last on one continuous trajectory. No other people, animals, living objects, background figures, reflections, portraits, statues, screens, silhouettes, entrances, or re-entry copies. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
+    "ACTION AND CHANGE — ONE CONTINUOUS BEAT: hold one readable premise-related pose with gentle breathing, one blink, and one small friendly gesture; subtle environmental motion only. Keep title and layout unchanged; no extra plot beat, replay, cut, montage, or time jump.",
+    "CAMERA — medium-wide eye-level 16:9 title-card shot; protagonist centered in the lower half; setting readable; open title space above; one slow straight push-in; no other camera move.",
+    `VISUAL STYLE — ${STYLE_BIBLE} LIGHTING PROFILE (DAYLIGHT) — ${LIGHTING_PROFILES.daylight}. ${RENDERING_BIBLE}`,
+    "SOUND AND RHYTHM — silent visual-only title card; calm motion; no speech, music, or sound effects.",
+    `CONSISTENCY REQUIREMENTS — Preserve the exact episode-title spelling, placement, letter shapes, and readability; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep the one protagonist on one continuous trajectory; never duplicate it in another depth plane. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
   ].filter(Boolean).join(" ");
 }

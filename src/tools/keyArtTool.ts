@@ -17,7 +17,7 @@ import type { CustomStateStore } from "freetier-deepagent-framework";
 ffmpeg.setFfprobePath(CONFIG.ffprobePath);
 
 /** Default model for key art generation. */
-const DEFAULT_KEY_ART_MODEL = "google/gemini-3.1-flash-image";
+const DEFAULT_KEY_ART_MODEL = CONFIG.anyApiImageModel;
 
 /** Shared audio generation tool instance for key art TTS. */
 const audioGenTool = createAudioGenTool();
@@ -744,7 +744,7 @@ export function buildSeriesKeyArtTool(
       characterNames: z
         .preprocess(parseJsonArrayInput, z.array(z.string()))
         .describe("All main character names in the series. Can be JSON string or array."),
-      model: z.string().optional().describe("AnyAPI model. Default: google/gemini-3.1-flash-image."),
+      model: z.string().optional().describe("AnyAPI image model. Defaults to ANYAPI_IMAGE_MODEL."),
     }),
     func: async ({ seriesId, conceptName, conceptSummary, characterNames, model }) => {
       const timerName = "series_key_art";
@@ -856,7 +856,7 @@ export function buildEpisodeKeyArtTool(
       episodeTitle: z.string().describe("The episode title."),
       episodePremise: z.string().describe("Brief premise of this episode."),
       mainCharacterName: z.string().describe("The single main character to feature prominently in this episode's key art."),
-      model: z.string().optional().describe("AnyAPI model. Default: google/gemini-3.1-flash-image."),
+      model: z.string().optional().describe("AnyAPI image model. Defaults to ANYAPI_IMAGE_MODEL."),
     }),
     func: async ({ seriesId, episodeNumber, conceptName, episodeTitle, episodePremise, mainCharacterName, model }) => {
       const timerName = `episode_${episodeNumber}_key_art`;

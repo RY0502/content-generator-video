@@ -6,6 +6,7 @@ import {
   buildSeriesKeyArtVideoPrompt,
   buildStylizedScenePrompt,
   resolveCameraPreset,
+  resolveSceneLightingProfile,
   TEMPORAL_STABILITY_NEGATIVE_BIBLE,
 } from "../promptBuilder.js";
 
@@ -26,18 +27,16 @@ describe("promptBuilder", () => {
       sceneDetails: "Pip the Ant: worried, leaning forward, pointing with one leg. Ant leader: paused, antennae lifted. Props: red picnic blanket with sandwiches in the distance.",
     });
 
-    expect(prompt).toContain("SUPPORTING ENTITIES");
-    expect(prompt).toContain("Ant leader: tiny black ant with a shiny chestnut head");
-    expect(prompt).toContain("CONTINUITY ANCHORS");
+    expect(prompt).toContain("SUPPORTING IDENTITY REFERENCES");
+    expect(prompt).toContain("[Ant leader]: tiny black ant with a shiny chestnut head");
+    expect(prompt).toContain("INANIMATE CONTINUITY");
     expect(prompt).toContain("Picnic setup: red-and-white checkered blanket spread on grass with sandwiches and leaf cups.");
-    expect(prompt).toContain("Pip the Ant appearance");
-    expect(prompt).toContain("EXACT TOTAL FIGURE COUNT RULE — show exactly 2 individual character figures total");
-    expect(prompt).toContain("1 main-character figure plus 1 supporting-entity figure");
-    expect(prompt).not.toContain("Exactly 1 individual character figures total");
-    expect(prompt).toContain("Animate this single visible beat as one coherent shot");
-    expect(prompt).toContain("extra or wrong characters beyond those explicitly required for the scene");
-    expect(prompt).toContain("spark symbols, sparkle marks, glowing stars");
-    expect(prompt).toContain("decorative symbols/emblems on characters' faces or foreheads");
+    expect(prompt).toContain("[Pip the Ant]: small red ant");
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS");
+    expect(prompt).toContain("[Pip the Ant] × 1; [Ant leader] × 1");
+    expect(prompt).toContain("ACTION AND CHANGE — ONE CONTINUOUS BEAT");
+    expect(prompt).toContain("unlisted figures");
+    expect(prompt).toContain("No duplicate characters");
   });
 
   it("keeps real creatures in their natural body form", () => {
@@ -59,11 +58,10 @@ describe("promptBuilder", () => {
       sceneDetails: "Sunny glances back over her shoulder while the small butterfly lifts into the air with torn orange wings visible.",
     });
 
-    expect(prompt).toContain("CREATURE IDENTITY GUIDE");
+    expect(prompt).toContain("BODY-FORM LOCK");
     expect(prompt).toContain("Butterfly (butterfly)");
-    expect(prompt).toContain("REAL CREATURE BODY RULE");
-    expect(prompt).toContain("must keep natural species anatomy, body plan, stance, and locomotion");
-    expect(prompt).toContain("never give a real creature an upright anthropomorphic or human-shaped body");
+    expect(prompt).toContain("use natural species body plans, stance, and locomotion");
+    expect(prompt).toContain("never humanoid arms or hands");
     expect(prompt).not.toContain("Anthropomorphic styling (walking upright, expressive faces) is acceptable");
   });
 
@@ -88,8 +86,8 @@ describe("promptBuilder", () => {
       lighting: "warm lamplight",
     });
 
-    expect(prompt).toContain("ANTHROPOMORPHIC CREATURE BODY RULE");
-    expect(prompt).toContain("Felix the Fox (red fox) may stand or walk upright");
+    expect(prompt).toContain("BODY-FORM LOCK");
+    expect(prompt).toContain("Felix the Fox (red fox) may pose upright");
     expect(prompt).not.toContain("Felix the Fox (red fox) must keep natural species anatomy, body plan, stance, and locomotion");
   });
 
@@ -107,10 +105,10 @@ describe("promptBuilder", () => {
       objectInteractions: "Props: wooden door slightly open.",
     });
 
-    expect(prompt).toContain("EMOTIONS: happy");
-    expect(prompt).toContain("POSES: standing tall");
-    expect(prompt).toContain("MOVEMENTS: waving one arm");
-    expect(prompt).toContain("PROPS/INTERACTIONS: Props: wooden door slightly open.");
+    expect(prompt).toContain("Emotions: happy");
+    expect(prompt).toContain("Poses: standing tall");
+    expect(prompt).toContain("Movement reference: waving one arm");
+    expect(prompt).toContain("Props/interactions: Props: wooden door slightly open.");
   });
 
   it("generates a strict scenery-only prompt and negative tokens when no characters are in the scene", () => {
@@ -124,10 +122,9 @@ describe("promptBuilder", () => {
       lighting: "cool blue dusk with fireflies",
     });
 
-    expect(prompt).toContain("SCENERY / ENVIRONMENT ONLY");
-    expect(prompt).toContain("Exactly 0 characters");
-    expect(prompt).toContain("No people, no children, no kids, no humans, no animals, no figures, no characters of any kind");
-    expect(prompt).toContain("Avoid: any people, humans, persons, children, kids, toddlers, boys, girls, babies, animals, creatures, characters, figures, silhouettes of people.");
+    expect(prompt).toContain("EMPTY-SCENE LOCK");
+    expect(prompt).toContain("exactly zero people, animals, creatures, living objects, silhouettes, or other figures");
+    expect(prompt).toContain("No people, children, animals, creatures, living objects, or figures.");
   });
 
   it("treats supporting-only scenes as populated rather than scenery-only", () => {
@@ -144,14 +141,11 @@ describe("promptBuilder", () => {
       lighting: "soft morning light",
     });
 
-    expect(prompt).toContain("exactly 0 main-series character figures");
-    expect(prompt).toContain("This is NOT a scenery-only scene");
-    expect(prompt).toContain("SUPPORTING ENTITIES");
-    expect(prompt).toContain("EXACT TOTAL FIGURE COUNT RULE — show exactly 1 individual character figure total");
-    expect(prompt).toContain("0 main-character figures plus 1 supporting-entity figure");
-    expect(prompt).not.toContain("SCENERY / ENVIRONMENT ONLY");
-    expect(prompt).not.toContain("No people, no children, no kids, no humans, no animals, no figures");
-    expect(prompt).not.toContain("Avoid: any people, humans, persons, children, kids, toddlers, boys, girls, babies, animals, creatures");
+    expect(prompt).toContain("MAIN-CAST EXCLUSION");
+    expect(prompt).toContain("SUPPORTING IDENTITY REFERENCES");
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 1 FIGURE, NO OTHERS");
+    expect(prompt).not.toContain("EMPTY-SCENE LOCK");
+    expect(prompt).not.toContain("No people, children, animals, creatures, living objects, or figures.");
   });
 
   it("uses species-correct anatomy instead of a two-arm/two-leg constraint", () => {
@@ -172,15 +166,15 @@ describe("promptBuilder", () => {
       lighting: "warm morning sunlight",
     });
 
-    expect(prompt).toContain("species-correct anatomy and the natural or authored number and type");
-    expect(prompt).toContain("insects may have six legs, snakes may have no legs, and birds have wings plus legs");
-    expect(prompt).toContain("extra or duplicated appendages beyond the character's locked species and body form");
+    expect(prompt).toContain("species-correct anatomy");
+    expect(prompt).toContain("use natural species body plans, stance, and locomotion");
+    expect(prompt).toContain("duplicated appendages beyond the locked species/body form");
     expect(prompt).not.toContain("exactly two arms/forelegs and two legs/hindlegs");
     expect(prompt).not.toContain("exactly two hands/paws");
     expect(prompt).not.toContain("three arms, three hands, three legs");
     expect(prompt).toContain("No duplicate characters");
-    expect(prompt).toContain("No extra limbs or duplicated appendages beyond each character's locked species and body form");
-    expect(prompt).toContain("No double heads, extra heads, duplicated faces, fused heads, or conjoined heads");
+    expect(prompt).toContain("No extra limbs or duplicated appendages beyond the locked species/body form");
+    expect(prompt).toContain("No double heads or extra heads, duplicated faces, fused heads, or conjoined bodies");
   });
 
   it("applies the same explicit character-integrity negative bible to both key-art prompts", () => {
@@ -211,7 +205,7 @@ describe("promptBuilder", () => {
     expect(resolveCameraPreset("birds eye wide")).toBe("establishing");
   });
 
-  it("orders direct-video scene guidance for Agnes and preserves cast-compatible authored camera intent", () => {
+  it("orders direct-video guidance and normalizes unsafe camera prose to one cast-compatible plan", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Mia", "Leo", "Bobo"],
       characterVisuals: [
@@ -243,15 +237,18 @@ describe("promptBuilder", () => {
     ].map((section) => prompt.indexOf(section));
     expect(sections.every((index) => index >= 0)).toBe(true);
     expect(sections).toEqual([...sections].sort((left, right) => left - right));
-    expect(prompt).toContain("Authored camera intent: close tracking shot from creek level moving slowly right.");
-    expect(prompt).toContain("widen its shot size to medium framing so all 3 required figures stay fully visible and uncropped");
+    expect(prompt).toContain("medium-wide 16:9 group composition");
+    expect(prompt).toContain("gentle low-angle viewpoint; slow track right");
+    expect(prompt).not.toContain("Authored camera intent");
+    expect(prompt).not.toContain("close tracking shot from creek level moving slowly right");
     expect(prompt).toContain("Nest: round woven green leaves beside the same shallow stream.");
-    expect(prompt).toContain("warm amber late-afternoon light with soft fern shadows");
+    expect(prompt).toContain("LIGHTING PROFILE (DUSK)");
+    expect(prompt).not.toContain("warm amber late-afternoon light with soft fern shadows");
     expect(prompt).toContain(TEMPORAL_STABILITY_NEGATIVE_BIBLE);
-    expect(prompt).toContain("EXACT ON-SCREEN CAST LEDGER — 3 TOTAL CHARACTER FIGURES, AND NO OTHERS");
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 3 FIGURES, NO OTHERS");
     expect(prompt).toContain("[Mia] × 1; [Leo] × 1; [Bobo] × 1");
-    expect(prompt).toContain("OBJECT-CHARACTER SINGLE-INSTANCE LOCK");
-    expect(prompt).toContain("If carried or worn, it cannot also stand elsewhere");
+    expect(prompt).toContain("OBJECT-CHARACTER LOCK");
+    expect(prompt).toContain("carried/worn OR freestanding, never both");
     expect(prompt).not.toContain("The friends spotted the nest and moved closer");
   });
 
@@ -266,9 +263,9 @@ describe("promptBuilder", () => {
       lighting: "warm daylight",
     });
 
-    expect(prompt).toContain("EXACT ON-SCREEN CAST LEDGER — 4 TOTAL CHARACTER FIGURES, AND NO OTHERS");
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 4 FIGURES, NO OTHERS");
     expect(prompt).toContain("[Mia] × 1; [Leo] × 1; [Tara] × 1; [Bobo] × 1");
-    expect(prompt).toContain("show exactly 4 individual character figures total");
+    expect(prompt).toContain("keep those same 4 ledger identities");
   });
 
   it("uses dedicated direct-video title cards without legacy still-media bias", () => {
@@ -304,7 +301,7 @@ describe("promptBuilder", () => {
       expect(prompt).toContain("VISUAL STYLE");
       expect(prompt).toContain("SOUND AND RHYTHM");
       expect(prompt).toContain("CONSISTENCY REQUIREMENTS");
-      expect(prompt).toContain("Silent visual-only title card");
+      expect(prompt).toContain("silent visual-only title card");
       expect(prompt).not.toContain("provider audio track will be discarded");
       expect(prompt).toContain(TEMPORAL_STABILITY_NEGATIVE_BIBLE);
       expect(prompt).toContain("No duplicate characters");
@@ -333,8 +330,97 @@ describe("promptBuilder", () => {
       lighting: "soft morning light",
     });
 
-    expect(prompt).toContain("Characters must wear or carry ONLY what is explicitly specified in their locked description");
-    expect(prompt).toContain("never add unrequested clothing, hats, caps, sunhats, dresses, shirts, shoes, bags, satchels, or glasses");
-    expect(prompt).toContain("unrequested hats, sunhats, unrequested dresses, unrequested shirts, unrequested clothing or outfits on non-clothed characters, unrequested extra backpacks or bags");
+    expect(prompt).toContain("same exact age, gender presentation, face, hair, eyes, body form, proportions, colors, markings, clothing, and accessories");
+    expect(prompt).toContain("Do not add, remove, exchange, recolor, or redesign identity traits or wardrobe");
+    expect(prompt).toContain("unlisted wardrobe/accessories/markings");
+  });
+
+  it("preserves exact age and portrait identity text without summarizing it", () => {
+    const identity = "EXACT AGE 5-year-old young girl; chestnut bob; amber eyes; yellow shirt. Portrait lock: round cheeks, red shoes.";
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Mia"],
+      characterDescriptions: [identity],
+      environmentDescription: "A sunny park path.",
+      action: "Mia raises one hand and smiles.",
+      narrationText: "Mia waved.",
+      cameraAngle: "medium fixed camera",
+      lighting: "bright morning sunlight",
+    });
+
+    expect(prompt).toContain(`[Mia]: ${identity}`);
+    expect(prompt).toContain("same exact age");
+  });
+
+  it("uses a bounded lighting palette so equivalent scene prose keeps one grade", () => {
+    expect(resolveSceneLightingProfile("warm amber late-afternoon light")).toBe("dusk");
+    expect(resolveSceneLightingProfile("golden-hour sunlight")).toBe("dusk");
+    expect(resolveSceneLightingProfile("moonlit blue night")).toBe("night");
+    expect(resolveSceneLightingProfile("late-afternoon light", "inside an ancient tomb")).toBe("interior");
+    expect(resolveSceneLightingProfile("soft golden morning light")).toBe("daylight");
+  });
+
+  it("removes split-screen and competing authored camera grammar", () => {
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Mia", "Leo"],
+      characterDescriptions: ["five-year-old girl", "five-year-old boy"],
+      environmentDescription: "A quiet library.",
+      action: "Mia points to one book while Leo watches.",
+      narrationText: "They found the clue.",
+      cameraAngle: "split-screen over-the-shoulder close-up, pan left then orbit and zoom in",
+      lighting: "warm indoor lamplight",
+    });
+
+    expect(prompt).toContain("medium-wide 16:9 group composition");
+    expect(prompt).toContain("slow straight push-in");
+    expect(prompt).not.toContain("over-the-shoulder close-up");
+    expect(prompt).not.toContain("orbit");
+    expect(prompt).not.toContain("pan left then");
+  });
+
+  it("rejects duplicate cast declarations but never imposes an arbitrary cast ceiling", () => {
+    expect(() => buildStylizedScenePrompt({
+      characterNames: ["Mia", "Mia"],
+      characterDescriptions: ["five-year-old girl", "five-year-old girl"],
+      environmentDescription: "A sunny path.",
+      action: "Mia waves.",
+      narrationText: "Mia waved.",
+      cameraAngle: "wide",
+      lighting: "daylight",
+    })).toThrow("each main character exactly once");
+
+    const names = Array.from({ length: 7 }, (_, index) => `Character ${index + 1}`);
+    const prompt = buildStylizedScenePrompt({
+      characterNames: names,
+      characterDescriptions: names.map((name) => `${name}, one distinct child`),
+      environmentDescription: "A broad school stage.",
+      action: names.map((name) => `${name} holds one fixed place`).join(" while "),
+      narrationText: "Everyone held their place.",
+      cameraAngle: "wide fixed camera",
+      lighting: "soft daylight",
+    });
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 7 FIGURES, NO OTHERS");
+  });
+
+  it("keeps provider boilerplate bounded while retaining all authored visual payload", () => {
+    const identities = ["Mia", "Leo", "Tara", "Bobo"].map(
+      (name) => `${name}: ${name[0]!.repeat(394)}`,
+    );
+    const environment = `Ancient courtyard: ${"e".repeat(240)}`;
+    const action = `Mia points once while Leo, Tara, and Bobo hold their places: ${"a".repeat(115)}`;
+    const details = `Exact blocking: ${"d".repeat(340)}`;
+    const authoredPayloadLength = identities.join("").length + environment.length + action.length + details.length;
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Mia", "Leo", "Tara", "Bobo"],
+      characterDescriptions: identities,
+      environmentDescription: environment,
+      action,
+      narrationText: "Unused by the visual prompt.",
+      sceneDetails: details,
+      cameraAngle: "wide fixed camera",
+      lighting: "warm daylight",
+    });
+
+    for (const value of [...identities, environment, action, details]) expect(prompt).toContain(value);
+    expect(prompt.length - authoredPayloadLength).toBeLessThan(3_300);
   });
 });

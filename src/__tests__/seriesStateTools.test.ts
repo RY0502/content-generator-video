@@ -37,6 +37,74 @@ function buildProductionScript() {
   };
 }
 
+function buildChunkAuthoringDraft(params: {
+  episodeId?: number;
+  revision?: number;
+  contentDigest?: string;
+  completedSceneCount?: number;
+} = {}) {
+  const episodeId = params.episodeId ?? 7;
+  const revision = params.revision ?? 2;
+  const contentDigest = params.contentDigest ?? "c".repeat(64);
+  const completedSceneCount = params.completedSceneCount ?? 8;
+  return {
+    episodeId,
+    revision,
+    contentDigest,
+    scriptJson: {
+      title: "The Windy Picnic",
+      premise: "Pip and friends save a picnic from the wind.",
+      scenes: buildProductionScript().scenes.slice(0, completedSceneCount),
+      authoring: {
+        protocol: "chunked_episode_script_v1",
+        targetSceneCount: 40,
+        plan: {
+          storyArc: "The friends notice the wind, investigate it, protect the picnic, and celebrate together.",
+          educationalIdea: "Heavy objects can hold light objects safely in place.",
+          endingInsight: "Calm teamwork can turn a windy problem into a happy discovery.",
+          beats: [
+            {
+              startScene: 1,
+              endScene: 14,
+              storyBeat: "The friends discover the windy picnic problem and observe what keeps blowing away.",
+              setting: "The sunny clubhouse meadow and picnic blanket.",
+              continuityOutcome: "They agree to test safe ways to hold the red blanket in place.",
+            },
+            {
+              startScene: 15,
+              endScene: 28,
+              storyBeat: "They compare light and heavy objects and secure each corner together.",
+              setting: "The same sunny clubhouse meadow.",
+              continuityOutcome: "Four smooth gray stones now hold all four blanket corners.",
+            },
+            {
+              startScene: 29,
+              endScene: 40,
+              storyBeat: "They confirm their solution and share the rescued picnic.",
+              setting: "The same sunny clubhouse meadow beside the secured blanket.",
+              continuityOutcome: "The secured blanket stays flat for the closing celebration.",
+            },
+          ],
+          supportingEntityBible: [],
+          continuityBible: [
+            "Picnic setup: one red-and-white blanket spread beside four smooth gray stones.",
+          ],
+        },
+      },
+    },
+    validation: {
+      pass: true,
+      sceneCount: completedSceneCount,
+      totalSpokenWords: completedSceneCount * 19,
+      issueCount: 0,
+      issues: [],
+      omittedIssueCount: 0,
+    },
+    createdAt: "2026-09-04T01:00:00.000Z",
+    updatedAt: "2026-09-04T02:00:00.000Z",
+  };
+}
+
 describe("seriesStateTools", () => {
   it("normalizes stringified characters and environments for get_or_create_series", async () => {
     const findSeriesIdByConceptName = vi.fn().mockResolvedValue(null);
@@ -231,6 +299,22 @@ describe("seriesStateTools", () => {
       seriesId: 12,
       retryThisInvocation: true,
     });
+  });
+
+  it("turns a missing parent series into a recoverable bootstrap receipt", async () => {
+    const bulkInsertEpisodesIfEmpty = vi.fn().mockResolvedValue("series_missing");
+    const tools = buildSeriesStateTools({ bulkInsertEpisodesIfEmpty } as any);
+    const tool = tools.find((entry) => entry.name === "bulk_insert_episode_list");
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 404 }));
+
+    expect(result).toMatchObject({
+      status: "invalid_series_id",
+      persisted: false,
+      seriesId: 404,
+      retryThisInvocation: true,
+    });
+    expect(result.nextAction).toContain("get_or_create_series");
   });
 
   it("advertises only compact identifiers as required bootstrap arguments", () => {
@@ -535,6 +619,49 @@ describe("seriesStateTools", () => {
     expect(parsed.resumeAction).toBe(expectedAction);
   });
 
+  it("stops on a safely assembled episode while YouTube upload is disabled", async () => {
+    const outputPath = "/tmp/episode.mp4";
+    const availability = {
+      kind: "ready",
+      episode: {
+        id: 7,
+        seriesId: 12,
+        episodeNumber: 3,
+        title: "The Windy Picnic",
+        premise: "Pip and friends save a picnic from the wind.",
+        status: "assembly",
+        scriptJson: buildProductionScript(),
+        outputPath,
+        youtubeVideoId: null,
+        youtubeUrl: null,
+        uploadedAt: null,
+        completedAt: null,
+        completionLocalDate: null,
+      },
+      timeZone: "Asia/Kolkata",
+      localDate: "2026-09-04",
+    };
+    const tools = buildSeriesStateTools({
+      getNextEpisodeAvailability: vi.fn().mockResolvedValue(availability),
+      getSeriesCharacters: vi.fn().mockResolvedValue([
+        { name: "Pip the Ant", description: "A patient red ant." },
+      ]),
+      listAgnesSceneGenerations: vi.fn().mockResolvedValue([]),
+      assertEpisodeAudioReady: vi.fn().mockResolvedValue({ totalDurationSeconds: 320 }),
+      assertEpisodeReadyForDone: vi.fn().mockResolvedValue({ outputPath, durationSeconds: 325 }),
+    } as any, { youtubeUploadEnabled: false });
+    const tool = tools.find((entry) => entry.name === "get_next_episode");
+
+    const parsed = JSON.parse(await (tool as any).call({ seriesId: 12 }));
+
+    expect(parsed.resumeAction).toBe("stop");
+    expect(parsed.assemblyValidation).toEqual({ status: "ready" });
+    expect(parsed.youtubeUploadValidation).toMatchObject({
+      status: "disabled",
+      enabled: false,
+    });
+  });
+
   it("routes a brand-new episode with no script or draft to first-time authoring", async () => {
     const availability = {
       kind: "ready",
@@ -574,7 +701,7 @@ describe("seriesStateTools", () => {
       pass: false,
       sceneCount: 0,
       nextAction:
-        "Plan the complete episode, then call write_episode_script_chunk with operation=start and scenes 1-8 as real arrays/objects, never an encoded scriptJson string.",
+        "After the one roster preflight, immediately call write_episode_script_chunk with operation=start. Put the complete plan for scenes 1-targetSceneCount and only opening scenes 1-8 directly in its tool arguments. Emit no visible planning, manual counting, draft, JSON, or preamble.",
     });
     expect(parsed.episode).not.toHaveProperty("scriptJson");
   });
@@ -676,6 +803,8 @@ describe("seriesStateTools", () => {
       targetSceneCount: 40,
     });
     expect(parsed.scriptValidation.nextAction).toContain("scenes 9-16");
+    expect(parsed.scriptValidation.nextAction).toContain("next assistant action must be write_episode_script_chunk");
+    expect(parsed.scriptValidation.nextAction).toContain("no visible planning or preamble");
     expect(parsed.scriptValidation.nextAction).toContain("Do not call refinement yet");
     expect(parsed.scriptDraft).toMatchObject({
       revision: 2,
@@ -694,6 +823,181 @@ describe("seriesStateTools", () => {
       acceptedPrefix.slice(-2),
     );
     expect(parsed.scriptDraft).not.toHaveProperty("scriptJson");
+  });
+
+  it("surfaces a matching pending chunk as an exact targeted authoring repair", async () => {
+    const availability = {
+      kind: "ready",
+      episode: {
+        id: 7,
+        seriesId: 12,
+        episodeNumber: 3,
+        title: "The Windy Picnic",
+        premise: "Pip and friends save a picnic from the wind.",
+        status: "pending",
+        scriptJson: null,
+        outputPath: null,
+        youtubeVideoId: null,
+        youtubeUrl: null,
+        uploadedAt: null,
+        completedAt: null,
+        completionLocalDate: null,
+      },
+      timeZone: "Asia/Kolkata",
+      localDate: "2026-09-04",
+    };
+    const draft = buildChunkAuthoringDraft();
+    const issueMessages = [
+      "Scene 9 needs richer sceneDetails for reliable video generation.",
+      "Scene 11 narrationText has 24 spoken words; the maximum is 20.",
+    ];
+    const pendingChunk = {
+      episodeId: 7,
+      acceptedDraftRevision: draft.revision,
+      acceptedDraftDigest: draft.contentDigest,
+      operation: "append",
+      sceneStart: 9,
+      sceneEnd: 12,
+      candidateScenes: buildProductionScript().scenes.slice(8, 12),
+      candidateDigest: "d".repeat(64),
+      structuredIssues: [
+        {
+          code: "scene.details_too_weak",
+          sceneNumber: 9,
+          field: "sceneDetails",
+          path: "scenes[8].sceneDetails",
+          message: issueMessages[0],
+          messages: [issueMessages[0]],
+          key: "details-9",
+          occurrenceCount: 1,
+          weight: 20,
+        },
+        {
+          code: "narration.too_many_spoken_words",
+          sceneNumber: 11,
+          field: "narrationText",
+          path: "scenes[10].narrationText",
+          message: issueMessages[1],
+          messages: [issueMessages[1]],
+          key: "narration-11",
+          occurrenceCount: 1,
+          weight: 49,
+        },
+      ],
+      issueFingerprint: "e".repeat(64),
+      consecutiveNoProgressAttempts: 1,
+      totalCorrectionAttempts: 3,
+      createdAt: "2026-09-04T02:01:00.000Z",
+      updatedAt: "2026-09-04T02:02:00.000Z",
+    };
+    const getEpisodeScriptPendingChunk = vi.fn().mockResolvedValue(pendingChunk);
+    const tools = buildSeriesStateTools({
+      getNextEpisodeAvailability: vi.fn().mockResolvedValue(availability),
+      getSeriesCharacters: vi.fn().mockResolvedValue([
+        { name: "Pip the Ant", description: "A patient red ant." },
+      ]),
+      listAgnesSceneGenerations: vi.fn().mockResolvedValue([]),
+      getEpisodeScriptDraft: vi.fn().mockResolvedValue(draft),
+      getEpisodeScriptPendingChunk,
+    } as any);
+    const tool = tools.find((entry) => entry.name === "get_next_episode");
+
+    const parsed = JSON.parse(await (tool as any).call({ seriesId: 12 }));
+
+    expect(getEpisodeScriptPendingChunk).toHaveBeenCalledWith(7);
+    expect(parsed.resumeAction).toBe("script_authoring");
+    expect(parsed.scriptDraft.pendingRepair).toEqual({
+      operation: "append",
+      sceneStart: 9,
+      sceneEnd: 12,
+      candidateDigest: "d".repeat(64),
+      issueFingerprint: "e".repeat(64),
+      consecutiveNoProgressAttempts: 1,
+      totalCorrectionAttempts: 3,
+      candidateScenes: [
+        pendingChunk.candidateScenes[0],
+        pendingChunk.candidateScenes[2],
+      ],
+      requiredSceneNumbers: [9, 11],
+      editableFields: [
+        { sceneNumber: 9, fields: ["sceneDetails"] },
+        { sceneNumber: 11, fields: ["narrationText"] },
+      ],
+      structuredIssues: pendingChunk.structuredIssues,
+    });
+    expect(parsed.scriptDraft.authoringProgress).toMatchObject({
+      completedSceneCount: 8,
+      requiredAction: "correct_pending_chunk",
+      nextSceneNumber: 9,
+      nextSceneEnd: 12,
+      validationIssues: issueMessages,
+    });
+    expect(parsed.scriptDraft.validation.requiredAction).toBe("correct_pending_chunk");
+    expect(parsed.scriptValidation.nextAction).toContain("complete scenes 9, 11");
+    expect(parsed.scriptValidation.nextAction).toContain("draft revision 2");
+    expect(parsed.scriptValidation.nextAction).toContain("pendingRepair.candidateScenes");
+    expect(parsed.scriptValidation.nextAction).toContain("pendingRepair.editableFields");
+    expect(parsed.scriptValidation.nextAction).toContain("Do not resend accepted scenes");
+  });
+
+  it("does not surface a pending chunk from a stale accepted draft identity", async () => {
+    const availability = {
+      kind: "ready",
+      episode: {
+        id: 7,
+        seriesId: 12,
+        episodeNumber: 3,
+        title: "The Windy Picnic",
+        premise: "Pip and friends save a picnic from the wind.",
+        status: "pending",
+        scriptJson: null,
+        outputPath: null,
+        youtubeVideoId: null,
+        youtubeUrl: null,
+        uploadedAt: null,
+        completedAt: null,
+        completionLocalDate: null,
+      },
+      timeZone: "Asia/Kolkata",
+      localDate: "2026-09-04",
+    };
+    const draft = buildChunkAuthoringDraft();
+    const tools = buildSeriesStateTools({
+      getNextEpisodeAvailability: vi.fn().mockResolvedValue(availability),
+      getSeriesCharacters: vi.fn().mockResolvedValue([
+        { name: "Pip the Ant", description: "A patient red ant." },
+      ]),
+      listAgnesSceneGenerations: vi.fn().mockResolvedValue([]),
+      getEpisodeScriptDraft: vi.fn().mockResolvedValue(draft),
+      getEpisodeScriptPendingChunk: vi.fn().mockResolvedValue({
+        episodeId: 7,
+        acceptedDraftRevision: draft.revision,
+        acceptedDraftDigest: "f".repeat(64),
+        operation: "append",
+        sceneStart: 9,
+        sceneEnd: 12,
+        candidateScenes: [],
+        candidateDigest: "d".repeat(64),
+        structuredIssues: [{ message: "This stale issue must not be returned." }],
+        issueFingerprint: "e".repeat(64),
+        consecutiveNoProgressAttempts: 0,
+        totalCorrectionAttempts: 1,
+        createdAt: "2026-09-04T02:01:00.000Z",
+        updatedAt: "2026-09-04T02:02:00.000Z",
+      }),
+    } as any);
+    const tool = tools.find((entry) => entry.name === "get_next_episode");
+
+    const parsed = JSON.parse(await (tool as any).call({ seriesId: 12 }));
+
+    expect(parsed.scriptDraft).not.toHaveProperty("pendingRepair");
+    expect(parsed.scriptDraft.authoringProgress).toMatchObject({
+      nextSceneNumber: 9,
+      nextSceneEnd: 16,
+      validationIssues: [],
+    });
+    expect(parsed.scriptValidation.nextAction).toContain("Append only scenes 9-16");
+    expect(parsed.scriptValidation.nextAction).not.toContain("stale issue");
   });
 
   it("routes a validated completed output to YouTube even when the coarse stage is still audio", async () => {

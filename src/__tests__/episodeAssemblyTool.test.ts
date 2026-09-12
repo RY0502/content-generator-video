@@ -27,6 +27,7 @@ describe("compact episode assembly facade", () => {
     const state = {
       getSeriesInfo: vi.fn().mockResolvedValue({ conceptName: "Pocket Stars" }),
       getEpisodeByNumber: vi.fn().mockResolvedValue({ id: 71 }),
+      assertAgnesVideoQaReady: vi.fn().mockResolvedValue({ assetCount: 4 }),
       listEpisodeVideoOutputs: vi.fn().mockResolvedValue([]),
       getEpisodeNarrationAudioManifest: vi.fn().mockResolvedValue({
         totalDurationSeconds: 301,
@@ -72,6 +73,7 @@ describe("compact episode assembly facade", () => {
     const state = {
       getSeriesInfo: vi.fn().mockResolvedValue({ conceptName: "Pocket Stars" }),
       getEpisodeByNumber: vi.fn().mockResolvedValue({ id: 71, status: "audio" }),
+      assertAgnesVideoQaReady: vi.fn().mockResolvedValue({ assetCount: 4 }),
       listEpisodeVideoOutputs: vi.fn().mockResolvedValue([{
         variant: "agnes_text",
         status: "completed",
@@ -118,6 +120,23 @@ describe("compact episode assembly facade", () => {
     } as any);
     await expect((missingEpisode as any).call({ seriesId: 9, episodeNumber: 1 }))
       .rejects.toThrow("Episode 1 was not found");
+    expect(innerInvoke).not.toHaveBeenCalled();
+  });
+
+  it("refuses assembly until the current Agnes renders pass video QA", async () => {
+    const state = {
+      getSeriesInfo: vi.fn().mockResolvedValue({ conceptName: "Pocket Stars" }),
+      getEpisodeByNumber: vi.fn().mockResolvedValue({ id: 71 }),
+      assertAgnesVideoQaReady: vi.fn().mockRejectedValue(
+        new Error("Agnes video QA has not passed the current render of scene 2."),
+      ),
+      listEpisodeVideoOutputs: vi.fn(),
+      getEpisodeNarrationAudioManifest: vi.fn(),
+    };
+    const tool = buildEpisodeAssemblyTool(state as any, { includeKeyArt: true });
+
+    await expect((tool as any).call({ seriesId: 4, episodeNumber: 2 }))
+      .rejects.toThrow("video QA has not passed");
     expect(innerInvoke).not.toHaveBeenCalled();
   });
 });

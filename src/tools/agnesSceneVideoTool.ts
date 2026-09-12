@@ -9,6 +9,7 @@ import { CONFIG } from "../config.js";
 import {
   AgnesError,
   AgnesVideoClient,
+  AGNES_MAX_REFERENCE_IMAGES,
   AGNES_MAX_SECONDS,
   AGNES_MIN_SECONDS,
   AGNES_VIDEO_ASPECT_RATIO,
@@ -16,8 +17,14 @@ import {
   AGNES_VIDEO_SIZE,
   type AgnesErrorKind,
   type AgnesSubmitVideoRequest,
+  type AgnesVideoMode,
   type AgnesVideoTask,
 } from "../providers/agnes/index.js";
+import {
+  publishAgnesReferenceImage,
+  type AgnesReferenceImagePublisherOptions,
+  type PublishAgnesReferenceImageParams,
+} from "../providers/agnesReferenceImagePublisher.js";
 import {
   buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtVideoPrompt,
@@ -25,12 +32,15 @@ import {
   TEMPORAL_STABILITY_NEGATIVE_BIBLE,
 } from "../promptBuilder.js";
 import {
+  AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
+  AGNES_SERIES_KEY_ART_TRACKING_SCENE,
   AgnesKeyArtAudioMutationDeferredError,
   ensureAgnesKeyArtAudioAssets,
   type AgnesKeyArtAudioAsset,
 } from "../services/agnesKeyArtService.js";
 import { canonicalizeKeyArtTitle } from "../services/keyArtTitleContract.js";
 import {
+  buildLockedCharacterIdentity,
   ensureSeriesCharacterSheets,
   type EnsureSeriesCharacterSheetsResult,
 } from "../services/characterSheetService.js";
@@ -63,6 +73,7 @@ export const AGNES_NORMALIZATION_VERSION = 2;
 /** Stable prefix for operator-visible, secret-free Agnes workflow progress. */
 export const AGNES_PROGRESS_LOG_PREFIX = "[AgnesVideo]";
 const REQUEST_DIGEST_VERSION = 3;
+const REFERENCE_REQUEST_DIGEST_VERSION = 4;
 const RECEIPT_SCHEMA_VERSION = 3;
 const LEGACY_RECEIPT_SCHEMA_VERSION = 2;
 const RECEIPT_KIND = "agnes-single-scene";
@@ -149,6 +160,10 @@ interface PreparedScene {
   durationSeconds: number;
   providerSeconds: number;
   providerPrompt: string;
+  /** Provider API mode; output/state variant intentionally remains agnes_text. */
+  providerMode: AgnesVideoMode;
+  referenceImageUrls: string[];
+  publicReferenceValue: string | null;
   requestDigest: string;
   /** One shared canonical string reference captured before any row is prepared. */
   expectedEpisodeScriptJson: string;
@@ -205,6 +220,9 @@ export interface AgnesSceneVideoToolOptions {
   characterSheetPromptHash?: string;
   /** Injectable complete-roster operation used by focused tests. */
   ensureSeriesCharacterSheets?: typeof ensureSeriesCharacterSheets;
+  /** Injectable/publication seam for approved character portrait references. */
+  publishReferenceImage?: typeof publishAgnesReferenceImage;
+  referencePublisherOptions?: AgnesReferenceImagePublisherOptions;
 }
 
 interface WorkflowRuntime {
@@ -236,6 +254,11 @@ interface WorkflowRuntime {
     customState?: CustomStateStore;
     promptHash?: string;
   }) => Promise<EnsureSeriesCharacterSheetsResult>;
+  publishReferenceImage: typeof publishAgnesReferenceImage;
+  referencePublisherOptions: AgnesReferenceImagePublisherOptions;
+  /** One content-addressed portrait upload per runtime, shared by every scene. */
+  publishedCharacterReferences: Map<string, Promise<string>>;
+  referenceFallbackDiagnostics: Set<string>;
   characterSheetCustomState?: CustomStateStore;
   characterSheetPromptHash?: string;
 }
@@ -571,19 +594,147 @@ function receiptSafety(value: unknown): { accepted: boolean; unresolved: boolean
   return { accepted, unresolved };
 }
 
-function requestDigestFor(prompt: string, providerSeconds: number, seed: number, duration: number): string {
+export function createAgnesVideoRequestDigest(params: {
+  prompt: string;
+  providerSeconds: number;
+  seed: number;
+  duration: number;
+  mode: AgnesVideoMode;
+  referenceImageUrls?: readonly string[];
+}): string {
   return createHash("sha256").update(JSON.stringify({
-    schemaVersion: REQUEST_DIGEST_VERSION,
+    schemaVersion: params.mode === "reference"
+      ? REFERENCE_REQUEST_DIGEST_VERSION
+      : REQUEST_DIGEST_VERSION,
     model: AGNES_VIDEO_MODEL,
-    mode: "text",
+    mode: params.mode,
     size: AGNES_VIDEO_SIZE,
     aspectRatio: AGNES_VIDEO_ASPECT_RATIO,
     n: 1,
-    prompt,
-    providerSeconds,
-    seed,
-    targetDurationSeconds: duration,
+    prompt: params.prompt,
+    providerSeconds: params.providerSeconds,
+    seed: params.seed,
+    targetDurationSeconds: params.duration,
+    ...(params.mode === "reference"
+      ? { images: [...(params.referenceImageUrls ?? [])] }
+      : {}),
   })).digest("hex");
+}
+
+export type AgnesVideoQaIssueCode =
+  | "duplicate_entity"
+  | "wrong_cast"
+  | "identity_drift"
+  | "age_mismatch"
+  | "anatomy_error"
+  | "style_drift"
+  | "scene_mismatch"
+  | "repeated_scene"
+  | "title_error";
+
+const QA_RETRY_DIRECTIVES: Record<AgnesVideoQaIssueCode, string> = {
+  duplicate_entity: "Render each listed figure exactly once and never clone a person, creature, or object character.",
+  wrong_cast: "Render exactly the named visible cast, with no missing, substituted, or unlisted figure.",
+  identity_drift: "Match every locked character identity exactly in face, hair, body form, wardrobe, colors, and proportions.",
+  age_mismatch: "Preserve each named human character's exact stated age and child proportions.",
+  anatomy_error: "Keep every figure anatomically clean with one head, one face, and the correct number of separate limbs.",
+  style_drift: "Use only the locked 2D hand-painted storybook style, palette, line treatment, and material rendering.",
+  scene_mismatch: "Depict the specified setting and one specified action beat literally; do not substitute another episode moment.",
+  repeated_scene: "Create a clearly new composition and action beat, not a reuse of the neighboring shot.",
+  title_error: "Show the exact requested title once, stable and readable, with no other text.",
+};
+
+export function agnesAssetSeedDiscriminator(sceneNumber: number): string {
+  if (sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE) return "series-key-art";
+  if (sceneNumber === AGNES_EPISODE_KEY_ART_TRACKING_SCENE) return "episode-key-art";
+  return `scene-${sceneNumber}`;
+}
+
+export function qaIssueCodesFromResult(value: unknown): AgnesVideoQaIssueCode[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const issues = (value as { issues?: unknown }).issues;
+  if (!Array.isArray(issues)) return [];
+  const supported = new Set(Object.keys(QA_RETRY_DIRECTIVES));
+  return [...new Set(issues.flatMap((issue) => {
+    if (!issue || typeof issue !== "object" || Array.isArray(issue)) return [];
+    const code = String((issue as { code?: unknown }).code ?? "");
+    return supported.has(code) ? [code as AgnesVideoQaIssueCode] : [];
+  }))];
+}
+
+/** Adds only validated category-level corrections; raw judge prose never reaches Agnes. */
+export function buildAgnesQaRetryPrompt(
+  prompt: string,
+  issueCodes: readonly AgnesVideoQaIssueCode[],
+): string {
+  const uniqueCodes = [...new Set(issueCodes)].filter((code) => code in QA_RETRY_DIRECTIVES);
+  const directives = (uniqueCodes.length > 0 ? uniqueCodes : [
+    "duplicate_entity",
+    "identity_drift",
+    "scene_mismatch",
+  ] as AgnesVideoQaIssueCode[]).map((code) => QA_RETRY_DIRECTIVES[code]);
+  return `${prompt.trim()} QA RERENDER CORRECTION — Previous render was rejected. ${directives.join(" ")}`;
+}
+
+/** Stable per-asset diversity while preserving deterministic reruns. */
+export function deriveAgnesAssetSeed(
+  seriesSeed: number,
+  episodeNumber: number,
+  assetDiscriminator: string,
+): number {
+  if (!Number.isSafeInteger(seriesSeed) || seriesSeed < 0 || seriesSeed > 2_147_483_647) {
+    throw new Error("seriesSeed must be an integer from 0 through 2147483647.");
+  }
+  if (!Number.isSafeInteger(episodeNumber) || episodeNumber <= 0) {
+    throw new Error("episodeNumber must be a positive integer.");
+  }
+  const discriminator = assetDiscriminator.trim();
+  if (!discriminator) throw new Error("assetDiscriminator must not be empty.");
+  const digest = createHash("sha256")
+    .update(`${seriesSeed}:${episodeNumber}:${discriminator}`)
+    .digest();
+  return (digest.readUInt32BE(0) % 2_147_483_647) + 1;
+}
+
+export function serializeAgnesReferenceImageUrls(urls: readonly string[]): string | null {
+  return urls.length > 0 ? JSON.stringify([...urls]) : null;
+}
+
+export function parseAgnesReferenceImageUrls(value: string | null | undefined): string[] {
+  const raw = value?.trim();
+  if (!raw) return [];
+  let candidates: unknown;
+  try {
+    candidates = JSON.parse(raw);
+  } catch {
+    candidates = [raw];
+  }
+  if (!Array.isArray(candidates) || candidates.length < 1
+    || candidates.length > AGNES_MAX_REFERENCE_IMAGES) return [];
+  const urls: string[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") return [];
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password) return [];
+      urls.push(candidate);
+    } catch {
+      return [];
+    }
+  }
+  return urls;
+}
+
+function withReferenceIdentityMap(
+  prompt: string,
+  characters: readonly { name: string }[],
+): string {
+  const mapping = characters
+    .map(({ name }, index) => `reference image ${index + 1} is the approved portrait of ${name}`)
+    .join("; ");
+  return `${prompt.trim()} REFERENCE IMAGE IDENTITY MAP — ${mapping}. Treat each portrait as the `
+    + "authoritative identity and art-style reference; preserve its exact age, face, hair, body form, "
+    + "colors, clothing, accessories, markings, proportions, and silhouette in every frame.";
 }
 
 function withCharacterIntegrityGuard(canonicalPrompt: string): string {
@@ -600,9 +751,9 @@ export function buildAgnesVideoPrompt(params: {
   segmentIndex?: number;
   segmentCount?: number;
 }): string {
-  if (params.variant === "reference") {
-    throw new Error("Agnes image-reference generation is disabled in the video-only scene flow.");
-  }
+  // `variant` remains a compatibility hint. Provider mode and reference URLs
+  // are bound later, after the durable row and portrait availability are known.
+  void params.variant;
   // The documented `seconds` request field controls provider duration, while
   // normalization uses the exact measured WAV duration. Avoid a competing
   // fractional duration instruction inside the creative prompt.
@@ -657,10 +808,19 @@ export function buildAgnesKeyArtVideoPrompt(params: {
   ].filter(Boolean).join(" ");
 }
 
+function isFrozenQaRetry(row: AgnesSceneGenerationRow | null): boolean {
+  return Boolean(
+    row
+    && row.renderRevision === 1
+    && row.qaStatus === "awaiting_regeneration",
+  );
+}
+
 function hasDurableOrPotentialProviderWork(row: AgnesSceneGenerationRow | null): boolean {
   if (!row) return false;
   const safety = receiptSafety(row.providerReceipt);
-  return safety.accepted
+  return isFrozenQaRetry(row)
+    || safety.accepted
     || safety.unresolved
     || Boolean(row.providerTaskId)
     || row.status === "completed"
@@ -674,42 +834,110 @@ function hasDurableOrPotentialProviderWork(row: AgnesSceneGenerationRow | null):
  */
 function bindRequestToExistingWork(params: {
   proposedPrompt: string;
+  proposedMode: AgnesVideoMode;
+  proposedReferenceImageUrls: readonly string[];
   providerSeconds: number;
   durationSeconds: number;
-  seriesSeed: number;
+  preferredSeed: number;
   existingRow: AgnesSceneGenerationRow | null;
-}): { providerPrompt: string; requestDigest: string; seed: number } {
+}): {
+  providerPrompt: string;
+  providerMode: AgnesVideoMode;
+  referenceImageUrls: string[];
+  publicReferenceValue: string | null;
+  requestDigest: string;
+  seed: number;
+} {
+  if (isFrozenQaRetry(params.existingRow)) {
+    const row = params.existingRow!;
+    if (!row.requestDigest || !row.prompt.trim() || row.seed === null) {
+      throw new Error(
+        `Frozen Agnes QA retry for scene ${row.sceneNumber} is missing its prompt, digest, or seed.`,
+      );
+    }
+    if (
+      row.providerDurationSeconds !== params.providerSeconds
+      || Math.abs(row.requestedDurationSeconds - params.durationSeconds) > 0.001
+    ) {
+      throw new Error(
+        `Frozen Agnes QA retry for scene ${row.sceneNumber} no longer matches its persisted audio duration.`,
+      );
+    }
+    const referenceImageUrls = parseAgnesReferenceImageUrls(row.publicReferenceUrl);
+    const providerMode: AgnesVideoMode = referenceImageUrls.length > 0 ? "reference" : "text";
+    const persistedDigest = createAgnesVideoRequestDigest({
+      prompt: row.prompt,
+      providerSeconds: row.providerDurationSeconds,
+      seed: row.seed,
+      duration: row.requestedDurationSeconds,
+      mode: providerMode,
+      referenceImageUrls,
+    });
+    if (persistedDigest !== row.requestDigest) {
+      throw new Error(
+        `Frozen Agnes QA retry for scene ${row.sceneNumber} has an inconsistent persisted request digest.`,
+      );
+    }
+    return {
+      providerPrompt: row.prompt,
+      providerMode,
+      referenceImageUrls,
+      publicReferenceValue: serializeAgnesReferenceImageUrls(referenceImageUrls),
+      requestDigest: row.requestDigest,
+      seed: row.seed,
+    };
+  }
   const seed = params.existingRow?.seed !== null && params.existingRow?.seed !== undefined
     && hasDurableOrPotentialProviderWork(params.existingRow)
     ? params.existingRow.seed
-    : params.seriesSeed;
-  const proposedDigest = requestDigestFor(
-    params.proposedPrompt,
-    params.providerSeconds,
+    : params.preferredSeed;
+  const proposedDigest = createAgnesVideoRequestDigest({
+    prompt: params.proposedPrompt,
+    providerSeconds: params.providerSeconds,
     seed,
-    params.durationSeconds,
-  );
+    duration: params.durationSeconds,
+    mode: params.proposedMode,
+    referenceImageUrls: params.proposedReferenceImageUrls,
+  });
   if (
     params.existingRow
     && hasDurableOrPotentialProviderWork(params.existingRow)
     && params.existingRow.requestDigest
     && params.existingRow.prompt.trim()
   ) {
-    const persistedPromptDigest = requestDigestFor(
-      params.existingRow.prompt,
-      params.providerSeconds,
-      seed,
-      params.durationSeconds,
+    const persistedReferenceImageUrls = parseAgnesReferenceImageUrls(
+      params.existingRow.publicReferenceUrl,
     );
+    const persistedMode: AgnesVideoMode = persistedReferenceImageUrls.length > 0
+      ? "reference"
+      : "text";
+    const persistedPromptDigest = createAgnesVideoRequestDigest({
+      prompt: params.existingRow.prompt,
+      providerSeconds: params.providerSeconds,
+      seed,
+      duration: params.durationSeconds,
+      mode: persistedMode,
+      referenceImageUrls: persistedReferenceImageUrls,
+    });
     if (persistedPromptDigest === params.existingRow.requestDigest) {
       return {
         providerPrompt: params.existingRow.prompt,
+        providerMode: persistedMode,
+        referenceImageUrls: persistedReferenceImageUrls,
+        publicReferenceValue: serializeAgnesReferenceImageUrls(persistedReferenceImageUrls),
         requestDigest: params.existingRow.requestDigest,
         seed,
       };
     }
   }
-  return { providerPrompt: params.proposedPrompt, requestDigest: proposedDigest, seed };
+  return {
+    providerPrompt: params.proposedPrompt,
+    providerMode: params.proposedMode,
+    referenceImageUrls: [...params.proposedReferenceImageUrls],
+    publicReferenceValue: serializeAgnesReferenceImageUrls(params.proposedReferenceImageUrls),
+    requestDigest: proposedDigest,
+    seed,
+  };
 }
 
 async function normalizeAgnesVideo(params: {
@@ -742,15 +970,30 @@ async function normalizeAgnesVideo(params: {
 
 class SubmissionGate {
   private nextSlotAt = 0;
+  private turn: Promise<void> = Promise.resolve();
   constructor(private readonly intervalMs: number) {}
   async wait(deadlineAt?: number): Promise<boolean> {
-    const now = Date.now();
-    const slot = Math.max(now, this.nextSlotAt);
-    if (deadlineAt !== undefined && slot >= deadlineAt) return false;
-    this.nextSlotAt = slot + Math.max(0, this.intervalMs);
-    const delay = slot - now;
-    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-    return true;
+    const previousTurn = this.turn;
+    let releaseTurn!: () => void;
+    this.turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    await previousTurn;
+    try {
+      const now = Date.now();
+      const slot = Math.max(now, this.nextSlotAt);
+      if (deadlineAt !== undefined && slot >= deadlineAt) return false;
+      const waitMs = slot - now;
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      // Anchor the next slot to the real request start. If the event loop wakes
+      // this waiter late, pre-reserved timestamps must not let the following
+      // request burst immediately behind it.
+      const schedulingHeadroomMs = this.intervalMs <= 0
+        ? 0
+        : Math.min(1_000, Math.max(10, Math.ceil(this.intervalMs * 0.05)));
+      this.nextSlotAt = Date.now() + Math.max(0, this.intervalMs) + schedulingHeadroomMs;
+      return true;
+    } finally {
+      releaseTurn();
+    }
   }
 }
 
@@ -1107,6 +1350,15 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     includeKeyArt: options.includeKeyArt ?? true,
     ensureKeyArtAudioAssets: options.ensureKeyArtAudioAssets ?? ensureAgnesKeyArtAudioAssets,
     ensureSeriesCharacterSheets: options.ensureSeriesCharacterSheets ?? ensureSeriesCharacterSheets,
+    publishReferenceImage: options.publishReferenceImage ?? publishAgnesReferenceImage,
+    referencePublisherOptions: options.referencePublisherOptions ?? {
+      uploadBaseUrl: CONFIG.agnesReferenceUploadBaseUrl,
+      publicBaseUrl: CONFIG.agnesReferencePublicBaseUrl,
+      bearerToken: CONFIG.agnesReferenceUploadBearerToken,
+      requestTimeoutMs: CONFIG.agnesRequestTimeoutMs,
+    },
+    publishedCharacterReferences: new Map<string, Promise<string>>(),
+    referenceFallbackDiagnostics: new Set<string>(),
     ...(options.characterSheetCustomState
       ? { characterSheetCustomState: options.characterSheetCustomState }
       : {}),
@@ -1115,6 +1367,146 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
       : {}),
     ...(options.sceneNumbers ? { selectedSceneNumbers: [...options.sceneNumbers] } : {}),
   };
+}
+
+type CharacterReferenceSource = { name: string; source: string };
+type ReferenceConditioning = {
+  providerPrompt: string;
+  providerMode: AgnesVideoMode;
+  referenceImageUrls: string[];
+};
+
+function referenceTextFallback(prompt: string): ReferenceConditioning {
+  return { providerPrompt: prompt, providerMode: "text", referenceImageUrls: [] };
+}
+
+function logReferenceFallbackOnce(
+  runtime: WorkflowRuntime,
+  reason: string,
+  detail: string,
+): void {
+  if (runtime.referenceFallbackDiagnostics.has(reason)) return;
+  runtime.referenceFallbackDiagnostics.add(reason);
+  logAgnesProgress("character_reference_fallback", { reason, detail }, "warn");
+}
+
+function hasLocalReferencePublisher(runtime: WorkflowRuntime): boolean {
+  return Boolean(
+    runtime.referencePublisherOptions.uploadBaseUrl?.trim()
+    && runtime.referencePublisherOptions.publicBaseUrl?.trim(),
+  );
+}
+
+function isPublicHttpsReference(source: string): boolean {
+  try {
+    const parsed = new URL(source);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Enables reference mode only when every visible main character has one
+ * durable public portrait URL. Any incomplete/unconfigured set falls back as
+ * a whole to text mode; partial reference sets would bias identities unevenly.
+ */
+async function resolveReferenceConditioning(params: {
+  runtime: WorkflowRuntime;
+  seriesId: number;
+  episodeNumber: number;
+  existingRow: AgnesSceneGenerationRow | null;
+  prompt: string;
+  characters: readonly CharacterReferenceSource[];
+  requiredCharacterNames: readonly string[];
+}): Promise<ReferenceConditioning> {
+  if (hasDurableOrPotentialProviderWork(params.existingRow)) {
+    // bindRequestToExistingWork will recover the exact persisted mode, URLs,
+    // prompt and seed. Never publish or upgrade an accepted legacy text task.
+    return referenceTextFallback(params.prompt);
+  }
+
+  if (params.requiredCharacterNames.length === 0) return referenceTextFallback(params.prompt);
+  if (params.requiredCharacterNames.length > AGNES_MAX_REFERENCE_IMAGES) {
+    logReferenceFallbackOnce(
+      params.runtime,
+      "too_many_visible_characters",
+      `Agnes accepts at most ${AGNES_MAX_REFERENCE_IMAGES} reference images; using the complete text identity instead.`,
+    );
+    return referenceTextFallback(params.prompt);
+  }
+
+  const existingUrls = parseAgnesReferenceImageUrls(params.existingRow?.publicReferenceUrl);
+  const expectedReferencePrompt = withReferenceIdentityMap(
+    params.prompt,
+    params.requiredCharacterNames.map((name) => ({ name })),
+  );
+  if (
+    existingUrls.length === params.requiredCharacterNames.length
+    && params.existingRow?.prompt.trim() === expectedReferencePrompt
+  ) {
+    return {
+      providerPrompt: expectedReferencePrompt,
+      providerMode: "reference",
+      referenceImageUrls: existingUrls,
+    };
+  }
+
+  const sourcesByName = new Map(params.characters.map(({ name, source }) => [name, source] as const));
+  const orderedSources = params.requiredCharacterNames.map((name) => ({
+    name,
+    source: sourcesByName.get(name)?.trim() ?? "",
+  }));
+  if (orderedSources.some(({ source }) => !source)) {
+    logReferenceFallbackOnce(
+      params.runtime,
+      "portrait_missing",
+      "At least one visible character has no approved portrait path; using complete text identities for this asset.",
+    );
+    return referenceTextFallback(params.prompt);
+  }
+  if (!hasLocalReferencePublisher(params.runtime)
+    && orderedSources.some(({ source }) => !isPublicHttpsReference(source))) {
+    logReferenceFallbackOnce(
+      params.runtime,
+      "publisher_not_configured",
+      "Local portraits require AGNES_REFERENCE_UPLOAD_BASE_URL and AGNES_REFERENCE_PUBLIC_BASE_URL; using text mode.",
+    );
+    return referenceTextFallback(params.prompt);
+  }
+
+  try {
+    const referenceImageUrls: string[] = [];
+    for (const { name, source } of orderedSources) {
+      const cacheKey = `${params.seriesId}\u0000${name}\u0000${source}`;
+      let publication = params.runtime.publishedCharacterReferences.get(cacheKey);
+      if (!publication) {
+        const publicationParams: PublishAgnesReferenceImageParams = {
+          source,
+          seriesId: params.seriesId,
+          characterName: name,
+        };
+        publication = params.runtime.publishReferenceImage(
+          publicationParams,
+          params.runtime.referencePublisherOptions,
+        );
+        params.runtime.publishedCharacterReferences.set(cacheKey, publication);
+      }
+      referenceImageUrls.push(await publication);
+    }
+    return {
+      providerPrompt: expectedReferencePrompt,
+      providerMode: "reference",
+      referenceImageUrls,
+    };
+  } catch (error) {
+    logReferenceFallbackOnce(
+      params.runtime,
+      "portrait_publication_failed",
+      safeProgressError(error),
+    );
+    return referenceTextFallback(params.prompt);
+  }
 }
 
 async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<PreparedScene[]> {
@@ -1157,7 +1549,11 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
     // Read-only fail-closed gate. Only runSubmit may repair the roster, and it
     // does so before the first durable provider claim. Verification/download
     // must never mutate a character identity after submission has begun.
-    const lockedCharacters: Array<{ name: string; description: string }> = [];
+    const lockedCharacters: Array<{
+      name: string;
+      description: string;
+      portraitSource?: string;
+    }> = [];
     for (const character of characters) {
       const sheet = await runtime.seriesState.getCharacterSheet(seriesId, character.name);
       if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
@@ -1168,7 +1564,17 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
             : " before Agnes submission. Run the submit phase to repair the complete roster before any provider request."),
         );
       }
-      lockedCharacters.push({ name: character.name, description: sheet.generationPrompt.trim() });
+      lockedCharacters.push({
+        name: character.name,
+        description: buildLockedCharacterIdentity({
+          characterName: character.name,
+          characterDescription: character.description,
+          generationPrompt: sheet.generationPrompt,
+        }),
+        ...(sheet.referenceImagePaths?.portrait?.path
+          ? { portraitSource: sheet.referenceImagePaths.portrait.path }
+          : {}),
+      });
     }
 
     const seriesTitle = canonicalizeKeyArtTitle(seriesInfo.conceptName, "series");
@@ -1244,7 +1650,7 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
 
     for (const spec of keyArtSpecs) {
       const providerSeconds = planAgnesVideoSegments(spec.audio.durationSeconds)[0]!;
-      const proposedPrompt = buildAgnesKeyArtVideoPrompt({
+      const basePrompt = buildAgnesKeyArtVideoPrompt({
         canonicalKeyArtPrompt: spec.canonicalPrompt,
         title: spec.audio.text,
         targetDurationSeconds: spec.audio.durationSeconds,
@@ -1256,11 +1662,41 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
         spec.audio.trackingSceneNumber,
         "text",
       );
+      const requiredCharacters = spec.characterNames.map((name) => {
+        const character = lockedCharacters.find((candidate) => candidate.name === name);
+        return {
+          name,
+          source: character?.portraitSource ?? "",
+        };
+      });
+      const conditioning = await resolveReferenceConditioning({
+        runtime,
+        seriesId,
+        episodeNumber,
+        existingRow,
+        prompt: basePrompt,
+        characters: requiredCharacters,
+        requiredCharacterNames: spec.characterNames,
+      });
+      const renderRevision = existingRow?.renderRevision ?? 0;
+      const proposedPrompt = renderRevision === 1
+        ? buildAgnesQaRetryPrompt(
+            conditioning.providerPrompt,
+            qaIssueCodesFromResult(existingRow?.qaResult),
+          )
+        : conditioning.providerPrompt;
+      const seedDiscriminator = agnesAssetSeedDiscriminator(spec.audio.trackingSceneNumber);
       const binding = bindRequestToExistingWork({
         proposedPrompt,
+        proposedMode: conditioning.providerMode,
+        proposedReferenceImageUrls: conditioning.referenceImageUrls,
         providerSeconds,
         durationSeconds: spec.audio.durationSeconds,
-        seriesSeed,
+        preferredSeed: deriveAgnesAssetSeed(
+          seriesSeed,
+          episodeNumber,
+          renderRevision === 1 ? `${seedDiscriminator}:qa-retry-1` : seedDiscriminator,
+        ),
         existingRow,
       });
       const prefix = binding.requestDigest.slice(0, 16);
@@ -1279,6 +1715,9 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
         durationSeconds: spec.audio.durationSeconds,
         providerSeconds,
         providerPrompt: binding.providerPrompt,
+        providerMode: binding.providerMode,
+        referenceImageUrls: binding.referenceImageUrls,
+        publicReferenceValue: binding.publicReferenceValue,
         requestDigest: binding.requestDigest,
         expectedEpisodeScriptJson,
         expectedEpisodeAudioRevision,
@@ -1319,7 +1758,11 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
     try { [providerSeconds] = planAgnesVideoSegments(durationSeconds); }
     catch (error) { durationErrors.push(`scene ${sceneNumber}: ${safeError(error)}`); continue; }
     const input: ScenePromptInput = { seriesId, ...scriptedScene };
-    const { prompt: canonicalPrompt } = await materializeScenePrompt({
+    const {
+      prompt: canonicalPrompt,
+      characterNames,
+      characterReferenceSources,
+    } = await materializeScenePrompt({
       seriesState: runtime.seriesState,
       input,
       requestedBy: `Agnes video for scene ${sceneNumber}`,
@@ -1330,15 +1773,38 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       sceneNumber,
       "text",
     );
-    const proposedPrompt = buildAgnesVideoPrompt({
+    const basePrompt = buildAgnesVideoPrompt({
       canonicalScenePrompt: canonicalPrompt,
       targetDurationSeconds: durationSeconds,
     });
+    const conditioning = await resolveReferenceConditioning({
+      runtime,
+      seriesId,
+      episodeNumber,
+      existingRow,
+      prompt: basePrompt,
+      characters: characterReferenceSources ?? [],
+      requiredCharacterNames: characterNames,
+    });
+    const renderRevision = existingRow?.renderRevision ?? 0;
+    const proposedPrompt = renderRevision === 1
+      ? buildAgnesQaRetryPrompt(
+          conditioning.providerPrompt,
+          qaIssueCodesFromResult(existingRow?.qaResult),
+        )
+      : conditioning.providerPrompt;
+    const seedDiscriminator = agnesAssetSeedDiscriminator(sceneNumber);
     const binding = bindRequestToExistingWork({
       proposedPrompt,
+      proposedMode: conditioning.providerMode,
+      proposedReferenceImageUrls: conditioning.referenceImageUrls,
       providerSeconds: providerSeconds!,
       durationSeconds,
-      seriesSeed,
+      preferredSeed: deriveAgnesAssetSeed(
+        seriesSeed,
+        episodeNumber,
+        renderRevision === 1 ? `${seedDiscriminator}:qa-retry-1` : seedDiscriminator,
+      ),
       existingRow,
     });
     const variantDir = path.join(episodeDir, "agnes_text");
@@ -1351,6 +1817,9 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       durationSeconds,
       providerSeconds: providerSeconds!,
       providerPrompt: binding.providerPrompt,
+      providerMode: binding.providerMode,
+      referenceImageUrls: binding.referenceImageUrls,
+      publicReferenceValue: binding.publicReferenceValue,
       requestDigest: binding.requestDigest,
       expectedEpisodeScriptJson,
       expectedEpisodeAudioRevision,
@@ -1406,6 +1875,7 @@ async function loadState(
       seriesId, episodeNumber, sceneNumber, variant: "text", status: "pending",
       prompt: scene.providerPrompt, requestDigest: scene.requestDigest, seed: scene.seed,
       requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
+      publicReferenceUrl: scene.publicReferenceValue,
     });
   } else if (row.requestDigest !== scene.requestDigest) {
     // A non-materializing reload runs only after this invocation's initial
@@ -1420,6 +1890,7 @@ async function loadState(
       seriesId, episodeNumber, sceneNumber, variant: "text", prompt: scene.providerPrompt,
       requestDigest: scene.requestDigest, seed: scene.seed,
       requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
+      publicReferenceUrl: scene.publicReferenceValue,
     }, { requestDigest: row.requestDigest, attemptCount: row.attemptCount });
     row = reset.row;
     if (!reset.reset && row.requestDigest !== scene.requestDigest) {
@@ -1453,6 +1924,7 @@ async function persistState(
     seriesId, episodeNumber, sceneNumber: scene.input.sceneNumber, variant: "text", status,
     prompt: scene.providerPrompt, requestDigest: scene.requestDigest, seed: scene.seed,
     requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
+    publicReferenceUrl: scene.publicReferenceValue,
     providerTaskId: task?.video_id, providerReceipt: cloneEnvelope(envelope),
     providerVideoUrl: task?.metadata?.url, rawOutputPath: extra.rawOutputPath,
     normalizedOutputPath: extra.normalizedOutputPath, downloadStatus: extra.downloadStatus,
@@ -1708,6 +2180,7 @@ async function submitOneInternal(
         expectedEpisodeScriptJson: scene.expectedEpisodeScriptJson,
         expectedEpisodeAudioRevision: scene.expectedEpisodeAudioRevision,
         requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
+        publicReferenceUrl: scene.publicReferenceValue,
         providerReceipt: cloneEnvelope(envelope),
       }, row.attemptCount);
       if (!claim.claimed) {
@@ -1727,13 +2200,26 @@ async function submitOneInternal(
       const claimedAttempt = latestAttempt(envelope)!;
       claimedAttempt.submissionPhase = "post_started";
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, "pending");
-      const request: AgnesSubmitVideoRequest = {
-        mode: "text", prompt: scene.providerPrompt, seconds: scene.providerSeconds, seed: scene.seed,
-      };
+      const request: AgnesSubmitVideoRequest = scene.providerMode === "reference"
+        ? {
+            mode: "reference",
+            prompt: scene.providerPrompt,
+            seconds: scene.providerSeconds,
+            seed: scene.seed,
+            images: scene.referenceImageUrls,
+          }
+        : {
+            mode: "text",
+            prompt: scene.providerPrompt,
+            seconds: scene.providerSeconds,
+            seed: scene.seed,
+          };
       logAgnesProgress("submission_start", {
         ...assetProgressMetadata(scene),
         accountId: account.accountId,
         attemptNumber: claimedAttempt.attemptNumber,
+        providerMode: scene.providerMode,
+        referenceImageCount: scene.referenceImageUrls.length,
       });
       try {
         task = await account.client.submitVideo(request);

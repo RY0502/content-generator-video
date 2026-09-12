@@ -1,5 +1,6 @@
 import { createClient, type Client } from "@libsql/client";
 import { createHash, randomInt } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -18,6 +19,7 @@ import {
   AGNES_SERIES_KEY_ART_TRACKING_SCENE,
   agnesKeyArtPaths,
 } from "../services/agnesKeyArtService.js";
+import { AGNES_VIDEO_QA_POLICY_VERSION } from "../services/agnesVideoQaService.js";
 import {
   createNarrationAudioRequestDigest,
   narrationAudioMetadataPath,
@@ -233,6 +235,64 @@ export interface EpisodeScriptDraftRow {
   updatedAt: string;
 }
 
+export type EpisodeScriptPendingChunkOperation = "start" | "append" | "restart";
+
+/**
+ * One rejected scene range retained independently of the accepted draft.
+ * candidateScenes is deliberately opaque to the state layer; the script tool
+ * remains the owner of the episode-scene schema and semantic interpretation.
+ */
+export interface EpisodeScriptPendingChunkRow {
+  episodeId: number;
+  acceptedDraftRevision: number;
+  acceptedDraftDigest: string;
+  operation: EpisodeScriptPendingChunkOperation;
+  sceneStart: number;
+  sceneEnd: number;
+  candidateScenes: unknown[];
+  /** SHA-256 of the canonical candidateScenes JSON. */
+  candidateDigest: string;
+  /** JSON-safe issue objects produced by the semantic-validation layer. */
+  structuredIssues: Array<Record<string, unknown>>;
+  /** Stable SHA-256 identity of the complete structured issue set. */
+  issueFingerprint: string;
+  consecutiveNoProgressAttempts: number;
+  totalCorrectionAttempts: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertEpisodeScriptPendingChunkInput {
+  episodeId: number;
+  acceptedDraftRevision: number;
+  acceptedDraftDigest: string;
+  operation: EpisodeScriptPendingChunkOperation;
+  sceneStart: number;
+  sceneEnd: number;
+  candidateScenes: unknown[];
+  structuredIssues: Array<Record<string, unknown>>;
+  issueFingerprint: string;
+  consecutiveNoProgressAttempts?: number;
+  totalCorrectionAttempts?: number;
+  /**
+   * Optional compare-and-swap identity of the pending row this correction was
+   * derived from. Both values are required together. Omitting them means this
+   * call may only create the first pending row; it may not replace one which
+   * appeared concurrently.
+   */
+  expectedPendingCandidateDigest?: string;
+  expectedPendingIssueFingerprint?: string;
+  expectedPendingTotalCorrectionAttempts?: number;
+}
+
+export interface ClearEpisodeScriptPendingChunkInput {
+  episodeId: number;
+  /** Optional CAS guards; revision and digest must be supplied together. */
+  expectedAcceptedDraftRevision?: number;
+  expectedAcceptedDraftDigest?: string;
+  expectedIssueFingerprint?: string;
+}
+
 export interface StageEpisodeScriptDraftResult {
   draft: EpisodeScriptDraftRow;
   /** True only when this call inserted the first draft for the episode. */
@@ -331,7 +391,8 @@ export interface SeasonEpisodeInput {
 export type EnsureEpisodeManifestResult =
   | "inserted"
   | "verified"
-  | "manifest_required";
+  | "manifest_required"
+  | "series_missing";
 
 function validateSeasonEpisodeList(
   episodes: SeasonEpisodeInput[],
@@ -372,6 +433,12 @@ function validateSeasonEpisodeList(
 
 export interface ReferenceImage {
   path: string;
+  /**
+   * Version of the compact identity description derived from this portrait.
+   * Older rows intentionally omit it; the character-sheet preflight then
+   * re-analyzes the existing portrait without regenerating the image.
+   */
+  identitySchemaVersion?: number;
 }
 
 export interface KeyArtRow {
@@ -408,6 +475,7 @@ export type AgnesSceneGenerationStatus =
   | "failed";
 
 export type AgnesSceneDownloadStatus = "pending" | "downloaded" | "failed";
+export type AgnesVideoQaStatus = "pending" | "passed" | "awaiting_regeneration" | "exhausted";
 
 export interface AgnesSceneGenerationRow {
   id: number;
@@ -431,6 +499,16 @@ export interface AgnesSceneGenerationRow {
   rawOutputPath: string | null;
   normalizedOutputPath: string | null;
   downloadStatus: AgnesSceneDownloadStatus;
+  /** Zero is the original render; one is the single QA-authorized rerender. */
+  renderRevision: number;
+  qaStatus: AgnesVideoQaStatus;
+  qaRequestDigest: string | null;
+  qaVideoSha256: string | null;
+  qaResult: unknown | null;
+  qaContactSheetPath: string | null;
+  qaModel: string | null;
+  qaError: string | null;
+  qaCheckedAt: string | null;
   error: string | null;
   submittedAt: string | null;
   completedAt: string | null;
@@ -496,6 +574,35 @@ export interface ResetAgnesSceneGenerationForRequestInput {
   requestedDurationSeconds: number;
   providerDurationSeconds: number;
   publicReferenceUrl?: string | null;
+}
+
+export interface RecordAgnesVideoQaVerdictInput {
+  seriesId: number;
+  episodeNumber: number;
+  sceneNumber: number;
+  variant: AgnesSceneVariant;
+  expectedRequestDigest: string;
+  expectedRenderRevision: number;
+  expectedNormalizedOutputPath: string;
+  /** QA snapshot observed before the judge call; every write is first-writer-wins. */
+  expectedQaStatus: AgnesVideoQaStatus;
+  expectedQaRequestDigest: string | null;
+  qaRequestDigest: string;
+  videoSha256: string;
+  result: unknown;
+  contactSheetPath: string;
+  model: string;
+  status: "passed" | "exhausted";
+}
+
+export interface RequeueAgnesSceneAfterQaFailureInput extends Omit<
+  RecordAgnesVideoQaVerdictInput,
+  "status"
+> {
+  retryPrompt: string;
+  retryRequestDigest: string;
+  retrySeed: number;
+  archivedVideoPath?: string | null;
 }
 
 export type EpisodeVideoVariant = "static" | "agnes_text" | "agnes_reference";
@@ -774,6 +881,14 @@ function episodeScriptDraftDigest(serializedScript: string): string {
   return createHash("sha256").update(serializedScript).digest("hex");
 }
 
+function lowercaseSha256Digest(label: string, value: unknown): string {
+  const digest = typeof value === "string" ? value.trim() : "";
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error(`${label} must be a lowercase SHA-256 digest.`);
+  }
+  return digest;
+}
+
 function mapEpisodeScriptDraftRow(
   row: Record<string, unknown>,
 ): EpisodeScriptDraftRow {
@@ -791,6 +906,92 @@ function mapEpisodeScriptDraftRow(
     validation: boundEpisodeScriptDraftValidation(
       parseJson<unknown | null>(row.validation_json, null),
     ),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapEpisodeScriptPendingChunkRow(
+  row: Record<string, unknown>,
+): EpisodeScriptPendingChunkRow {
+  const acceptedDraftRevision = Number(row.accepted_draft_revision);
+  positiveSafeInteger(
+    "Persisted pending-chunk accepted draft revision",
+    acceptedDraftRevision,
+  );
+  const acceptedDraftDigest = lowercaseSha256Digest(
+    "Persisted pending-chunk accepted draft digest",
+    row.accepted_draft_digest,
+  );
+  const operation = String(row.operation);
+  if (operation !== "start" && operation !== "append" && operation !== "restart") {
+    throw new Error(`Persisted pending-chunk operation is invalid: ${operation}.`);
+  }
+  const sceneStart = Number(row.scene_start);
+  const sceneEnd = Number(row.scene_end);
+  positiveSafeInteger("Persisted pending-chunk scene start", sceneStart);
+  positiveSafeInteger("Persisted pending-chunk scene end", sceneEnd);
+  if (sceneEnd < sceneStart) {
+    throw new Error("Persisted pending-chunk scene range is invalid.");
+  }
+
+  const candidateScenes = parseJson<unknown>(row.candidate_scenes_json, null);
+  if (!Array.isArray(candidateScenes)) {
+    throw new Error("Persisted pending-chunk candidate scenes must be a JSON array.");
+  }
+  if (candidateScenes.length !== sceneEnd - sceneStart + 1) {
+    throw new Error("Persisted pending-chunk candidate scene count does not match its range.");
+  }
+  const candidateDigest = lowercaseSha256Digest(
+    "Persisted pending-chunk candidate digest",
+    row.candidate_digest,
+  );
+  const actualCandidateDigest = episodeScriptDraftDigest(
+    canonicalJsonString(candidateScenes),
+  );
+  if (candidateDigest !== actualCandidateDigest) {
+    throw new Error("Persisted pending-chunk candidate digest does not match its scenes.");
+  }
+
+  const structuredIssues = parseJson<unknown>(row.structured_issues_json, null);
+  if (
+    !Array.isArray(structuredIssues)
+    || structuredIssues.some((issue) => !issue || typeof issue !== "object" || Array.isArray(issue))
+  ) {
+    throw new Error("Persisted pending-chunk issues must be a JSON array of objects.");
+  }
+  const consecutiveNoProgressAttempts = Number(row.consecutive_no_progress_attempts);
+  const totalCorrectionAttempts = Number(row.total_correction_attempts);
+  nonNegativeSafeInteger(
+    "Persisted pending-chunk consecutive no-progress attempts",
+    consecutiveNoProgressAttempts,
+  );
+  nonNegativeSafeInteger(
+    "Persisted pending-chunk total correction attempts",
+    totalCorrectionAttempts,
+  );
+  if (consecutiveNoProgressAttempts > totalCorrectionAttempts) {
+    throw new Error(
+      "Persisted pending-chunk no-progress attempts exceed total correction attempts.",
+    );
+  }
+
+  return {
+    episodeId: Number(row.episode_id),
+    acceptedDraftRevision,
+    acceptedDraftDigest,
+    operation,
+    sceneStart,
+    sceneEnd,
+    candidateScenes,
+    candidateDigest,
+    structuredIssues: structuredIssues as Array<Record<string, unknown>>,
+    issueFingerprint: lowercaseSha256Digest(
+      "Persisted pending-chunk issue fingerprint",
+      row.issue_fingerprint,
+    ),
+    consecutiveNoProgressAttempts,
+    totalCorrectionAttempts,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -851,6 +1052,15 @@ function mapAgnesSceneGenerationRow(row: Record<string, unknown>): AgnesSceneGen
     rawOutputPath: (row.raw_output_path as string | null) ?? null,
     normalizedOutputPath: (row.normalized_output_path as string | null) ?? null,
     downloadStatus: (row.download_status as AgnesSceneDownloadStatus | null) ?? "pending",
+    renderRevision: Number(row.render_revision ?? 0),
+    qaStatus: (row.qa_status as AgnesVideoQaStatus | null) ?? "pending",
+    qaRequestDigest: (row.qa_request_digest as string | null) ?? null,
+    qaVideoSha256: (row.qa_video_sha256 as string | null) ?? null,
+    qaResult: parseJson<unknown | null>(row.qa_result_json, null),
+    qaContactSheetPath: (row.qa_contact_sheet_path as string | null) ?? null,
+    qaModel: (row.qa_model as string | null) ?? null,
+    qaError: (row.qa_error as string | null) ?? null,
+    qaCheckedAt: (row.qa_checked_at as string | null) ?? null,
     error: (row.error as string | null) ?? null,
     submittedAt: (row.submitted_at as string | null) ?? null,
     completedAt: (row.completed_at as string | null) ?? null,
@@ -977,6 +1187,12 @@ async function requireNonEmptyFile(filePath: string, label: string): Promise<voi
   if (!details.isFile() || details.size <= 0) {
     throw new Error(`Cannot mark episode done: ${label} is empty or not a file: ${filePath}`);
   }
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
 }
 
 function probeMediaDuration(filePath: string): Promise<number> {
@@ -1129,6 +1345,24 @@ export class SeriesState {
       "download_status",
       "TEXT NOT NULL DEFAULT 'pending' CHECK (download_status IN ('pending', 'downloaded', 'failed'))"
     );
+    await ensureColumn(
+      "agnes_scene_generations",
+      "render_revision",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (render_revision BETWEEN 0 AND 1)",
+    );
+    await ensureColumn(
+      "agnes_scene_generations",
+      "qa_status",
+      "TEXT NOT NULL DEFAULT 'pending' " +
+        "CHECK (qa_status IN ('pending', 'passed', 'awaiting_regeneration', 'exhausted'))",
+    );
+    await ensureColumn("agnes_scene_generations", "qa_request_digest", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_video_sha256", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_result_json", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_contact_sheet_path", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_model", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_error", "TEXT");
+    await ensureColumn("agnes_scene_generations", "qa_checked_at", "TEXT");
     await this.client.execute(
       "UPDATE agnes_scene_generations SET download_status = 'downloaded' " +
       "WHERE normalized_output_path IS NOT NULL AND download_status = 'pending'"
@@ -1412,6 +1646,12 @@ export class SeriesState {
     const normalizedEpisodes = episodes === undefined
       ? undefined
       : validateSeasonEpisodeList(episodes);
+
+    // Do not let a stale or model-supplied series id reach the foreign-key
+    // constraint in the episode batch. The tool layer turns this durable-state
+    // result into a recoverable instruction to bootstrap the series first.
+    if (!await this.seriesExists(seriesId)) return "series_missing";
+
     const readStoredEpisodes = async (): Promise<SeasonEpisodeInput[]> => {
       const result = await this.client.execute({
         sql: `SELECT episode_number, title, premise
@@ -1451,7 +1691,12 @@ export class SeriesState {
       // Another process may have committed the same season after our empty read.
       // Accept that race only after proving the complete persisted invariant.
       const concurrentlyStoredEpisodes = await readStoredEpisodes();
-      if (concurrentlyStoredEpisodes.length === 0) throw error;
+      if (concurrentlyStoredEpisodes.length === 0) {
+        // A concurrent series deletion can race the preflight parent check.
+        // Keep that case recoverable instead of leaking a raw SQLite FK error.
+        if (!await this.seriesExists(seriesId)) return "series_missing";
+        throw error;
+      }
       verifyStoredSeason(concurrentlyStoredEpisodes);
       return "verified";
     }
@@ -1655,6 +1900,326 @@ export class SeriesState {
       : null;
   }
 
+  /** Reads the last rejected candidate range retained for field-level repair. */
+  async getEpisodeScriptPendingChunk(
+    episodeId: number,
+  ): Promise<EpisodeScriptPendingChunkRow | null> {
+    await this.initialize();
+    positiveSafeInteger("episodeId", episodeId);
+    const result = await this.client.execute({
+      sql: `SELECT episode_id, accepted_draft_revision, accepted_draft_digest,
+                   operation, scene_start, scene_end, candidate_scenes_json,
+                   candidate_digest, structured_issues_json, issue_fingerprint,
+                   consecutive_no_progress_attempts, total_correction_attempts,
+                   created_at, updated_at
+            FROM episode_script_pending_chunks
+            WHERE episode_id = ?
+            LIMIT 1`,
+      args: [episodeId],
+    });
+    const row = result.rows[0];
+    return row
+      ? mapEpisodeScriptPendingChunkRow(row as unknown as Record<string, unknown>)
+      : null;
+  }
+
+  /**
+   * Stores a rejected candidate only while its accepted draft identity is
+   * still current. This statement races safely with draft revision/promotion:
+   * either the candidate commits against that exact prefix or it makes no
+   * change and reports a revision/submission conflict.
+   */
+  async upsertEpisodeScriptPendingChunk(
+    input: UpsertEpisodeScriptPendingChunkInput,
+  ): Promise<EpisodeScriptPendingChunkRow> {
+    await this.initialize();
+    const episodeId = positiveSafeInteger("episodeId", input.episodeId);
+    const acceptedDraftRevision = positiveSafeInteger(
+      "acceptedDraftRevision",
+      input.acceptedDraftRevision,
+    );
+    const acceptedDraftDigest = lowercaseSha256Digest(
+      "acceptedDraftDigest",
+      input.acceptedDraftDigest,
+    );
+    if (
+      input.operation !== "start"
+      && input.operation !== "append"
+      && input.operation !== "restart"
+    ) {
+      throw new Error("Pending episode-script chunk operation must be start, append, or restart.");
+    }
+    const sceneStart = positiveSafeInteger("sceneStart", input.sceneStart);
+    const sceneEnd = positiveSafeInteger("sceneEnd", input.sceneEnd);
+    if (sceneEnd < sceneStart) {
+      throw new Error("Pending episode-script chunk sceneEnd must be at least sceneStart.");
+    }
+    if (!Array.isArray(input.candidateScenes) || input.candidateScenes.length === 0) {
+      throw new Error("Pending episode-script candidateScenes must be a non-empty array.");
+    }
+    if (input.candidateScenes.length !== sceneEnd - sceneStart + 1) {
+      throw new Error(
+        "Pending episode-script candidateScenes must exactly fill sceneStart through sceneEnd.",
+      );
+    }
+    for (const [index, scene] of input.candidateScenes.entries()) {
+      const expectedSceneNumber = sceneStart + index;
+      if (
+        !scene
+        || typeof scene !== "object"
+        || Array.isArray(scene)
+        || (scene as Record<string, unknown>).sceneNumber !== expectedSceneNumber
+      ) {
+        throw new Error(
+          `Pending episode-script candidate scene ${index + 1} must have sceneNumber ` +
+          `${expectedSceneNumber}.`,
+        );
+      }
+    }
+    if (
+      !Array.isArray(input.structuredIssues)
+      || input.structuredIssues.length === 0
+      || input.structuredIssues.some(
+        (issue) => !issue || typeof issue !== "object" || Array.isArray(issue),
+      )
+    ) {
+      throw new Error(
+        "Pending episode-script structuredIssues must be a non-empty array of objects.",
+      );
+    }
+    const issueFingerprint = lowercaseSha256Digest(
+      "issueFingerprint",
+      input.issueFingerprint,
+    );
+    const hasExpectedPendingCandidate = input.expectedPendingCandidateDigest !== undefined;
+    const hasExpectedPendingIssues = input.expectedPendingIssueFingerprint !== undefined;
+    const hasExpectedPendingAttempts =
+      input.expectedPendingTotalCorrectionAttempts !== undefined;
+    if (
+      hasExpectedPendingCandidate !== hasExpectedPendingIssues
+      || hasExpectedPendingCandidate !== hasExpectedPendingAttempts
+    ) {
+      throw new Error(
+        "expectedPendingCandidateDigest, expectedPendingIssueFingerprint, and " +
+        "expectedPendingTotalCorrectionAttempts must be supplied together.",
+      );
+    }
+    const expectedPendingCandidateDigest = hasExpectedPendingCandidate
+      ? lowercaseSha256Digest(
+          "expectedPendingCandidateDigest",
+          input.expectedPendingCandidateDigest!,
+        )
+      : null;
+    const expectedPendingIssueFingerprint = hasExpectedPendingIssues
+      ? lowercaseSha256Digest(
+          "expectedPendingIssueFingerprint",
+          input.expectedPendingIssueFingerprint!,
+        )
+      : null;
+    const expectedPendingTotalCorrectionAttempts = hasExpectedPendingAttempts
+      ? nonNegativeSafeInteger(
+          "expectedPendingTotalCorrectionAttempts",
+          input.expectedPendingTotalCorrectionAttempts!,
+        )
+      : null;
+    const consecutiveNoProgressAttempts = nonNegativeSafeInteger(
+      "consecutiveNoProgressAttempts",
+      input.consecutiveNoProgressAttempts ?? 0,
+    );
+    const totalCorrectionAttempts = nonNegativeSafeInteger(
+      "totalCorrectionAttempts",
+      input.totalCorrectionAttempts ?? 0,
+    );
+    if (consecutiveNoProgressAttempts > totalCorrectionAttempts) {
+      throw new Error(
+        "consecutiveNoProgressAttempts cannot exceed totalCorrectionAttempts.",
+      );
+    }
+
+    const serializedCandidateScenes = canonicalJsonString(input.candidateScenes);
+    const candidateDigest = episodeScriptDraftDigest(serializedCandidateScenes);
+    const serializedStructuredIssues = canonicalJsonString(input.structuredIssues);
+    const result = await this.client.execute({
+      sql: `INSERT INTO episode_script_pending_chunks (
+              episode_id, accepted_draft_revision, accepted_draft_digest,
+              operation, scene_start, scene_end, candidate_scenes_json,
+              candidate_digest, structured_issues_json, issue_fingerprint,
+              consecutive_no_progress_attempts, total_correction_attempts
+            )
+            SELECT episode.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            FROM episodes AS episode
+            JOIN episode_script_drafts AS draft ON draft.episode_id = episode.id
+            WHERE episode.id = ? AND episode.status <> 'done'
+              AND draft.revision = ? AND draft.script_digest = ?
+              AND (
+                (? = 0 AND NOT EXISTS (
+                  SELECT 1 FROM episode_script_pending_chunks AS prior_pending
+                  WHERE prior_pending.episode_id = episode.id
+                ))
+                OR
+                (? = 1 AND EXISTS (
+                  SELECT 1 FROM episode_script_pending_chunks AS prior_pending
+                  WHERE prior_pending.episode_id = episode.id
+                    AND prior_pending.candidate_digest = ?
+                    AND prior_pending.issue_fingerprint = ?
+                    AND prior_pending.total_correction_attempts = ?
+                ))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM agnes_scene_generations AS started
+                WHERE started.series_id = episode.series_id
+                  AND started.episode_number = episode.episode_number
+                  AND (
+                    started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                    started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                    started.status <> 'pending'
+                  )
+              )
+            ON CONFLICT (episode_id) DO UPDATE SET
+              accepted_draft_revision = excluded.accepted_draft_revision,
+              accepted_draft_digest = excluded.accepted_draft_digest,
+              operation = excluded.operation,
+              scene_start = excluded.scene_start,
+              scene_end = excluded.scene_end,
+              candidate_scenes_json = excluded.candidate_scenes_json,
+              candidate_digest = excluded.candidate_digest,
+              structured_issues_json = excluded.structured_issues_json,
+              issue_fingerprint = excluded.issue_fingerprint,
+              consecutive_no_progress_attempts = excluded.consecutive_no_progress_attempts,
+              total_correction_attempts = excluded.total_correction_attempts,
+              updated_at = datetime('now')
+            WHERE ? = 1
+              AND episode_script_pending_chunks.candidate_digest = ?
+              AND episode_script_pending_chunks.issue_fingerprint = ?
+              AND episode_script_pending_chunks.total_correction_attempts = ?
+            RETURNING episode_id, accepted_draft_revision, accepted_draft_digest,
+                      operation, scene_start, scene_end, candidate_scenes_json,
+                      candidate_digest, structured_issues_json, issue_fingerprint,
+                      consecutive_no_progress_attempts, total_correction_attempts,
+                      created_at, updated_at`,
+      args: [
+        acceptedDraftRevision,
+        acceptedDraftDigest,
+        input.operation,
+        sceneStart,
+        sceneEnd,
+        serializedCandidateScenes,
+        candidateDigest,
+        serializedStructuredIssues,
+        issueFingerprint,
+        consecutiveNoProgressAttempts,
+        totalCorrectionAttempts,
+        episodeId,
+        acceptedDraftRevision,
+        acceptedDraftDigest,
+        hasExpectedPendingCandidate ? 1 : 0,
+        hasExpectedPendingCandidate ? 1 : 0,
+        expectedPendingCandidateDigest,
+        expectedPendingIssueFingerprint,
+        expectedPendingTotalCorrectionAttempts,
+        hasExpectedPendingCandidate ? 1 : 0,
+        expectedPendingCandidateDigest,
+        expectedPendingIssueFingerprint,
+        expectedPendingTotalCorrectionAttempts,
+      ],
+    });
+    const stored = result.rows[0];
+    if (stored) {
+      return mapEpisodeScriptPendingChunkRow(
+        stored as unknown as Record<string, unknown>,
+      );
+    }
+
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+    if (episode.status === "done") {
+      throw new Error(`A completed episode ${episodeId} cannot receive a pending script chunk.`);
+    }
+    const currentDraft = await this.getEpisodeScriptDraft(episodeId);
+    if (
+      !currentDraft
+      || currentDraft.revision !== acceptedDraftRevision
+      || currentDraft.contentDigest !== acceptedDraftDigest
+    ) {
+      throw new Error(
+        `Episode script pending chunk revision conflict: expected ${acceptedDraftRevision}/` +
+        `${acceptedDraftDigest}, current draft is ` +
+        `${currentDraft ? `${currentDraft.revision}/${currentDraft.contentDigest}` : "missing"}.`,
+      );
+    }
+    const currentPending = await this.getEpisodeScriptPendingChunk(episodeId);
+    if (currentPending) {
+      const isSameCompletedWrite =
+        currentPending.acceptedDraftRevision === acceptedDraftRevision
+        && currentPending.acceptedDraftDigest === acceptedDraftDigest
+        && currentPending.operation === input.operation
+        && currentPending.sceneStart === sceneStart
+        && currentPending.sceneEnd === sceneEnd
+        && currentPending.candidateDigest === candidateDigest
+        && currentPending.issueFingerprint === issueFingerprint
+        && canonicalJsonString(currentPending.structuredIssues) === serializedStructuredIssues
+        && currentPending.consecutiveNoProgressAttempts === consecutiveNoProgressAttempts
+        && currentPending.totalCorrectionAttempts === totalCorrectionAttempts;
+      if (isSameCompletedWrite) return currentPending;
+      throw new Error(
+        "Episode script pending chunk conflict: a newer rejected candidate is already stored. " +
+        "Reload its pending repair identity before submitting another correction.",
+      );
+    }
+    if (hasExpectedPendingCandidate) {
+      throw new Error(
+        "Episode script pending chunk conflict: the pending candidate used for this correction " +
+        "was cleared or replaced. Reload authoring progress before retrying.",
+      );
+    }
+    throw new Error(
+      "Cannot store a pending episode script chunk after Agnes submission has started. " +
+      "Resume the persisted production script and Agnes tasks instead.",
+    );
+  }
+
+  /** Clears pending repair state, optionally only for an exact observed row. */
+  async clearEpisodeScriptPendingChunk(
+    input: ClearEpisodeScriptPendingChunkInput,
+  ): Promise<boolean> {
+    await this.initialize();
+    const episodeId = positiveSafeInteger("episodeId", input.episodeId);
+    const hasExpectedRevision = input.expectedAcceptedDraftRevision !== undefined;
+    const hasExpectedDigest = input.expectedAcceptedDraftDigest !== undefined;
+    if (hasExpectedRevision !== hasExpectedDigest) {
+      throw new Error(
+        "expectedAcceptedDraftRevision and expectedAcceptedDraftDigest must be supplied together.",
+      );
+    }
+    const conditions = ["episode_id = ?"];
+    const args: Array<string | number> = [episodeId];
+    if (hasExpectedRevision) {
+      conditions.push("accepted_draft_revision = ?", "accepted_draft_digest = ?");
+      args.push(
+        positiveSafeInteger(
+          "expectedAcceptedDraftRevision",
+          input.expectedAcceptedDraftRevision!,
+        ),
+        lowercaseSha256Digest(
+          "expectedAcceptedDraftDigest",
+          input.expectedAcceptedDraftDigest,
+        ),
+      );
+    }
+    if (input.expectedIssueFingerprint !== undefined) {
+      conditions.push("issue_fingerprint = ?");
+      args.push(lowercaseSha256Digest(
+        "expectedIssueFingerprint",
+        input.expectedIssueFingerprint,
+      ));
+    }
+    const result = await this.client.execute({
+      sql: `DELETE FROM episode_script_pending_chunks WHERE ${conditions.join(" AND ")}`,
+      args,
+    });
+    return result.rowsAffected === 1;
+  }
+
   /**
    * Creates the first durable draft without ever replacing an existing one.
    * A retry with semantically identical JSON is reported as a match; a
@@ -1766,39 +2331,59 @@ export class SeriesState {
       );
     }
 
-    const updated = await this.client.execute({
-      sql: `UPDATE episode_script_drafts
-            SET revision = revision + 1,
-                script_digest = ?,
-                draft_json = ?,
-                validation_json = ?,
-                updated_at = datetime('now')
-            WHERE episode_id = ? AND revision = ?
-              AND EXISTS (
-                SELECT 1 FROM episodes AS episode
-                WHERE id = ? AND status <> 'done'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM agnes_scene_generations AS started
-                    WHERE started.series_id = episode.series_id
-                      AND started.episode_number = episode.episode_number
-                      AND (
-                        started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
-                        started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
-                        started.status <> 'pending'
-                      )
-                  )
-              )
-            RETURNING episode_id, revision, script_digest, draft_json, validation_json,
-                      created_at, updated_at`,
-      args: [
-        contentDigest,
-        serializedScript,
-        serializedValidation,
-        episodeId,
-        expectedRevision,
-        episodeId,
-      ],
-    });
+    const revisionResults = await this.client.batch([
+      {
+        sql: `UPDATE episode_script_drafts
+              SET revision = revision + 1,
+                  script_digest = ?,
+                  draft_json = ?,
+                  validation_json = ?,
+                  updated_at = datetime('now')
+              WHERE episode_id = ? AND revision = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes AS episode
+                  WHERE id = ? AND status <> 'done'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM agnes_scene_generations AS started
+                      WHERE started.series_id = episode.series_id
+                        AND started.episode_number = episode.episode_number
+                        AND (
+                          started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                          started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                          started.status <> 'pending'
+                        )
+                    )
+                )
+              RETURNING episode_id, revision, script_digest, draft_json, validation_json,
+                        created_at, updated_at`,
+        args: [
+          contentDigest,
+          serializedScript,
+          serializedValidation,
+          episodeId,
+          expectedRevision,
+          episodeId,
+        ],
+      },
+      {
+        sql: `DELETE FROM episode_script_pending_chunks AS pending
+              WHERE pending.episode_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM episode_script_drafts AS draft
+                  WHERE draft.episode_id = pending.episode_id
+                    AND draft.revision = ?
+                    AND draft.script_digest = ?
+                    AND draft.validation_json IS ?
+                )`,
+        args: [
+          episodeId,
+          expectedRevision + 1,
+          contentDigest,
+          serializedValidation,
+        ],
+      },
+    ], "write");
+    const updated = revisionResults[0]!;
     const updatedRow = updated.rows[0];
     if (updatedRow) {
       return mapEpisodeScriptDraftRow(
@@ -1970,6 +2555,28 @@ export class SeriesState {
         args: [episodeId, serializedScript, expectedRevision, expectedContentDigest],
       },
       {
+        sql: `DELETE FROM episode_script_pending_chunks AS pending
+              WHERE pending.episode_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes AS episode
+                  JOIN episode_script_drafts AS draft ON draft.episode_id = episode.id
+                  WHERE episode.id = pending.episode_id
+                    AND episode.status = 'script' AND episode.script_json = ?
+                    AND draft.revision = ? AND draft.script_digest = ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM agnes_scene_generations AS started
+                      WHERE started.series_id = episode.series_id
+                        AND started.episode_number = episode.episode_number
+                        AND (
+                          started.attempt_count > 0 OR started.provider_task_id IS NOT NULL OR
+                          started.provider_receipt_json IS NOT NULL OR started.submitted_at IS NOT NULL OR
+                          started.status <> 'pending'
+                        )
+                    )
+                )`,
+        args: [episodeId, serializedScript, expectedRevision, expectedContentDigest],
+      },
+      {
         sql: `DELETE FROM episode_script_drafts AS draft
               WHERE draft.episode_id = ?
                 AND draft.revision = ? AND draft.script_digest = ?
@@ -1993,7 +2600,7 @@ export class SeriesState {
     ], "write");
 
     const productionUpdated = results[1]?.rowsAffected === 1;
-    const exactDraftDeleted = results[4]?.rowsAffected === 1;
+    const exactDraftDeleted = results[5]?.rowsAffected === 1;
     if (productionUpdated && exactDraftDeleted) {
       return { status: "promoted", episodeId, sourceDraft: expectedDraft };
     }
@@ -2044,10 +2651,16 @@ export class SeriesState {
   async deleteEpisodeScriptDraft(episodeId: number): Promise<void> {
     await this.initialize();
     positiveSafeInteger("episodeId", episodeId);
-    await this.client.execute({
-      sql: "DELETE FROM episode_script_drafts WHERE episode_id = ?",
-      args: [episodeId],
-    });
+    await this.client.batch([
+      {
+        sql: "DELETE FROM episode_script_pending_chunks WHERE episode_id = ?",
+        args: [episodeId],
+      },
+      {
+        sql: "DELETE FROM episode_script_drafts WHERE episode_id = ?",
+        args: [episodeId],
+      },
+    ], "write");
   }
 
   /**
@@ -2092,6 +2705,7 @@ export class SeriesState {
     await requireNonEmptyFile(captionsPath, "captions.srt");
 
     const agnesRows = await this.listAgnesSceneGenerations(seriesId, episodeNumber);
+    await this.assertAgnesVideoQaReady(seriesId, episodeNumber);
     const rowBySceneVariant = new Map(
       agnesRows.map((row) => [`${row.sceneNumber}:${row.variant}`, row] as const)
     );
@@ -2700,17 +3314,28 @@ export class SeriesState {
       }
       const priorScript = row.script_json == null ? null : canonicalJsonString(row.script_json);
       if (priorScript === serializedScript) {
-        const unchanged = await this.client.execute({
-          sql: `UPDATE episodes
-                SET status = CASE
-                      WHEN status IN ('images', 'audio', 'assembly') THEN status
-                      ELSE 'script'
-                    END,
-                    script_json = ?, updated_at = datetime('now')
-                WHERE id = ? AND status <> 'done'`,
-          args: [serializedScript, episodeId],
-        });
-        if (unchanged.rowsAffected === 0) {
+        const unchangedResults = await this.client.batch([
+          {
+            sql: `UPDATE episodes
+                  SET status = CASE
+                        WHEN status IN ('images', 'audio', 'assembly') THEN status
+                        ELSE 'script'
+                      END,
+                      script_json = ?, updated_at = datetime('now')
+                  WHERE id = ? AND status <> 'done'`,
+            args: [serializedScript, episodeId],
+          },
+          {
+            sql: `DELETE FROM episode_script_pending_chunks
+                  WHERE episode_id = ?
+                    AND EXISTS (
+                      SELECT 1 FROM episodes
+                      WHERE id = ? AND status <> 'done' AND script_json = ?
+                    )`,
+            args: [episodeId, episodeId, serializedScript],
+          },
+        ], "write");
+        if (unchangedResults[0]?.rowsAffected === 0) {
           throw new Error("A completed episode script cannot be replaced.");
         }
         return;
@@ -2790,6 +3415,15 @@ export class SeriesState {
             episodeId,
             serializedScript,
           ],
+        },
+        {
+          sql: `DELETE FROM episode_script_pending_chunks
+                WHERE episode_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM episodes
+                    WHERE id = ? AND status = 'script' AND script_json = ?
+                  )`,
+          args: [episodeId, episodeId, serializedScript],
         },
       ], "write");
       if (results[0]?.rowsAffected === 0) {
@@ -3124,6 +3758,14 @@ export class SeriesState {
         args: [episode.id],
       },
       {
+        sql: "DELETE FROM episode_script_pending_chunks WHERE episode_id = ?",
+        args: [episode.id],
+      },
+      {
+        sql: "DELETE FROM agnes_scene_generation_history WHERE series_id = ? AND episode_number = ?",
+        args: [seriesId, episodeNumber],
+      },
+      {
         sql: "DELETE FROM agnes_scene_generations WHERE series_id = ? AND episode_number = ?",
         args: [seriesId, episodeNumber],
       },
@@ -3246,6 +3888,24 @@ export class SeriesState {
                   WHERE id = ? AND youtube_video_id = ? AND uploaded_at IS NOT NULL
                 )`,
         args: [episode.id, episode.id, videoId],
+      },
+      {
+        sql: `DELETE FROM episode_script_pending_chunks
+              WHERE episode_id = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes
+                  WHERE id = ? AND youtube_video_id = ? AND uploaded_at IS NOT NULL
+                )`,
+        args: [episode.id, episode.id, videoId],
+      },
+      {
+        sql: `DELETE FROM agnes_scene_generation_history
+              WHERE series_id = ? AND episode_number = ?
+                AND EXISTS (
+                  SELECT 1 FROM episodes
+                  WHERE id = ? AND youtube_video_id = ? AND uploaded_at IS NOT NULL
+                )`,
+        args: [params.seriesId, params.episodeNumber, episode.id, videoId],
       },
       {
         sql: `DELETE FROM agnes_scene_generations
@@ -3400,6 +4060,8 @@ export class SeriesState {
                    requested_duration_seconds, provider_duration_seconds,
                    public_reference_url, provider_task_id, provider_receipt_json,
                    provider_video_url, raw_output_path, normalized_output_path, download_status,
+                   render_revision, qa_status, qa_request_digest, qa_video_sha256,
+                   qa_result_json, qa_contact_sheet_path, qa_model, qa_error, qa_checked_at,
                    error, submitted_at, completed_at, created_at, updated_at
             FROM agnes_scene_generations
             WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
@@ -3656,6 +4318,8 @@ export class SeriesState {
                       requested_duration_seconds, provider_duration_seconds,
                       public_reference_url, provider_task_id, provider_receipt_json,
                       provider_video_url, raw_output_path, normalized_output_path, download_status,
+                      render_revision, qa_status, qa_request_digest, qa_video_sha256,
+                      qa_result_json, qa_contact_sheet_path, qa_model, qa_error, qa_checked_at,
                       error, submitted_at, completed_at, created_at, updated_at`,
       args: [
         providerReceiptJson,
@@ -3739,6 +4403,8 @@ export class SeriesState {
                       requested_duration_seconds, provider_duration_seconds,
                       public_reference_url, provider_task_id, provider_receipt_json,
                       provider_video_url, raw_output_path, normalized_output_path, download_status,
+                      render_revision, qa_status, qa_request_digest, qa_video_sha256,
+                      qa_result_json, qa_contact_sheet_path, qa_model, qa_error, qa_checked_at,
                       error, submitted_at, completed_at, created_at, updated_at`,
       args: [
         input.prompt,
@@ -3788,6 +4454,8 @@ export class SeriesState {
                        requested_duration_seconds, provider_duration_seconds,
                        public_reference_url, provider_task_id, provider_receipt_json,
                        provider_video_url, raw_output_path, normalized_output_path, download_status,
+                       render_revision, qa_status, qa_request_digest, qa_video_sha256,
+                       qa_result_json, qa_contact_sheet_path, qa_model, qa_error, qa_checked_at,
                        error, submitted_at, completed_at, created_at, updated_at
                 FROM agnes_scene_generations
                 WHERE series_id = ? AND episode_number = ? AND variant = ?
@@ -3800,6 +4468,8 @@ export class SeriesState {
                        requested_duration_seconds, provider_duration_seconds,
                        public_reference_url, provider_task_id, provider_receipt_json,
                        provider_video_url, raw_output_path, normalized_output_path, download_status,
+                       render_revision, qa_status, qa_request_digest, qa_video_sha256,
+                       qa_result_json, qa_contact_sheet_path, qa_model, qa_error, qa_checked_at,
                        error, submitted_at, completed_at, created_at, updated_at
                 FROM agnes_scene_generations
                 WHERE series_id = ? AND episode_number = ?
@@ -3807,6 +4477,371 @@ export class SeriesState {
           args: [seriesId, episodeNumber],
         });
     return res.rows.map((row) => mapAgnesSceneGenerationRow(row as unknown as Record<string, unknown>));
+  }
+
+  /** Persists a source-bound terminal QA verdict without changing generation state. */
+  async recordAgnesVideoQaVerdict(
+    input: RecordAgnesVideoQaVerdictInput,
+  ): Promise<{ recorded: boolean; row: AgnesSceneGenerationRow | null }> {
+    await this.initialize();
+    const qaRequestDigest = input.qaRequestDigest.trim();
+    const videoSha256 = input.videoSha256.trim();
+    if (!/^[a-f0-9]{64}$/u.test(qaRequestDigest)) {
+      throw new Error("Agnes video QA request digest must be a lowercase SHA-256 digest.");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(videoSha256)) {
+      throw new Error("Agnes video QA source digest must be a lowercase SHA-256 digest.");
+    }
+    if (![0, 1].includes(input.expectedRenderRevision)) {
+      throw new Error("Agnes video render revision must be zero or one.");
+    }
+    if (!input.model.trim() || !input.contactSheetPath.trim()) {
+      throw new Error("Agnes video QA verdict requires a model and contact sheet path.");
+    }
+    const expectedQaRequestDigest = input.expectedQaRequestDigest?.trim() ?? null;
+    if (input.expectedQaRequestDigest !== null && !/^[a-f0-9]{64}$/u.test(expectedQaRequestDigest!)) {
+      throw new Error("Expected Agnes video QA request digest must be null or a lowercase SHA-256 digest.");
+    }
+    const resultJson = JSON.stringify(input.result);
+    if (!resultJson || resultJson.length > 32_000) {
+      throw new Error("Agnes video QA result must be JSON-serializable and at most 32000 characters.");
+    }
+    const updated = await this.client.execute({
+      sql: `UPDATE agnes_scene_generations
+            SET qa_status = ?, qa_request_digest = ?, qa_video_sha256 = ?,
+                qa_result_json = ?, qa_contact_sheet_path = ?, qa_model = ?,
+                qa_error = NULL, qa_checked_at = datetime('now'), updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+              AND request_digest = ? AND render_revision = ?
+              AND normalized_output_path = ?
+              AND qa_status = ?
+              AND ((? IS NULL AND qa_request_digest IS NULL) OR qa_request_digest = ?)
+              AND status = 'completed' AND download_status = 'downloaded'`,
+      args: [
+        input.status,
+        qaRequestDigest,
+        videoSha256,
+        resultJson,
+        input.contactSheetPath,
+        input.model,
+        input.seriesId,
+        input.episodeNumber,
+        input.sceneNumber,
+        input.variant,
+        input.expectedRequestDigest,
+        input.expectedRenderRevision,
+        input.expectedNormalizedOutputPath,
+        input.expectedQaStatus,
+        expectedQaRequestDigest,
+        expectedQaRequestDigest,
+      ],
+    });
+    const row = await this.getAgnesSceneGeneration(
+      input.seriesId,
+      input.episodeNumber,
+      input.sceneNumber,
+      input.variant,
+    );
+    return { recorded: updated.rowsAffected === 1, row };
+  }
+
+  /** Records a transient judge failure while deliberately leaving QA pending. */
+  async recordAgnesVideoQaError(input: {
+    seriesId: number;
+    episodeNumber: number;
+    sceneNumber: number;
+    variant: AgnesSceneVariant;
+    expectedRequestDigest: string;
+    expectedRenderRevision: number;
+    expectedNormalizedOutputPath: string;
+    expectedQaStatus: AgnesVideoQaStatus;
+    expectedQaRequestDigest: string | null;
+    error: string;
+  }): Promise<void> {
+    await this.initialize();
+    const expectedQaRequestDigest = input.expectedQaRequestDigest?.trim() ?? null;
+    if (input.expectedQaRequestDigest !== null && !/^[a-f0-9]{64}$/u.test(expectedQaRequestDigest!)) {
+      throw new Error("Expected Agnes video QA request digest must be null or a lowercase SHA-256 digest.");
+    }
+    await this.client.execute({
+      sql: `UPDATE agnes_scene_generations
+            SET qa_error = ?, updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+              AND request_digest = ? AND render_revision = ?
+              AND normalized_output_path = ?
+              AND qa_status = ?
+              AND ((? IS NULL AND qa_request_digest IS NULL) OR qa_request_digest = ?)
+              AND status = 'completed' AND download_status = 'downloaded'`,
+      args: [
+        input.error.slice(0, 1_000),
+        input.seriesId,
+        input.episodeNumber,
+        input.sceneNumber,
+        input.variant,
+        input.expectedRequestDigest,
+        input.expectedRenderRevision,
+        input.expectedNormalizedOutputPath,
+        input.expectedQaStatus,
+        expectedQaRequestDigest,
+        expectedQaRequestDigest,
+      ],
+    });
+  }
+
+  /**
+   * The sole legal transition from a completed/downloaded Agnes render back to
+   * pending. It archives the rejected provider receipt, then atomically creates
+   * revision one and invalidates any assembly made from revision zero.
+   */
+  async requeueAgnesSceneAfterQaFailure(
+    input: RequeueAgnesSceneAfterQaFailureInput,
+  ): Promise<{ requeued: boolean; row: AgnesSceneGenerationRow | null }> {
+    await this.initialize();
+    if (input.expectedRenderRevision !== 0) {
+      throw new Error("Agnes video QA permits exactly one rerender from revision zero.");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(input.retryRequestDigest)) {
+      throw new Error("Agnes QA retry request digest must be a lowercase SHA-256 digest.");
+    }
+    const qaRequestDigest = input.qaRequestDigest.trim();
+    const videoSha256 = input.videoSha256.trim();
+    if (!/^[a-f0-9]{64}$/u.test(qaRequestDigest)) {
+      throw new Error("Agnes video QA request digest must be a lowercase SHA-256 digest.");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(videoSha256)) {
+      throw new Error("Agnes video QA source digest must be a lowercase SHA-256 digest.");
+    }
+    if (!input.model.trim() || !input.contactSheetPath.trim() || !input.retryPrompt.trim()) {
+      throw new Error("Agnes QA rerender requires a model, contact sheet path, and retry prompt.");
+    }
+    const expectedQaRequestDigest = input.expectedQaRequestDigest?.trim() ?? null;
+    if (input.expectedQaRequestDigest !== null && !/^[a-f0-9]{64}$/u.test(expectedQaRequestDigest!)) {
+      throw new Error("Expected Agnes video QA request digest must be null or a lowercase SHA-256 digest.");
+    }
+    if (!Number.isSafeInteger(input.retrySeed) || input.retrySeed < 0 || input.retrySeed > MAX_AGNES_SERIES_SEED) {
+      throw new Error("Agnes QA retry seed is outside the supported range.");
+    }
+    const current = await this.getAgnesSceneGeneration(
+      input.seriesId,
+      input.episodeNumber,
+      input.sceneNumber,
+      input.variant,
+    );
+    if (!current) return { requeued: false, row: null };
+    const resultJson = JSON.stringify(input.result);
+    if (!resultJson || resultJson.length > 32_000) {
+      throw new Error("Agnes video QA result must be JSON-serializable and at most 32000 characters.");
+    }
+    const snapshotJson = JSON.stringify(current);
+    const results = await this.client.batch([
+      {
+        sql: `INSERT INTO agnes_scene_generation_history (
+                series_id, episode_number, scene_number, variant, render_revision,
+                request_digest, snapshot_json, qa_result_json, archived_video_path
+              )
+              SELECT series_id, episode_number, scene_number, variant, render_revision,
+                     request_digest, ?, ?, ?
+              FROM agnes_scene_generations
+              WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+                AND request_digest = ? AND render_revision = 0
+                AND normalized_output_path = ?
+                AND qa_status = ?
+                AND ((? IS NULL AND qa_request_digest IS NULL) OR qa_request_digest = ?)
+                AND status = 'completed' AND download_status = 'downloaded'
+              ON CONFLICT (series_id, episode_number, scene_number, variant, render_revision)
+              DO NOTHING`,
+        args: [
+          snapshotJson,
+          resultJson,
+          input.archivedVideoPath ?? null,
+          input.seriesId,
+          input.episodeNumber,
+          input.sceneNumber,
+          input.variant,
+          input.expectedRequestDigest,
+          input.expectedNormalizedOutputPath,
+          input.expectedQaStatus,
+          expectedQaRequestDigest,
+          expectedQaRequestDigest,
+        ],
+      },
+      {
+        sql: `UPDATE agnes_scene_generations
+              SET status = 'pending', prompt = ?, request_digest = ?,
+                  seed = ?, provider_task_id = NULL, provider_receipt_json = NULL,
+                  provider_video_url = NULL, raw_output_path = NULL,
+                  normalized_output_path = NULL, download_status = 'pending',
+                  render_revision = 1, qa_status = 'awaiting_regeneration',
+                  qa_request_digest = ?, qa_video_sha256 = ?, qa_result_json = ?,
+                  qa_contact_sheet_path = ?, qa_model = ?, qa_error = NULL,
+                  qa_checked_at = datetime('now'), error = NULL,
+                  submitted_at = NULL, completed_at = NULL, updated_at = datetime('now')
+              WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+                AND request_digest = ? AND render_revision = 0
+                AND normalized_output_path = ?
+                AND qa_status = ?
+                AND ((? IS NULL AND qa_request_digest IS NULL) OR qa_request_digest = ?)
+                AND status = 'completed' AND download_status = 'downloaded'
+                AND EXISTS (
+                  SELECT 1 FROM agnes_scene_generation_history AS history
+                  WHERE history.series_id = agnes_scene_generations.series_id
+                    AND history.episode_number = agnes_scene_generations.episode_number
+                    AND history.scene_number = agnes_scene_generations.scene_number
+                    AND history.variant = agnes_scene_generations.variant
+                    AND history.render_revision = 0
+                )`,
+        args: [
+          input.retryPrompt,
+          input.retryRequestDigest,
+          input.retrySeed,
+          qaRequestDigest,
+          videoSha256,
+          resultJson,
+          input.contactSheetPath,
+          input.model,
+          input.seriesId,
+          input.episodeNumber,
+          input.sceneNumber,
+          input.variant,
+          input.expectedRequestDigest,
+          input.expectedNormalizedOutputPath,
+          input.expectedQaStatus,
+          expectedQaRequestDigest,
+          expectedQaRequestDigest,
+        ],
+      },
+      {
+        sql: `DELETE FROM episode_video_outputs
+              WHERE series_id = ? AND episode_number = ?
+                AND EXISTS (
+                  SELECT 1 FROM agnes_scene_generations
+                  WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+                    AND render_revision = 1 AND request_digest = ?
+                    AND qa_status = 'awaiting_regeneration'
+                )`,
+        args: [
+          input.seriesId,
+          input.episodeNumber,
+          input.seriesId,
+          input.episodeNumber,
+          input.sceneNumber,
+          input.variant,
+          input.retryRequestDigest,
+        ],
+      },
+      {
+        sql: `UPDATE episodes
+              SET status = CASE WHEN status = 'assembly' THEN 'audio' ELSE status END,
+                  output_path = NULL, updated_at = datetime('now')
+              WHERE series_id = ? AND episode_number = ?
+                AND EXISTS (
+                  SELECT 1 FROM agnes_scene_generations
+                  WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+                    AND render_revision = 1 AND request_digest = ?
+                    AND qa_status = 'awaiting_regeneration'
+                )`,
+        args: [
+          input.seriesId,
+          input.episodeNumber,
+          input.seriesId,
+          input.episodeNumber,
+          input.sceneNumber,
+          input.variant,
+          input.retryRequestDigest,
+        ],
+      },
+    ], "write");
+    const row = await this.getAgnesSceneGeneration(
+      input.seriesId,
+      input.episodeNumber,
+      input.sceneNumber,
+      input.variant,
+    );
+    return { requeued: (results[1]?.rowsAffected ?? 0) === 1, row };
+  }
+
+  /** Ensures every title/scene file has a current, source-bound Gemini pass. */
+  async assertAgnesVideoQaReady(
+    seriesId: number,
+    episodeNumber: number,
+  ): Promise<{ assetCount: number }> {
+    await this.initialize();
+    const [episode, seriesInfo] = await Promise.all([
+      this.getEpisodeByNumber(seriesId, episodeNumber),
+      this.getSeriesInfo(seriesId),
+    ]);
+    if (!episode) throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
+    if (!seriesInfo) throw new Error(`Series ${seriesId} was not found.`);
+    const roster = seriesInfo.charactersJson.length > 0
+      ? seriesInfo.charactersJson
+      : await this.getSeriesCharacters(seriesId);
+    if (roster.length === 0) throw new Error("Agnes video QA cannot pass without a main-character roster.");
+    const portraitSourceDigests: Array<{ name: string; sha256: string }> = [];
+    for (const character of roster) {
+      const sheet = await this.getCharacterSheet(seriesId, character.name);
+      const portraitPath = sheet?.referenceImagePaths?.portrait?.path;
+      if (!sheet?.approvedAt || !portraitPath) {
+        throw new Error(`Agnes video QA pass is stale because ${character.name} has no approved portrait.`);
+      }
+      await requireNonEmptyFile(portraitPath, `${character.name} approved QA portrait`);
+      portraitSourceDigests.push({ name: character.name, sha256: await sha256File(portraitPath) });
+    }
+    const portraitSetDigest = createHash("sha256")
+      .update(JSON.stringify(portraitSourceDigests))
+      .digest("hex");
+    const requiredNumbers = [
+      AGNES_SERIES_KEY_ART_TRACKING_SCENE,
+      AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
+      ...episodeScriptSceneNumbers(episode.scriptJson),
+    ];
+    const rows = await this.listAgnesSceneGenerations(seriesId, episodeNumber, "text");
+    const byNumber = new Map(rows.map((row) => [row.sceneNumber, row] as const));
+    for (const sceneNumber of requiredNumbers) {
+      const label = sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE
+        ? "series key art"
+        : sceneNumber === AGNES_EPISODE_KEY_ART_TRACKING_SCENE
+          ? "episode key art"
+          : `scene ${sceneNumber}`;
+      const row = byNumber.get(sceneNumber);
+      if (!row || row.status !== "completed" || row.downloadStatus !== "downloaded"
+        || !row.normalizedOutputPath || !row.requestDigest) {
+        throw new Error(`Agnes video QA cannot pass: ${label} is not completed and downloaded.`);
+      }
+      if (row.qaStatus === "exhausted") {
+        throw new Error(`Agnes video QA exhausted its single retry for ${label}; manual review is required.`);
+      }
+      if (row.qaStatus !== "passed" || !row.qaRequestDigest || !row.qaVideoSha256 || !row.qaModel) {
+        throw new Error(`Agnes video QA has not passed the current render of ${label}.`);
+      }
+      if (row.qaModel !== CONFIG.anyApiVideoQaModel) {
+        throw new Error(`Agnes video QA pass is stale because the configured judge changed for ${label}.`);
+      }
+      if (!row.qaResult || typeof row.qaResult !== "object" || Array.isArray(row.qaResult)) {
+        throw new Error(`Agnes video QA pass has no valid source binding for ${label}.`);
+      }
+      const qaResult = row.qaResult as Record<string, unknown>;
+      const bindingMatches = qaResult.policyVersion === AGNES_VIDEO_QA_POLICY_VERSION
+        && qaResult.model === CONFIG.anyApiVideoQaModel
+        && qaResult.sceneNumber === sceneNumber
+        && qaResult.pass === true
+        && qaResult.generationRequestDigest === row.requestDigest
+        && qaResult.renderRevision === row.renderRevision
+        && qaResult.qaRequestDigest === row.qaRequestDigest
+        && qaResult.videoSha256 === row.qaVideoSha256
+        && qaResult.portraitSetDigest === portraitSetDigest
+        && typeof qaResult.referenceBoardSha256 === "string"
+        && /^[a-f0-9]{64}$/u.test(qaResult.referenceBoardSha256)
+        && typeof qaResult.contactSheetSha256 === "string"
+        && /^[a-f0-9]{64}$/u.test(qaResult.contactSheetSha256);
+      if (!bindingMatches) {
+        throw new Error(`Agnes video QA pass is stale or incompletely bound for ${label}.`);
+      }
+      await requireNonEmptyFile(row.normalizedOutputPath, `${label} QA source video`);
+      if (await sha256File(row.normalizedOutputPath) !== row.qaVideoSha256) {
+        throw new Error(`Agnes video QA pass is stale because ${label} changed on disk.`);
+      }
+    }
+    return { assetCount: requiredNumbers.length };
   }
 
   /** Inserts or updates one of the supported assembled video variants. */

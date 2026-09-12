@@ -55,9 +55,11 @@ describe("SeriesState blank database bootstrap", () => {
 
     expect(await domainTableNames(state)).toEqual([
       "agnes_account_rate_state",
+      "agnes_scene_generation_history",
       "agnes_scene_generations",
       "character_sheets",
       "episode_script_drafts",
+      "episode_script_pending_chunks",
       "episode_video_outputs",
       "episodes",
       "key_art",
@@ -150,9 +152,11 @@ describe("SeriesState blank database bootstrap", () => {
     expect(firstSeriesId).not.toBe(secondSeriesId);
     expect(await domainTableNames(state)).toEqual([
       "agnes_account_rate_state",
+      "agnes_scene_generation_history",
       "agnes_scene_generations",
       "character_sheets",
       "episode_script_drafts",
+      "episode_script_pending_chunks",
       "episode_video_outputs",
       "episodes",
       "key_art",
@@ -264,6 +268,22 @@ describe("SeriesState blank database bootstrap", () => {
       Array.from({ length: 25 }, (_unused, index) => index + 1),
     );
     expect(rows.rows.every((row) => String(row.title).trim() && String(row.premise).trim())).toBe(true);
+  });
+
+  it("returns series_missing without attempting an episode batch for an unknown parent", async () => {
+    const state = createBlankState();
+    const missingSeriesId = 999_999;
+
+    await expect(
+      state.bulkInsertEpisodesIfEmpty(missingSeriesId, buildSeason()),
+    ).resolves.toBe("series_missing");
+
+    const rows = await stateClient(state).execute({
+      sql: "SELECT COUNT(*) AS count FROM episodes WHERE series_id = ?",
+      args: [missingSeriesId],
+    });
+    expect(Number(rows.rows[0]?.count)).toBe(0);
+    expect(await state.seriesExists(missingSeriesId)).toBe(false);
   });
 
   it("rejects invalid input without writing any partial season", async () => {

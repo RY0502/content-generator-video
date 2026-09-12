@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { SYSTEM_PROMPT_EXTENSION } from "../systemPrompt.js";
+import {
+  SYSTEM_PROMPT_EXTENSION,
+  buildSystemPromptExtension,
+} from "../systemPrompt.js";
 
 describe("production system prompt", () => {
   it("retains the complete story and visual-quality contract", () => {
@@ -59,27 +62,43 @@ describe("production system prompt", () => {
       expect(SYSTEM_PROMPT_EXTENSION).toContain(action);
     }
     expect(SYSTEM_PROMPT_EXTENSION).toContain("write_episode_script_chunk sequentially");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("Production override: no write_todos or generic tools");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("AUTHORING IS TOOL-ONLY");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("Emit no visible planning, analysis, draft, manual counting, JSON, or preamble");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("directly in start/restart tool arguments");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("contiguous, non-overlapping, and cover scenes 1 through targetSceneCount");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("exactly opening scenes 1-8");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("never solves the premise or includes climax, resolution, ending insight, goodbye, or return home");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("operation=start");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("operation=append");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("operation=restart");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("scenes field must always be a real JSON array");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("sceneDetails must be at least 60 characters");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("semantic quality rejection explicitly returns retryThisInvocation=true");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("immediately rewrite only that same exact range");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("scenes is always a real JSON array");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("sceneDetails needs 60+ characters");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("For pendingRepair or semantic rejection");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("candidateScenes named by requiredSceneNumbers");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("change only editableFields");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("improving corrections continue in-run");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("append call TARGET is at most 18000 serialized characters");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("start/restart call TARGET is at most 20000");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("hard content maximum is 24000");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("TARGET each complete scene at no more than 2000 serialized characters");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("syntactically valid size rejection returns retryThisInvocation=true");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("For a size or input rejection with retryThisInvocation=true");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("chunking is transport only and must not reduce creative detail");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("reuse that persisted script and do not draft or replace it");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("ensure_series_character_sheets once");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("only before the first claim");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("identities are immutable and missing sheets fail closed");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("qa_agnes_episode_videos");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("never bypass QA");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("rerender once");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("rejected draft's exact expectedDraftRevision");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("synthesize_episode_narration_audio once with seriesId and episodeNumber");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("Only a durable successful YouTube receipt may finalize the episode as done");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("call upload_to_youtube once with the canonical seriesId and episodeNumber");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("upload_to_youtube is not available");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("do not generate YouTube metadata");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("do not mark the episode done");
+    const enabledPrompt = buildSystemPromptExtension(true);
+    expect(enabledPrompt).toContain("Only a durable successful YouTube receipt may finalize the episode as done");
+    expect(enabledPrompt).toContain("call upload_to_youtube once with the canonical seriesId and episodeNumber");
     expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(13_000);
   });
 });

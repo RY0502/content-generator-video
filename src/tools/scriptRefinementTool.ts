@@ -22,6 +22,24 @@ import {
   ProductionScriptContractError,
   inspectProductionScript,
 } from "../services/productionScriptContract.js";
+import {
+  buildCompletedSceneBeatLedger,
+  inspectSceneContinuity,
+  normalizeUnstagedLightingContinuity,
+} from "../services/sceneContinuityContract.js";
+import {
+  compareEpisodeScriptValidationProgress,
+  dedupeEpisodeScriptValidationIssues,
+  summarizeEpisodeScriptValidationIssues,
+  type EpisodeScriptValidationIssueSummary,
+} from "../services/episodeScriptValidationIssues.js";
+import {
+  canonicalizeSceneCast,
+  findGenericVisualCastAliases,
+  findMentionedUnlistedFigureNames,
+  isCollectiveSupportingIdentity,
+  type SceneCastCanonicalizationAudit,
+} from "../services/sceneCastCanonicalizer.js";
 
 type CharacterVisualForm = "real_creature" | "humanoid" | "anthropomorphic_creature" | "object_character" | "fantasy_creature";
 
@@ -81,6 +99,7 @@ type CanonicalEnvironmentContext = {
 type EpisodeContext = {
   id: number;
   seriesId: number;
+  episodeNumber: number;
   title: string;
   premise: string;
   status: string;
@@ -93,6 +112,23 @@ type EpisodeScriptDraftRow = {
   contentDigest: string;
   scriptJson: unknown;
   validation: unknown;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type EpisodeScriptPendingChunkRow = {
+  episodeId: number;
+  acceptedDraftRevision: number;
+  acceptedDraftDigest: string;
+  operation: "start" | "append" | "restart";
+  sceneStart: number;
+  sceneEnd: number;
+  candidateScenes: unknown[];
+  candidateDigest: string;
+  structuredIssues: Array<Record<string, unknown>>;
+  issueFingerprint: string;
+  consecutiveNoProgressAttempts: number;
+  totalCorrectionAttempts: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -138,6 +174,31 @@ type ScriptDraftPersistence = {
     scriptJson: unknown;
   }): Promise<PromoteEpisodeScriptDraftResult>;
   getSeriesCharacters(seriesId: number): Promise<CanonicalCharacterContext[]>;
+  getEpisodeScriptPendingChunk?(
+    episodeId: number,
+  ): Promise<EpisodeScriptPendingChunkRow | null>;
+  upsertEpisodeScriptPendingChunk?(input: {
+    episodeId: number;
+    acceptedDraftRevision: number;
+    acceptedDraftDigest: string;
+    operation: "start" | "append" | "restart";
+    sceneStart: number;
+    sceneEnd: number;
+    candidateScenes: unknown[];
+    structuredIssues: Array<Record<string, unknown>>;
+    issueFingerprint: string;
+    consecutiveNoProgressAttempts?: number;
+    totalCorrectionAttempts?: number;
+    expectedPendingCandidateDigest?: string;
+    expectedPendingIssueFingerprint?: string;
+    expectedPendingTotalCorrectionAttempts?: number;
+  }): Promise<EpisodeScriptPendingChunkRow>;
+  clearEpisodeScriptPendingChunk?(input: {
+    episodeId: number;
+    expectedAcceptedDraftRevision?: number;
+    expectedAcceptedDraftDigest?: string;
+    expectedIssueFingerprint?: string;
+  }): Promise<boolean>;
 };
 
 type CanonicalProductionContext = {
@@ -347,12 +408,17 @@ const draftScriptSchema = z.object({
 });
 
 export const EPISODE_SCRIPT_CHUNK_PROTOCOL = "chunked_episode_script_v1" as const;
+const EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER =
+  "Accepted chunk prefix requires deterministic restart under the current direct-video contract.";
 export const EPISODE_SCRIPT_SCENES_PER_CHUNK = 8;
 export const EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS = 18_000;
 export const EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS = 20_000;
 export const EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS = 24_000;
 export const EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS = 48_000;
 export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES = 3;
+export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_INPUT_CORRECTIONS = 2;
+export const EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES = 2;
+export const EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION = 12;
 
 const boundedRequiredText = (label: string, maximum: number) => z.string()
   .max(maximum, `${label} must be at most ${maximum} characters.`)
@@ -431,13 +497,13 @@ const authoringPlanBeatSchema = z.object({
   startScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES),
   endScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES),
   storyBeat: boundedRequiredText("authoringPlan beat storyBeat", 900).describe(
-    "TARGET: at most 220 characters describing the causal story movement for this range.",
+    "TARGET: at most 220 characters describing the range's new causal story movement; each range must advance rather than replay an earlier clue/action.",
   ),
   setting: boundedRequiredText("authoringPlan beat setting", 600).describe(
     "TARGET: at most 140 characters naming the range's location/setup.",
   ),
   continuityOutcome: boundedRequiredText("authoringPlan beat continuityOutcome", 900).describe(
-    "TARGET: at most 220 characters stating the concrete state carried into the next range.",
+    "TARGET: at most 220 characters stating the concrete irreversible story/prop state carried into the next range.",
   ),
 }).strict();
 
@@ -515,7 +581,10 @@ const episodeScriptChunkInputSchema = z.object({
     .min(1)
     .max(EPISODE_SCRIPT_SCENES_PER_CHUNK)
     .describe(
-      `The exact next ${EPISODE_SCRIPT_SCENES_PER_CHUNK} scenes, except the final range may be shorter. ` +
+      `For ordinary authoring, a contiguous leading prefix of 1-${EPISODE_SCRIPT_SCENES_PER_CHUNK} scenes beginning at the exact next scene number. ` +
+      `Target the complete requested range of ${EPISODE_SCRIPT_SCENES_PER_CHUNK} scenes when it is not the final range; ` +
+      "a shorter complete leading prefix is accepted safely, but never skip or reorder a scene. " +
+      "For a pending repair, copy only the complete candidateScenes named by requiredSceneNumbers, which may be non-contiguous. " +
       `TARGET at most 2000 serialized characters per scene and ${EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS} ` +
       "for a complete append call. Every scene-generation field is required; be concise without omitting visual or continuity detail.",
     ),
@@ -546,6 +615,7 @@ const INVALID_SCRIPT_CHUNK_INPUT = Symbol("invalid-script-chunk-input");
 type InvalidScriptChunkInput = {
   readonly [INVALID_SCRIPT_CHUNK_INPUT]: true;
   readonly episodeId?: number;
+  readonly operation?: "start" | "append" | "restart";
   readonly issues: string[];
   readonly invalidPaths: string[];
   readonly omittedIssueCount: number;
@@ -560,10 +630,14 @@ function invalidScriptChunkInput(input: unknown, error: z.ZodError): InvalidScri
     return message.length <= 256 ? message : `${message.slice(0, 253)}...`;
   }))];
   const rawEpisodeId = record.episodeId;
+  const rawOperation = record.operation;
   return {
     [INVALID_SCRIPT_CHUNK_INPUT]: true,
     ...(typeof rawEpisodeId === "number" && Number.isSafeInteger(rawEpisodeId) && rawEpisodeId > 0
       ? { episodeId: rawEpisodeId }
+      : {}),
+    ...(rawOperation === "start" || rawOperation === "append" || rawOperation === "restart"
+      ? { operation: rawOperation }
       : {}),
     issues: allIssues.slice(0, 8),
     invalidPaths: compact.issuePaths,
@@ -581,10 +655,14 @@ function invalidEncodedScenesChunkInput(
 ): InvalidScriptChunkInput {
   const record = isRecord(input) ? input : {};
   const rawEpisodeId = record.episodeId;
+  const rawOperation = record.operation;
   return {
     [INVALID_SCRIPT_CHUNK_INPUT]: true,
     ...(typeof rawEpisodeId === "number" && Number.isSafeInteger(rawEpisodeId) && rawEpisodeId > 0
       ? { episodeId: rawEpisodeId }
+      : {}),
+    ...(rawOperation === "start" || rawOperation === "append" || rawOperation === "restart"
+      ? { operation: rawOperation }
       : {}),
     issues: [issue],
     invalidPaths: ["scenes"],
@@ -668,6 +746,8 @@ export interface EpisodeScriptChunkAuthoringProgress {
   requiredAverageWordsPerRemainingScene: number;
   authoringPlan: EpisodeScriptChunkAuthoringPlan;
   activePlanBeat: z.infer<typeof authoringPlanBeatSchema> | null;
+  /** Compact memory of every accepted beat without retransmitting full scene JSON. */
+  completedBeatLedger: string[];
   previousScenes: EpisodeScene[];
   validationIssues: string[];
 }
@@ -675,6 +755,7 @@ export interface EpisodeScriptChunkAuthoringProgress {
 function validateAuthoringPlanCoverage(
   plan: EpisodeScriptChunkAuthoringPlan,
   targetSceneCount: number,
+  options: { strictSupportingIdentities?: boolean } = {},
 ): string[] {
   const issues: string[] = [];
   let expectedStart = 1;
@@ -692,9 +773,39 @@ function validateAuthoringPlanCoverage(
   if (plan.beats.at(-1)?.endScene !== targetSceneCount) {
     issues.push(`authoringPlan beats must cover scene 1 through ${targetSceneCount} exactly.`);
   }
-  const supportingIdentities = plan.supportingEntityBible.map(supportingIdentity);
+  const supportingIdentities: string[] = [];
+  const seenSupportingIdentities = new Set<string>();
   plan.supportingEntityBible.forEach((descriptor, index) => {
-    if (COLLECTIVE_SUPPORTING_IDENTITY_PATTERN.test(supportingIdentities[index] ?? "")) {
+    const separatorIndex = descriptor.indexOf(":");
+    const identity = supportingIdentity(descriptor);
+    const lockedDescription = separatorIndex >= 0
+      ? descriptor.slice(separatorIndex + 1).trim()
+      : "";
+    supportingIdentities.push(identity);
+    if (
+      options.strictSupportingIdentities
+      && (separatorIndex <= 0 || !identity || !lockedDescription)
+    ) {
+      issues.push(
+        `authoringPlan.supportingEntityBible[${index}] must use ` +
+        '"Stable name: locked visual descriptor" format with both parts non-empty.',
+      );
+    }
+    if (
+      options.strictSupportingIdentities
+      && identity
+      && seenSupportingIdentities.has(identity)
+    ) {
+      issues.push(
+        `authoringPlan.supportingEntityBible[${index}] repeats stable identity ` +
+        `${JSON.stringify(descriptor.split(":", 1)[0]!.trim())}; each identity must appear once.`,
+      );
+    }
+    if (identity) seenSupportingIdentities.add(identity);
+    const violatesCollectiveRule = options.strictSupportingIdentities
+      ? isCollectiveSupportingIdentity(identity)
+      : /\b(?:cluster|crowd|duo|family|flock|group|herd|pair|trio)\b/iu.test(identity);
+    if (violatesCollectiveRule) {
       issues.push(
         `authoringPlan.supportingEntityBible[${index}] must name one individual, not a group/herd/flock/cluster.`,
       );
@@ -736,9 +847,19 @@ function boundedDraftValidationIssues(value: unknown): string[] {
     .map((issue) => issue.length <= 256 ? issue : `${issue.slice(0, 253)}...`);
 }
 
+/** Recognizes the durable migration state used for a legacy invalid prefix. */
+export function episodeScriptChunkDraftRequiresRestart(value: unknown): boolean {
+  if (!isRecord(value) || value.pass !== false || !Array.isArray(value.issues)) return false;
+  return value.issues.some((issue) => (
+    typeof issue === "string"
+    && issue.startsWith(EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER)
+  ));
+}
+
 /**
- * Public, bounded resume view used by get_next_episode. It deliberately returns
- * only the immutable plan and two-scene handoff, never the cumulative prefix.
+ * Public, bounded resume view used by get_next_episode. It returns the immutable
+ * plan, a compact ledger for every accepted beat, and a two-scene visual handoff
+ * rather than retransmitting the cumulative scene JSON.
  */
 export function getEpisodeScriptChunkAuthoringProgress(
   scriptJson: unknown,
@@ -779,6 +900,7 @@ export function getEpisodeScriptChunkAuthoringProgress(
       : Number((remainingMinimumSpokenWords / remainingSceneCount).toFixed(2)),
     authoringPlan: envelope.authoring.plan,
     activePlanBeat,
+    completedBeatLedger: buildCompletedSceneBeatLedger(envelope.scenes as EpisodeScene[]),
     previousScenes: envelope.scenes.slice(-2) as EpisodeScene[],
     validationIssues: boundedDraftValidationIssues(validation),
   };
@@ -831,24 +953,8 @@ function supportingIdentity(descriptor: string): string {
   return descriptor.split(":", 1)[0]!.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-const COLLECTIVE_SUPPORTING_IDENTITY_PATTERN =
-  /\b(?:cluster|crowd|duo|family|flock|group|herd|pair|trio)\b/iu;
-const AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN =
-  /\b(?:animals?|bab(?:y|ies)|backpacks?|bags?|boys?|children|companions?|creatures?|crew|dinos?|dinosaurs?|duo|everyone|family|friends?|girls?|groups?|kids?|others?|pair|people|team|trio)\b/iu;
 const UNCOUNTED_BACKGROUND_FIGURE_PATTERN =
   /\b(?:bystanders?|crowds?|flocks?|herds?|onlookers?|groups? of (?:animals|children|creatures|dinosaurs?|people)|grazing (?:animals|creatures|dinosaurs?|herbivores?))\b/iu;
-
-function withoutStableFigureNames(text: string, names: readonly string[]): string {
-  return [...names]
-    .sort((left, right) => right.length - left.length)
-    .reduce((output, name) => {
-      // Overlong malformed names are validated separately. Avoid constructing
-      // an engine-sized dynamic RegExp before that bounded issue is returned.
-      if (!name || name.length > 500) return output;
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      return output.replace(new RegExp(`\\b${escaped}\\b`, "giu"), " ");
-    }, text);
-}
 
 function mentionedStableFigureNames(text: string, names: readonly string[]): string[] {
   return names.filter((name) => {
@@ -1006,6 +1112,8 @@ export function validateEpisodeScript(
     productionSceneContract?: boolean;
     /** Used only for bounded chunk assembly; final validation never sets this. */
     deferAggregateMinimums?: boolean;
+    /** Exact supporting identities reserved by the immutable chunk plan. */
+    knownSupportingEntityNames?: readonly string[];
   } = {},
 ): ScriptValidationResult {
   const issues: string[] = [];
@@ -1049,7 +1157,10 @@ export function validateEpisodeScript(
 
   const sceneBeatBySignature = new Map<string, number>();
   const knownFigureIdentities = new Set(
-    [...(canonicalCast ?? [])].map((name) => name.toLowerCase()),
+    [
+      ...(canonicalCast ?? []),
+      ...(options.knownSupportingEntityNames ?? []),
+    ].map((name) => name.trim().toLowerCase()).filter(Boolean),
   );
   script.scenes.forEach((scene) => {
     if (!Array.isArray(scene.supportingEntities)) return;
@@ -1144,7 +1255,7 @@ export function validateEpisodeScript(
       }
       supportingEntities.forEach((descriptor) => {
         const identity = supportingIdentity(descriptor);
-        if (COLLECTIVE_SUPPORTING_IDENTITY_PATTERN.test(identity)) {
+        if (isCollectiveSupportingIdentity(identity)) {
           issues.push(
             `${label} supporting entity "${descriptor.split(":", 1)[0]}" is a group. ` +
             "Each supportingEntities entry must identify exactly one visible individual.",
@@ -1186,35 +1297,31 @@ export function validateEpisodeScript(
           [name],
         ).length === 0,
       );
-      if (declaredButUnstagedFigures.length > 0) {
+      for (const unstagedName of declaredButUnstagedFigures) {
         issues.push(
-          `${label} declares figure ${JSON.stringify(declaredButUnstagedFigures[0])} but never names it in action/sceneDetails. ` +
+          `${label} declares figure ${JSON.stringify(unstagedName)} but never names it in action/sceneDetails. ` +
           "Explicitly stage every declared visible individual by its exact stable name so the cast count is unambiguous.",
         );
       }
-      const exactSceneFigureIdentitySet = new Set(
-        exactSceneFigureNames.map((name) => name.toLowerCase()),
-      );
-      const unlistedKnownFigures = [...knownFigureIdentities].filter(
-        (identity) => !exactSceneFigureIdentitySet.has(identity),
-      );
-      const mentionedUnlistedFigures = mentionedStableFigureNames(
+      const mentionedUnlistedFigures = findMentionedUnlistedFigureNames(
         `${scene.action} ${scene.sceneDetails ?? ""}`,
-        unlistedKnownFigures,
+        [...knownFigureIdentities],
+        exactSceneFigureNames,
       );
-      if (mentionedUnlistedFigures.length > 0) {
+      for (const unlistedName of mentionedUnlistedFigures) {
         issues.push(
-          `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(mentionedUnlistedFigures[0])}. ` +
+          `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(unlistedName)}. ` +
           "Every visible figure must be counted exactly once in characterNames or supportingEntities for this scene.",
         );
       }
-      const visualTextWithoutStableNames = withoutStableFigureNames(
+      const ambiguousAliases = findGenericVisualCastAliases(
         `${scene.action} ${scene.sceneDetails ?? ""}`,
         exactSceneFigureNames,
       );
-      if (AMBIGUOUS_VISUAL_CAST_ALIAS_PATTERN.test(visualTextWithoutStableNames)) {
+      if (ambiguousAliases.length > 0) {
         issues.push(
-          `${label} action/sceneDetails uses a collective or generic cast alias. ` +
+          `${label} action/sceneDetails uses a collective or generic cast alias ` +
+          `(${ambiguousAliases.map((alias) => JSON.stringify(alias)).join(", ")}). ` +
           "Use the exact stable name of every visible figure, including object characters, so one alias cannot become a second body.",
         );
       }
@@ -1433,6 +1540,7 @@ function validateRefinementCandidate(params: {
   targetRuntimeMinutes: number;
   mainCharacterNames?: readonly string[];
   durationExceededScenes?: readonly DurationExceededScene[];
+  knownSupportingEntityNames?: readonly string[];
 }): ScriptValidationResult {
   const validation = validateEpisodeScript(
     params.candidate,
@@ -1440,6 +1548,7 @@ function validateRefinementCandidate(params: {
     params.maxScenes,
     params.targetRuntimeMinutes,
     params.mainCharacterNames,
+    { knownSupportingEntityNames: params.knownSupportingEntityNames },
   );
   const measuredDurationIssues = durationRepairIssues(
     params.sourceScript,
@@ -1457,6 +1566,7 @@ function validateProductionRefinementCandidate(params: {
   candidate: EpisodeScript;
   mainCharacterNames: readonly string[];
   durationExceededScenes?: readonly DurationExceededScene[];
+  knownSupportingEntityNames?: readonly string[];
 }): ScriptValidationResult {
   const local = validateRefinementCandidate({
     ...params,
@@ -1468,7 +1578,10 @@ function validateProductionRefinementCandidate(params: {
     params.candidate,
     params.mainCharacterNames,
   );
-  const issues = [...new Set([...local.issues, ...authoritative.issues])];
+  const issues = dedupeEpisodeScriptValidationIssues([
+    ...local.issues,
+    ...authoritative.issues,
+  ]).map((issue) => issue.message);
   return { pass: issues.length === 0, issues };
 }
 
@@ -1648,6 +1761,382 @@ function compactProductionValidationEnvelope(
     ...compactValidationEnvelope(validation, repairEvidence),
     sceneCount: script.scenes.length,
     totalSpokenWords: totalNarrationWords(script),
+  };
+}
+
+function serializableStructuredValidationIssues(
+  summary: EpisodeScriptValidationIssueSummary,
+): Array<Record<string, unknown>> {
+  return summary.issues.map((issue) => ({
+    code: issue.code,
+    ...(issue.sceneNumber === undefined ? {} : { sceneNumber: issue.sceneNumber }),
+    ...(issue.field === undefined ? {} : { field: issue.field }),
+    ...(issue.path === undefined ? {} : { path: issue.path }),
+    ...(issue.subject === undefined ? {} : { subject: issue.subject }),
+    messages: issue.messages.map((message) => (
+      message.length <= 512 ? message : `${message.slice(0, 509)}...`
+    )),
+    occurrenceCount: issue.occurrenceCount,
+    weight: issue.weight,
+    ...(issue.observedValue === undefined ? {} : { observedValue: issue.observedValue }),
+    ...(issue.limitValue === undefined ? {} : { limitValue: issue.limitValue }),
+    ...(issue.excess === undefined ? {} : { excess: issue.excess }),
+  }));
+}
+
+/**
+ * Invalid chunk receipts keep the legacy bounded prose list for compatibility,
+ * plus a complete, deduplicated machine-readable list.  The latter is what the
+ * pending-repair path persists, so no failing scene or field is hidden by the
+ * public prose sample's size cap.
+ */
+function structuredChunkValidationEnvelope(
+  script: EpisodeScript,
+  validation: ScriptValidationResult,
+): ReturnType<typeof compactProductionValidationEnvelope> & {
+  structuredIssues: Array<Record<string, unknown>>;
+  issueGroups: Array<{
+    code: string;
+    field?: string;
+    affectedSceneNumbers: number[];
+    occurrenceCount: number;
+  }>;
+  issueFingerprint: string;
+  weightedScore: number;
+  uniqueIssueCount: number;
+} {
+  const summary = summarizeEpisodeScriptValidationIssues(validation.issues);
+  return {
+    ...compactProductionValidationEnvelope(script, validation),
+    structuredIssues: serializableStructuredValidationIssues(summary),
+    issueGroups: summary.groups.map((group) => ({
+      code: group.code,
+      ...(group.field === undefined ? {} : { field: group.field }),
+      affectedSceneNumbers: group.affectedSceneNumbers,
+      occurrenceCount: group.occurrenceCount,
+    })),
+    issueFingerprint: summary.fingerprint,
+    weightedScore: summary.weightedScore,
+    uniqueIssueCount: summary.uniqueIssueCount,
+  };
+}
+
+function pendingValidationMessages(pending: EpisodeScriptPendingChunkRow): string[] {
+  const messages: string[] = [];
+  for (const issue of pending.structuredIssues) {
+    if (Array.isArray(issue.messages)) {
+      for (const message of issue.messages) {
+        if (typeof message === "string" && message.trim()) messages.push(message);
+      }
+      continue;
+    }
+    if (typeof issue.message === "string" && issue.message.trim()) {
+      messages.push(issue.message);
+    }
+  }
+  return [...new Set(messages)];
+}
+
+export type EpisodeSceneEditableField = Exclude<keyof EpisodeScene, "sceneNumber">;
+
+const ALL_EPISODE_SCENE_EDITABLE_FIELDS: readonly EpisodeSceneEditableField[] = [
+  "narrationText",
+  "environmentDescription",
+  "action",
+  "characterNames",
+  "characterVisuals",
+  "supportingEntities",
+  "continuityAnchors",
+  "sceneDetails",
+  "cameraAngle",
+  "lighting",
+];
+
+type EpisodeScriptValidationIssueTarget = {
+  code: string;
+  sceneNumber?: number;
+  field?: string;
+};
+
+function editableFieldsForValidationIssue(
+  issue: EpisodeScriptValidationIssueTarget,
+): readonly EpisodeSceneEditableField[] {
+  if (issue.code === "scene.duplicate_beat") {
+    return ["narrationText", "environmentDescription", "action", "sceneDetails"];
+  }
+  if (issue.code === "scene.planned_regression") {
+    return ["narrationText", "environmentDescription", "action", "sceneDetails"];
+  }
+  if (issue.code === "continuity.unstaged_lighting_change") {
+    return ["lighting"];
+  }
+  if (issue.code === "cast.full_roster_default") {
+    return [
+      "characterNames",
+      "characterVisuals",
+      "action",
+      "sceneDetails",
+    ];
+  }
+  if (
+    issue.code === "cast.non_roster_character"
+    || issue.code === "cast.main_character_in_supporting_entities"
+  ) {
+    // Moving a figure between the fixed roster and supporting cast is one
+    // coordinated correction: names, aligned visuals, descriptor, and exact
+    // visual staging must be allowed to change together.
+    return [
+      "characterNames",
+      "characterVisuals",
+      "supportingEntities",
+      "action",
+      "sceneDetails",
+    ];
+  }
+  if (issue.code === "cast.character_visual_alignment") {
+    return ["characterNames", "characterVisuals"];
+  }
+  if (issue.code === "cast.unlisted_figure") {
+    return [
+      "action",
+      "sceneDetails",
+      "characterNames",
+      "characterVisuals",
+      "supportingEntities",
+    ];
+  }
+  if (issue.code === "cast.declared_figure_unstaged" || issue.code === "cast.generic_alias") {
+    return ["action", "sceneDetails"];
+  }
+  if (issue.field === "action/sceneDetails") return ["action", "sceneDetails"];
+  if (issue.field && ALL_EPISODE_SCENE_EDITABLE_FIELDS.includes(
+    issue.field as EpisodeSceneEditableField,
+  )) {
+    return [issue.field as EpisodeSceneEditableField];
+  }
+  if (issue.code.startsWith("narration.")) return ["narrationText"];
+  return ALL_EPISODE_SCENE_EDITABLE_FIELDS;
+}
+
+function pendingStructuredIssueTargets(
+  pending: EpisodeScriptPendingChunkRow,
+): EpisodeScriptValidationIssueTarget[] {
+  return pending.structuredIssues.flatMap((issue) => {
+    const code = typeof issue.code === "string" ? issue.code.trim() : "";
+    if (!code) return [];
+    const rawSceneNumber = Number(issue.sceneNumber);
+    const sceneNumber = Number.isSafeInteger(rawSceneNumber) && rawSceneNumber > 0
+      ? rawSceneNumber
+      : undefined;
+    const field = typeof issue.field === "string" && issue.field.trim()
+      ? issue.field.trim()
+      : undefined;
+    return [{
+      code,
+      ...(sceneNumber === undefined ? {} : { sceneNumber }),
+      ...(field === undefined ? {} : { field }),
+    }];
+  });
+}
+
+type EpisodeScriptPendingRepairSource = Pick<
+  EpisodeScriptPendingChunkRow,
+  | "operation"
+  | "sceneStart"
+  | "sceneEnd"
+  | "candidateScenes"
+  | "candidateDigest"
+  | "structuredIssues"
+  | "issueFingerprint"
+  | "consecutiveNoProgressAttempts"
+  | "totalCorrectionAttempts"
+>;
+
+export type EpisodeScriptPendingRepairPayload = {
+  operation: EpisodeScriptPendingChunkRow["operation"];
+  sceneStart: number;
+  sceneEnd: number;
+  candidateDigest: string;
+  issueFingerprint: string;
+  consecutiveNoProgressAttempts: number;
+  totalCorrectionAttempts: number;
+  /** Exact complete scene objects the model must return as a correction patch. */
+  candidateScenes: EpisodeScene[];
+  /** Exact scene numbers accepted by the pending-repair path, in ascending order. */
+  requiredSceneNumbers: number[];
+  /** The only fields read from each returned scene; all other fields stay durable. */
+  editableFields: Array<{
+    sceneNumber: number;
+    fields: EpisodeSceneEditableField[];
+  }>;
+  structuredIssues: Array<Record<string, unknown>>;
+};
+
+function pendingRepairRequirements(
+  pending: EpisodeScriptPendingRepairSource,
+): {
+  candidateScenes: EpisodeScene[];
+  requiredSceneNumbers: number[];
+  editableFields: EpisodeScriptPendingRepairPayload["editableFields"];
+} {
+  const parsedScenes = parsePendingChunkScenes(pending as EpisodeScriptPendingChunkRow) ?? [];
+  const candidateSceneNumbers = parsedScenes.map((scene) => scene.sceneNumber);
+  const candidateSceneNumberSet = new Set(candidateSceneNumbers);
+  const targets = pendingStructuredIssueTargets(
+    pending as EpisodeScriptPendingChunkRow,
+  );
+  const hasGlobalTarget = targets.some((target) => target.sceneNumber === undefined);
+  const explicitlyAffected = new Set(
+    targets
+      .map((target) => target.sceneNumber)
+      .filter((sceneNumber): sceneNumber is number => (
+        sceneNumber !== undefined && candidateSceneNumberSet.has(sceneNumber)
+      )),
+  );
+  // Unknown/global issues cannot safely be assigned to one scene. In that
+  // uncommon case expose the bounded pending range, never accepted scenes.
+  const requiredSceneNumbers = hasGlobalTarget || explicitlyAffected.size === 0
+    ? candidateSceneNumbers
+    : candidateSceneNumbers.filter((sceneNumber) => explicitlyAffected.has(sceneNumber));
+  const requiredSceneNumberSet = new Set(requiredSceneNumbers);
+  const candidateScenes = parsedScenes
+    .filter((scene) => requiredSceneNumberSet.has(scene.sceneNumber))
+    .map((scene) => structuredClone(scene));
+  const editableFields = requiredSceneNumbers.map((sceneNumber) => {
+    const applicableTargets = targets.filter((target) => (
+      target.sceneNumber === undefined || target.sceneNumber === sceneNumber
+    ));
+    const allowed = new Set<EpisodeSceneEditableField>(
+      applicableTargets.flatMap((target) => [...editableFieldsForValidationIssue(target)]),
+    );
+    // A malformed legacy issue still gets a safe, explicit repair contract.
+    // This is bounded to its pending candidate and cannot mutate accepted rows.
+    const fields = (allowed.size > 0
+      ? ALL_EPISODE_SCENE_EDITABLE_FIELDS.filter((field) => allowed.has(field))
+      : [...ALL_EPISODE_SCENE_EDITABLE_FIELDS]) as EpisodeSceneEditableField[];
+    return { sceneNumber, fields };
+  });
+  return { candidateScenes, requiredSceneNumbers, editableFields };
+}
+
+/**
+ * Public, bounded repair context for both an immediate retry and a fresh run.
+ * The durable table keeps every rejected scene, while this payload exposes
+ * only scenes implicated by the current structured validation issues.
+ */
+export function buildEpisodeScriptPendingRepairPayload(
+  pending: EpisodeScriptPendingRepairSource,
+): EpisodeScriptPendingRepairPayload {
+  return {
+    operation: pending.operation,
+    sceneStart: pending.sceneStart,
+    sceneEnd: pending.sceneEnd,
+    candidateDigest: pending.candidateDigest,
+    issueFingerprint: pending.issueFingerprint,
+    consecutiveNoProgressAttempts: pending.consecutiveNoProgressAttempts,
+    totalCorrectionAttempts: pending.totalCorrectionAttempts,
+    ...pendingRepairRequirements(pending),
+    structuredIssues: structuredClone(pending.structuredIssues),
+  };
+}
+
+function pendingRepairSubmissionIssues(params: {
+  pending: EpisodeScriptPendingRepairSource;
+  submittedScenes: readonly EpisodeScene[];
+}): string[] {
+  const requiredSceneNumbers = pendingRepairRequirements(params.pending).requiredSceneNumbers;
+  const submittedSceneNumbers = params.submittedScenes.map((scene) => scene.sceneNumber);
+  if (
+    requiredSceneNumbers.length === submittedSceneNumbers.length
+    && requiredSceneNumbers.every((sceneNumber, index) => (
+      submittedSceneNumbers[index] === sceneNumber
+    ))
+  ) {
+    return [];
+  }
+  return [
+    `Pending repair requires exactly complete scenes ${requiredSceneNumbers.join(", ")} in that order; ` +
+    `received ${submittedSceneNumbers.length > 0 ? submittedSceneNumbers.join(", ") : "none"}. ` +
+    "Start from pendingRepair.candidateScenes and edit only pendingRepair.editableFields.",
+  ];
+}
+
+/**
+ * Applies a correction submission as a field patch over the last rejected
+ * candidate. Fields which were already valid are retained verbatim. New scenes
+ * beyond a shorter pending prefix are accepted normally.
+ */
+function mergePendingChunkCorrection(params: {
+  pendingScenes: readonly EpisodeScene[];
+  submittedScenes: readonly EpisodeScene[];
+  pendingIssues: EpisodeScriptValidationIssueSummary;
+  pendingIssueTargets?: readonly EpisodeScriptValidationIssueTarget[];
+}): EpisodeScene[] {
+  const submittedByNumber = new Map(
+    params.submittedScenes.map((scene) => [scene.sceneNumber, scene] as const),
+  );
+  const pendingEnd = params.pendingScenes.at(-1)?.sceneNumber ?? 0;
+  const mergedPending = params.pendingScenes.map((pendingScene) => {
+    const submitted = submittedByNumber.get(pendingScene.sceneNumber);
+    if (!submitted) return structuredClone(pendingScene);
+    const issueTargets = params.pendingIssueTargets?.length
+      ? params.pendingIssueTargets
+      : params.pendingIssues.issues;
+    const applicableIssues = issueTargets.filter((issue) => (
+      issue.sceneNumber === undefined || issue.sceneNumber === pendingScene.sceneNumber
+    ));
+    if (applicableIssues.length === 0) return structuredClone(pendingScene);
+    const editableFields = new Set<EpisodeSceneEditableField>(
+      applicableIssues.flatMap((issue) => [...editableFieldsForValidationIssue(issue)]),
+    );
+    const merged = { ...pendingScene } as EpisodeScene;
+    for (const field of editableFields) {
+      const value = submitted[field];
+      (merged as unknown as Record<string, unknown>)[field] = structuredClone(value);
+    }
+    return merged;
+  });
+  return [
+    ...mergedPending,
+    ...params.submittedScenes
+      .filter((scene) => scene.sceneNumber > pendingEnd)
+      .map((scene) => structuredClone(scene)),
+  ];
+}
+
+function canonicalizeChunkScenes(params: {
+  acceptedScenes: readonly EpisodeScene[];
+  submittedScenes: readonly EpisodeScene[];
+  authoringPlan: EpisodeScriptChunkAuthoringPlan;
+}): { scenes: EpisodeScene[]; audits: SceneCastCanonicalizationAudit[] } {
+  const durableContext: EpisodeScene[] = [...params.acceptedScenes];
+  const scenes: EpisodeScene[] = [];
+  const audits: SceneCastCanonicalizationAudit[] = [];
+  for (const scene of params.submittedScenes) {
+    const normalized = canonicalizeSceneCast(scene, {
+      durableAcceptedScenes: durableContext,
+      supportingEntityBible: params.authoringPlan.supportingEntityBible,
+      maximumSceneDetailsLength: 2_500,
+    });
+    const canonicalScene = normalized.scene as EpisodeScene;
+    scenes.push(canonicalScene);
+    audits.push(normalized.audit);
+    durableContext.push(canonicalScene);
+  }
+  const lightingNormalized = normalizeUnstagedLightingContinuity(
+    scenes,
+    params.acceptedScenes.at(-1),
+  );
+  return { scenes: lightingNormalized.scenes, audits };
+}
+
+function compactCastCanonicalizationAudit(
+  audits: readonly SceneCastCanonicalizationAudit[],
+): { changedSceneCount: number; appliedChangeCount: number; unresolvedIssueCount: number } {
+  return {
+    changedSceneCount: audits.filter((audit) => audit.applied.length > 0).length,
+    appliedChangeCount: audits.reduce((total, audit) => total + audit.applied.length, 0),
+    unresolvedIssueCount: audits.reduce((total, audit) => total + audit.unresolved.length, 0),
   };
 }
 
@@ -2088,14 +2577,22 @@ function scriptChunkOperationIssues(input: EpisodeScriptChunkInput): string[] {
   ];
 }
 
-function compactChunkInputFailure(params: {
+type CompactChunkInputFailureParams = {
   episodeId?: number;
+  draftRevision?: number;
+  operation?: "start" | "append" | "restart";
   status?: string;
   issues: readonly string[];
   invalidPaths?: readonly string[];
   omittedIssueCount?: number;
+  retryThisInvocation?: boolean;
+  correctionRetryNumber?: number;
+  correctionRetryLimit?: number;
+  retryNextAction?: string;
   nextAction?: string;
-}): string {
+};
+
+function compactChunkInputFailure(params: CompactChunkInputFailureParams): string {
   const issues = params.issues.slice(0, 8).map((issue) =>
     issue.length <= 256 ? issue : `${issue.slice(0, 253)}...`
   );
@@ -2103,8 +2600,18 @@ function compactChunkInputFailure(params: {
     status: params.status ?? "invalid_input",
     persisted: false,
     retryable: true,
-    retryThisInvocation: false,
+    retryThisInvocation: params.retryThisInvocation ?? false,
     ...(params.episodeId === undefined ? {} : { episodeId: params.episodeId }),
+    ...(params.draftRevision === undefined
+      ? {}
+      : { draftRevision: params.draftRevision }),
+    ...(params.operation === undefined ? {} : { operation: params.operation }),
+    ...(params.correctionRetryNumber === undefined
+      ? {}
+      : {
+          correctionRetryNumber: params.correctionRetryNumber,
+          correctionRetryLimit: params.correctionRetryLimit,
+        }),
     validation: {
       pass: false,
       issues,
@@ -2112,8 +2619,11 @@ function compactChunkInputFailure(params: {
       omittedIssueCount: params.omittedIssueCount
         ?? Math.max(0, params.issues.length - issues.length),
     },
-    nextAction: params.nextAction
-      ?? "Start a fresh run, reload the durable authoring progress, and send only the exact requested scene range.",
+    nextAction: params.retryThisInvocation
+      ? params.retryNextAction
+        ?? "Immediately call write_episode_script_chunk again with the same operation and correct only the listed input fields."
+      : params.nextAction
+        ?? "Start a fresh run, reload the durable authoring progress, and send only the exact requested scene range.",
   });
 }
 
@@ -2278,17 +2788,18 @@ function expectedScriptChunkRange(completed: number, target: number): {
   return { startScene, endScene, sceneCount: Math.max(0, endScene - startScene + 1) };
 }
 
-function exactChunkRangeIssues(params: {
+function chunkRangeIssues(params: {
   completed: number;
   target: number;
   scenes: readonly EpisodeScene[];
 }): string[] {
   const expected = expectedScriptChunkRange(params.completed, params.target);
   const issues: string[] = [];
-  if (params.scenes.length !== expected.sceneCount) {
+  if (params.scenes.length > expected.sceneCount) {
+    const sceneLabel = expected.sceneCount === 1 ? "scene" : "scenes";
     issues.push(
-      `This write must contain exactly ${expected.sceneCount} scenes for range ` +
-      `${expected.startScene}-${expected.endScene}.`,
+      `This write may contain at most ${expected.sceneCount} ${sceneLabel} for remaining range ` +
+      `${expected.startScene}-${expected.endScene}; received ${params.scenes.length}.`,
     );
   }
   params.scenes.forEach((scene, index) => {
@@ -2315,6 +2826,7 @@ function validateEpisodeScriptChunkPrefix(params: {
   script: EpisodeScript;
   targetSceneCount: number;
   mainCharacterNames: readonly string[];
+  authoringPlan: EpisodeScriptChunkAuthoringPlan;
 }): ScriptValidationResult {
   const local = validateEpisodeScript(
     params.script,
@@ -2322,7 +2834,12 @@ function validateEpisodeScriptChunkPrefix(params: {
     params.targetSceneCount,
     5,
     params.mainCharacterNames,
-    { productionSceneContract: true, deferAggregateMinimums: true },
+    {
+      productionSceneContract: true,
+      deferAggregateMinimums: true,
+      knownSupportingEntityNames: params.authoringPlan.supportingEntityBible
+        .map(supportingIdentity),
+    },
   );
   const authoritative = inspectProductionScript(
     params.script,
@@ -2331,6 +2848,10 @@ function validateEpisodeScriptChunkPrefix(params: {
   const issues = [
     ...local.issues,
     ...authoritative.issues.filter((issue) => !isDeferredPartialAuthoritativeIssue(issue)),
+    ...inspectSceneContinuity(params.script.scenes, {
+      mainCharacterNames: params.mainCharacterNames,
+      plannedBeats: params.authoringPlan.beats,
+    }),
   ];
   const totalWords = params.script.scenes.reduce(
     (total, scene) => total + countNarrationSpokenWords(scene.narrationText),
@@ -2346,7 +2867,8 @@ function validateEpisodeScriptChunkPrefix(params: {
       "Rewrite this chunk with more meaningful narration while keeping every scene within its cap.",
     );
   }
-  const uniqueIssues = [...new Set(issues)];
+  const uniqueIssues = dedupeEpisodeScriptValidationIssues(issues)
+    .map((issue) => issue.message);
   return { pass: uniqueIssues.length === 0, issues: uniqueIssues };
 }
 
@@ -2400,7 +2922,7 @@ function scriptChunkAlreadyPresentReceipt(params: {
     status: "script_chunk_already_present",
     persisted: true,
     retryable: true,
-    retryThisInvocation: false,
+    retryThisInvocation: true,
     noProgress: true,
     episodeId: params.episodeId,
     draftRevision: params.draft.revision,
@@ -2409,8 +2931,8 @@ function scriptChunkAlreadyPresentReceipt(params: {
       ? { scriptComplete: true }
       : { authoringProgress: progress }),
     nextAction: params.complete
-      ? `On the next fresh run call refine_episode_script with episodeId=${params.episodeId} and draftRevision=${params.draft.revision}.`
-      : "The chunk was already durable. Start a fresh run and continue from get_next_episode's exact next range.",
+      ? `Immediately call refine_episode_script with episodeId=${params.episodeId} and draftRevision=${params.draft.revision}.`
+      : "The chunk was already durable. Immediately continue with the exact next range in authoringProgress.",
   });
 }
 
@@ -2481,9 +3003,97 @@ async function persistRejectedChunkPrefix(params: {
   return staged.matches ? staged.draft : null;
 }
 
+function pendingChunkMatchesAcceptedRange(params: {
+  pending: EpisodeScriptPendingChunkRow;
+  draft: EpisodeScriptDraftRow | null;
+  expectedRangeStart: number;
+  expectedRangeEnd: number;
+}): boolean {
+  return Boolean(params.draft)
+    && params.pending.acceptedDraftRevision === params.draft!.revision
+    && params.pending.acceptedDraftDigest === params.draft!.contentDigest
+    && params.pending.sceneStart === params.expectedRangeStart
+    && params.pending.sceneEnd >= params.pending.sceneStart
+    && params.pending.sceneEnd <= params.expectedRangeEnd;
+}
+
+function parsePendingChunkScenes(
+  pending: EpisodeScriptPendingChunkRow,
+): EpisodeScene[] | null {
+  const parsed = z.array(recoverableNarrationChunkSceneSchema)
+    .min(1)
+    .max(EPISODE_SCRIPT_SCENES_PER_CHUNK)
+    .safeParse(pending.candidateScenes);
+  if (!parsed.success) return null;
+  if (!inputScenesAreInternallySequential(parsed.data as EpisodeScene[])) return null;
+  if (
+    parsed.data[0]?.sceneNumber !== pending.sceneStart
+    || parsed.data.at(-1)?.sceneNumber !== pending.sceneEnd
+  ) return null;
+  return parsed.data as EpisodeScene[];
+}
+
+type InRunSemanticCorrectionState = {
+  summary: EpisodeScriptValidationIssueSummary;
+  correctionAttemptNumber: number;
+  consecutiveNoProgressAttempts: number;
+};
+
+function nextSemanticCorrectionState(params: {
+  previous?: InRunSemanticCorrectionState;
+  pendingBaseline?: EpisodeScriptValidationIssueSummary;
+  current: EpisodeScriptValidationIssueSummary;
+}): InRunSemanticCorrectionState & {
+  progressDirection: "initial" | ReturnType<typeof compareEpisodeScriptValidationProgress>["direction"];
+  madeProgress: boolean;
+} {
+  const comparisonBase = params.previous?.summary ?? params.pendingBaseline;
+  const comparison = comparisonBase
+    ? compareEpisodeScriptValidationProgress(comparisonBase, params.current)
+    : null;
+  // A strict improvement resets the stall guard. A changed issue set also
+  // receives a fresh chance because correcting one contract layer can expose
+  // the next one. Regressions and identical fingerprints still consume the
+  // no-progress budget, while the independent total-attempt cap prevents an
+  // endless equal-weight issue-swap loop.
+  const madeProgress = comparison?.direction === "improved"
+    || comparison?.direction === "changed";
+  // This is deliberately an invocation-local retry guard. Durable candidate
+  // state and totalCorrectionAttempts survive reruns, but an earlier process's
+  // stalled model must not consume the next process's correction budget.
+  const priorStalls = params.previous?.consecutiveNoProgressAttempts ?? 0;
+  return {
+    summary: params.current,
+    correctionAttemptNumber: (params.previous?.correctionAttemptNumber ?? 0) + 1,
+    consecutiveNoProgressAttempts: comparisonBase
+      ? madeProgress ? 0 : priorStalls + 1
+      : 0,
+    progressDirection: comparison?.direction ?? "initial",
+    madeProgress,
+  };
+}
+
+async function clearObservedPendingChunk(
+  seriesState: ScriptDraftPersistence,
+  pending: EpisodeScriptPendingChunkRow | null,
+): Promise<void> {
+  if (!pending || !seriesState.clearEpisodeScriptPendingChunk) return;
+  try {
+    await seriesState.clearEpisodeScriptPendingChunk({
+      episodeId: pending.episodeId,
+      expectedAcceptedDraftRevision: pending.acceptedDraftRevision,
+      expectedAcceptedDraftDigest: pending.acceptedDraftDigest,
+      expectedIssueFingerprint: pending.issueFingerprint,
+    });
+  } catch {
+    // Draft writes clear the production row transactionally. This best-effort
+    // call exists for compatible state fakes and stale legacy rows only.
+  }
+}
+
 /**
- * Bounded, resumable episode authoring. The model submits at most eight full
- * scenes per call; the tool merges them with the private Turso prefix. The
+ * Bounded, resumable episode authoring. The model submits up to eight full
+ * contiguous scenes per call; the tool merges them with the private Turso prefix. The
  * final write removes the authoring marker so the existing deterministic
  * refine/promotion tool receives an ordinary complete EpisodeScript.
  */
@@ -2496,29 +3106,53 @@ export function buildEpisodeScriptChunkTool(
   // This state is intentionally scoped to one tool instance, which is one
   // production agent invocation. A fresh run starts with a fresh budget while
   // durable draft revision/CAS state remains the source of truth.
-  const correctionRetriesByRange = new Map<string, number>();
+  const semanticCorrectionStateByRange = new Map<string, InRunSemanticCorrectionState>();
   const oversizeCorrectionRetriesByRange = new Map<string, number>();
+  const inputCorrectionRetriesByRoute = new Map<string, number>();
+
+  const recoverableInputFailure = (
+    params: CompactChunkInputFailureParams,
+  ): string => {
+    const routeKey = `${params.episodeId ?? "unknown"}:${params.operation ?? "unknown"}`;
+    const correctionRetryNumber = (inputCorrectionRetriesByRoute.get(routeKey) ?? 0) + 1;
+    const retryThisInvocation = correctionRetryNumber
+      <= EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_INPUT_CORRECTIONS;
+    inputCorrectionRetriesByRoute.set(routeKey, correctionRetryNumber);
+    return compactChunkInputFailure({
+      ...params,
+      retryThisInvocation,
+      correctionRetryNumber,
+      correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_INPUT_CORRECTIONS,
+    });
+  };
 
   return new DynamicStructuredTool({
     name: "write_episode_script_chunk",
     description:
-      `Durably writes exactly the next ${EPISODE_SCRIPT_SCENES_PER_CHUNK} complete episode scenes ` +
-      "(or the shorter final range) without transporting the full script. Use operation=start once with " +
+      `Durably writes a contiguous leading prefix of up to the next ${EPISODE_SCRIPT_SCENES_PER_CHUNK} complete episode scenes ` +
+      "without transporting the full script. Target the complete requested range; a shorter complete prefix " +
+      "is persisted and advances the durable cursor instead of failing. Use operation=start once with " +
       "targetSceneCount and authoringPlan; for operation=append, send the exact latest draft revision and " +
       "omit targetSceneCount and authoringPlan; or use " +
       "operation=restart only for a deterministically rejected complete draft. Wait for each receipt before " +
       "the next call; never issue chunk writes in parallel. When a persisted semantic rejection says " +
-      "retryThisInvocation=true, immediately correct only its exact range using the returned revision; this " +
-      "in-run correction path is bounded to three retries. Keep each scene near 2000 serialized characters, " +
+      "retryThisInvocation=true, immediately correct only its exact range using the returned revision. A rejected " +
+      "candidate is retained separately: copy only its complete candidateScenes named by requiredSceneNumbers; only each " +
+      "scene's editableFields replace durable values, and every omitted pending scene remains intact. Improving corrections " +
+      "continue; only consecutive no-progress attempts stop. " +
+      "Keep each scene near 2000 serialized characters, " +
       `each append call at or below the TARGET ${EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS}, ` +
       `and each start/restart call at or below the TARGET ${EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS}; ` +
       `the hard content maximum is ${EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS}. ` +
-      "Use the advertised per-field TARGET budgets: concise concrete facts, not repeated prose. Every scene field is required and preserved.",
+      "On a fresh-run resume, use completedBeatLedger as the compact do-not-repeat memory for every accepted scene, " +
+      "and previousScenes as the exact visual handoff. Use the advertised per-field TARGET budgets: concise concrete " +
+      "facts, not repeated prose. Every scene field is required and preserved.",
     schema: guardedSchema,
     func: async (rawInput) => {
       if (isInvalidScriptChunkInput(rawInput)) {
-        return compactChunkInputFailure({
+        return recoverableInputFailure({
           episodeId: rawInput.episodeId,
+          operation: rawInput.operation,
           issues: rawInput.issues.length > 0
             ? rawInput.issues
             : ["The chunk call must match the advertised object schema and include complete scene objects."],
@@ -2537,10 +3171,8 @@ export function buildEpisodeScriptChunkTool(
         operationIssues.push(...validateAuthoringPlanCoverage(
           input.authoringPlan,
           input.targetSceneCount,
+          { strictSupportingIdentities: true },
         ));
-      }
-      if (!inputScenesAreInternallySequential(input.scenes as EpisodeScene[])) {
-        operationIssues.push("Submitted scenes must have contiguous ascending sceneNumber values.");
       }
       if (rawTransportSerializedCharacters > EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS) {
         operationIssues.push(
@@ -2549,8 +3181,9 @@ export function buildEpisodeScriptChunkTool(
         );
       }
       if (operationIssues.length > 0) {
-        return compactChunkInputFailure({
+        return recoverableInputFailure({
           episodeId: input.episodeId,
+          operation: input.operation,
           issues: operationIssues,
         });
       }
@@ -2578,6 +3211,9 @@ export function buildEpisodeScriptChunkTool(
         ? normalCompletedChunkScript(currentDraft.scriptJson)
         : null;
       const submittedScenes = input.scenes as EpisodeScene[];
+      let observedPendingChunk = currentDraft && seriesState.getEpisodeScriptPendingChunk
+        ? await seriesState.getEpisodeScriptPendingChunk(input.episodeId)
+        : null;
 
       // Some tool-call providers echo immutable start metadata while applying
       // an append correction. Tolerate that transport quirk only when both
@@ -2591,11 +3227,17 @@ export function buildEpisodeScriptChunkTool(
             currentEnvelope.authoring.targetSceneCount,
             currentEnvelope.scenes.length + EPISODE_SCRIPT_SCENES_PER_CHUNK,
           );
-          return compactChunkInputFailure({
+          return recoverableInputFailure({
             episodeId: input.episodeId,
+            draftRevision: currentDraft!.revision,
+            operation: input.operation,
             status: "invalid_script_chunk",
             issues: immutable.issues,
             invalidPaths: immutable.invalidPaths,
+            retryNextAction:
+              `Immediately call write_episode_script_chunk with operation=append, episodeId=${input.episodeId}, ` +
+              `expectedDraftRevision=${currentDraft!.revision}, and exactly scenes ` +
+              `${nextSceneNumber}-${nextSceneEnd}. Omit targetSceneCount and authoringPlan.`,
             nextAction:
               `Start a fresh run, reload durable draft revision ${currentDraft!.revision}, and call ` +
               `write_episode_script_chunk with operation=append, episodeId=${input.episodeId}, ` +
@@ -2722,23 +3364,58 @@ export function buildEpisodeScriptChunkTool(
           },
           targetSceneCount: currentEnvelope.authoring.targetSceneCount,
           mainCharacterNames,
+          authoringPlan: currentEnvelope.authoring.plan,
         });
         if (!existingPrefixValidation.pass) {
+          const restartValidation = {
+            pass: false,
+            issues: [
+              EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER,
+              ...existingPrefixValidation.issues,
+            ],
+          };
+          let restartDraft = currentDraft;
+          if (!episodeScriptChunkDraftRequiresRestart(currentDraft.validation)) {
+            try {
+              restartDraft = await seriesState.reviseEpisodeScriptDraft(
+                input.episodeId,
+                currentDraft.revision,
+                currentEnvelope,
+                compactProductionValidationEnvelope({
+                  title: currentEnvelope.title,
+                  premise: currentEnvelope.premise,
+                  scenes: currentEnvelope.scenes as EpisodeScene[],
+                }, restartValidation),
+              );
+              currentDraft = restartDraft;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (message.includes("revision conflict")) {
+                return staleScriptChunkReceipt({
+                  episodeId: input.episodeId,
+                  requestedRevision: input.expectedDraftRevision,
+                  currentDraft: await seriesState.getEpisodeScriptDraft(input.episodeId),
+                });
+              }
+              throw error;
+            }
+          }
           return JSON.stringify({
             status: "script_chunk_restart_required",
-            persisted: false,
+            persisted: true,
             scenePrefixPreserved: true,
             retryable: true,
-            retryThisInvocation: false,
+            retryThisInvocation: true,
             noProgress: true,
             episodeId: input.episodeId,
-            draftRevision: currentDraft.revision,
+            draftRevision: restartDraft.revision,
+            contentDigest: restartDraft.contentDigest,
             validation: publicValidationReceipt(
               compactProductionValidationEnvelope({
                 title: currentEnvelope.title,
                 premise: currentEnvelope.premise,
                 scenes: currentEnvelope.scenes as EpisodeScene[],
-              }, existingPrefixValidation),
+              }, restartValidation),
             ),
             restartPlan: {
               targetSceneCount: currentEnvelope.authoring.targetSceneCount,
@@ -2750,8 +3427,8 @@ export function buildEpisodeScriptChunkTool(
               ),
             },
             nextAction:
-              `Start a fresh run and call write_episode_script_chunk with operation=restart, ` +
-              `episodeId=${input.episodeId}, expectedDraftRevision=${currentDraft.revision}, ` +
+              `Immediately call write_episode_script_chunk with operation=restart, ` +
+              `episodeId=${input.episodeId}, expectedDraftRevision=${restartDraft.revision}, ` +
               `the returned targetSceneCount and authoringPlan, and corrected scenes 1-${Math.min(
                 EPISODE_SCRIPT_SCENES_PER_CHUNK,
                 currentEnvelope.authoring.targetSceneCount,
@@ -2778,6 +3455,7 @@ export function buildEpisodeScriptChunkTool(
             },
             targetSceneCount: currentEnvelope.authoring.targetSceneCount,
             mainCharacterNames,
+            authoringPlan: currentEnvelope.authoring.plan,
           });
           if (currentPrefixValidation.pass) {
             return JSON.stringify({
@@ -2836,21 +3514,97 @@ export function buildEpisodeScriptChunkTool(
       const correctionRangeKey = `${input.episodeId}:${expectedRangeStart}-${expectedRangeEnd}`;
       const oversizeCorrectionRangeKey =
         `${input.episodeId}:${input.operation}:${expectedRangeStart}-${expectedRangeEnd}`;
-      const rangeIssues = exactChunkRangeIssues({
-        completed: baseEnvelope.scenes.length,
-        target: targetSceneCount,
-        scenes: submittedScenes,
-      });
+      let pendingScenes: EpisodeScene[] | null = null;
+      let pendingIssueSummary: EpisodeScriptValidationIssueSummary | undefined;
+      let pendingIssueTargets: EpisodeScriptValidationIssueTarget[] | undefined;
+      if (observedPendingChunk) {
+        const parsedPendingScenes = parsePendingChunkScenes(observedPendingChunk);
+        if (pendingChunkMatchesAcceptedRange({
+          pending: observedPendingChunk,
+          draft: currentDraft,
+          expectedRangeStart,
+          expectedRangeEnd,
+        }) && parsedPendingScenes) {
+          pendingScenes = parsedPendingScenes;
+          pendingIssueSummary = summarizeEpisodeScriptValidationIssues(
+            pendingValidationMessages(observedPendingChunk),
+          );
+          pendingIssueTargets = pendingStructuredIssueTargets(observedPendingChunk);
+        } else {
+          // Do not delete here. The draft used by this tool may itself be
+          // stale, while another writer has already stored a valid pending
+          // repair for a newer accepted prefix. Draft revision/promotion
+          // methods clean genuinely stale rows transactionally.
+          observedPendingChunk = null;
+        }
+      }
+      const rangeIssues = pendingScenes && observedPendingChunk
+        ? pendingRepairSubmissionIssues({
+            pending: observedPendingChunk,
+            submittedScenes,
+          })
+        : chunkRangeIssues({
+            completed: baseEnvelope.scenes.length,
+            target: targetSceneCount,
+            scenes: submittedScenes,
+          });
       if (rangeIssues.length > 0) {
-        return compactChunkInputFailure({
+        return recoverableInputFailure({
           episodeId: input.episodeId,
+          ...(writeExpectedRevision === undefined
+            ? {}
+            : { draftRevision: writeExpectedRevision }),
+          operation: input.operation,
           status: "invalid_script_chunk",
           issues: rangeIssues,
         });
       }
 
+      const correctionCandidateScenes = pendingScenes && pendingIssueSummary
+        ? mergePendingChunkCorrection({
+            pendingScenes,
+            submittedScenes,
+            pendingIssues: pendingIssueSummary,
+            pendingIssueTargets,
+          })
+        : submittedScenes.map((scene) => structuredClone(scene));
+      const canonicalizedChunk = canonicalizeChunkScenes({
+        acceptedScenes: baseEnvelope.scenes as EpisodeScene[],
+        submittedScenes: correctionCandidateScenes,
+        authoringPlan: baseEnvelope.authoring.plan,
+      });
+      const canonicalSceneShape = z.array(recoverableNarrationChunkSceneSchema)
+        .min(1)
+        .max(EPISODE_SCRIPT_SCENES_PER_CHUNK)
+        .safeParse(canonicalizedChunk.scenes);
+      if (!canonicalSceneShape.success) {
+        const allIssues = [...new Set(canonicalSceneShape.error.issues.map((issue) => {
+          const path = issue.path.join(".") || "scenes";
+          return `${path}: ${issue.message}`;
+        }))];
+        return recoverableInputFailure({
+          episodeId: input.episodeId,
+          ...(writeExpectedRevision === undefined
+            ? {}
+            : { draftRevision: writeExpectedRevision }),
+          operation: input.operation,
+          status: "invalid_script_chunk",
+          issues: allIssues,
+          invalidPaths: [...new Set(canonicalSceneShape.error.issues.map((issue) => (
+            issue.path.join(".") || "scenes"
+          )))],
+          retryNextAction:
+            "Immediately resubmit the exact requested or pending-repair scene set using the advertised field limits.",
+          nextAction:
+            "Start a fresh run and resubmit the exact pending scene range using the advertised field limits.",
+        });
+      }
+      const canonicalInputScenes = canonicalSceneShape.data;
+      const effectiveScenes = canonicalInputScenes as EpisodeScene[];
+      inputCorrectionRetriesByRoute.delete(`${input.episodeId}:${input.operation}`);
+
       const canonicalSerializedCharacters = JSON.stringify(
-        canonicalScriptChunkBudgetInput(input),
+        canonicalScriptChunkBudgetInput({ ...input, scenes: canonicalInputScenes }),
       ).length;
       if (
         canonicalSerializedCharacters > EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS
@@ -2881,30 +3635,129 @@ export function buildEpisodeScriptChunkTool(
       const candidate: EpisodeScript = {
         title: episode.title,
         premise: episode.premise,
-        scenes: [...baseEnvelope.scenes, ...submittedScenes] as EpisodeScene[],
+        scenes: [...baseEnvelope.scenes, ...effectiveScenes] as EpisodeScene[],
       };
       const isComplete = candidate.scenes.length === targetSceneCount;
       const validation = isComplete
-        ? validateProductionRefinementCandidate({
-            sourceScript: candidate,
-            candidate,
-            mainCharacterNames,
-            durationExceededScenes: [],
-          })
+        ? (() => {
+            const production = validateProductionRefinementCandidate({
+              sourceScript: candidate,
+              candidate,
+              mainCharacterNames,
+              durationExceededScenes: [],
+              knownSupportingEntityNames: baseEnvelope.authoring.plan.supportingEntityBible
+                .map(supportingIdentity),
+            });
+            const continuityIssues = inspectSceneContinuity(candidate.scenes, {
+              mainCharacterNames,
+              plannedBeats: baseEnvelope.authoring.plan.beats,
+            });
+            const issues = dedupeEpisodeScriptValidationIssues([
+              ...production.issues,
+              ...continuityIssues,
+            ]).map((issue) => issue.message);
+            return { pass: issues.length === 0, issues };
+          })()
         : validateEpisodeScriptChunkPrefix({
             script: candidate,
             targetSceneCount,
             mainCharacterNames,
+            authoringPlan: baseEnvelope.authoring.plan,
           });
 
       if (!validation.pass) {
-        let durablePrefix: EpisodeScriptDraftRow | null = currentEnvelope ? currentDraft : null;
-        // Keep a valid existing full draft intact when a restart's first chunk
-        // is bad. For start/append, retain the immutable plan and accepted scene
-        // prefix plus a bounded error receipt for an immediate correction or,
-        // after the local retry budget is exhausted, the next fresh invocation.
-        if (input.operation !== "restart") {
-          try {
+        const validationReceipt = structuredChunkValidationEnvelope(candidate, validation);
+        const currentIssueSummary = summarizeEpisodeScriptValidationIssues(validation.issues);
+        const previousCorrectionState = semanticCorrectionStateByRange.get(correctionRangeKey);
+        const correctionState = nextSemanticCorrectionState({
+          previous: previousCorrectionState,
+          pendingBaseline: previousCorrectionState ? undefined : pendingIssueSummary,
+          current: currentIssueSummary,
+        });
+        semanticCorrectionStateByRange.set(correctionRangeKey, correctionState);
+
+        const supportsPendingChunks = Boolean(
+          seriesState.getEpisodeScriptPendingChunk
+          && seriesState.upsertEpisodeScriptPendingChunk,
+        );
+        let durablePrefix: EpisodeScriptDraftRow | null = currentDraft;
+        let storedPendingChunk: EpisodeScriptPendingChunkRow | null = null;
+        const pendingSceneEnd = effectiveScenes.at(-1)!.sceneNumber;
+
+        try {
+          if (supportsPendingChunks) {
+            // A new start has no accepted row yet. Persist only its immutable
+            // plan/empty prefix, then keep the rejected scene candidate in the
+            // separate pending table. Existing accepted scenes never receive a
+            // revision merely because a correction failed validation.
+            if (input.operation === "restart") {
+              // A deliberate restart accepts the new immutable plan before any
+              // replacement scene is accepted. This turns even a rejected
+              // first restart range into the ordinary resumable append shape;
+              // the former rejected complete draft was never media-authoritative.
+              durablePrefix = await seriesState.reviseEpisodeScriptDraft(
+                input.episodeId,
+                currentDraft!.revision,
+                baseEnvelope,
+                compactProductionValidationEnvelope(
+                  { title: episode.title, premise: episode.premise, scenes: [] },
+                  { pass: true, issues: [] },
+                ),
+              );
+              currentDraft = durablePrefix;
+              currentEnvelope = baseEnvelope;
+            } else if (!durablePrefix) {
+              const stagedBase = await seriesState.stageEpisodeScriptDraft(
+                input.episodeId,
+                baseEnvelope,
+                compactProductionValidationEnvelope(
+                  { title: episode.title, premise: episode.premise, scenes: [] },
+                  { pass: true, issues: [] },
+                ),
+              );
+              if (!stagedBase.matches) {
+                return staleScriptChunkReceipt({
+                  episodeId: input.episodeId,
+                  currentDraft: stagedBase.draft,
+                });
+              }
+              durablePrefix = stagedBase.draft;
+              currentDraft = stagedBase.draft;
+              currentEnvelope = baseEnvelope;
+            }
+
+            const replaceablePendingChunk = observedPendingChunk
+              && observedPendingChunk.acceptedDraftRevision === durablePrefix.revision
+              && observedPendingChunk.acceptedDraftDigest === durablePrefix.contentDigest
+              ? observedPendingChunk
+              : null;
+            const totalCorrectionAttempts =
+              (replaceablePendingChunk?.totalCorrectionAttempts ?? 0) + 1;
+            storedPendingChunk = await seriesState.upsertEpisodeScriptPendingChunk!({
+              episodeId: input.episodeId,
+              acceptedDraftRevision: durablePrefix.revision,
+              acceptedDraftDigest: durablePrefix.contentDigest,
+              operation: "append",
+              sceneStart: expectedRangeStart,
+              sceneEnd: pendingSceneEnd,
+              candidateScenes: effectiveScenes,
+              structuredIssues: validationReceipt.structuredIssues,
+              issueFingerprint: currentIssueSummary.fingerprint,
+              consecutiveNoProgressAttempts: correctionState.consecutiveNoProgressAttempts,
+              totalCorrectionAttempts,
+              ...(replaceablePendingChunk
+                ? {
+                    expectedPendingCandidateDigest: replaceablePendingChunk.candidateDigest,
+                    expectedPendingIssueFingerprint: replaceablePendingChunk.issueFingerprint,
+                    expectedPendingTotalCorrectionAttempts:
+                      replaceablePendingChunk.totalCorrectionAttempts,
+                  }
+                : {}),
+            });
+            observedPendingChunk = storedPendingChunk;
+          } else if (input.operation !== "restart") {
+            // Compatibility for lightweight state implementations. Production
+            // SeriesState uses the independent pending table above.
             durablePrefix = await persistRejectedChunkPrefix({
               seriesState,
               episodeId: input.episodeId,
@@ -2912,49 +3765,68 @@ export function buildEpisodeScriptChunkTool(
               envelope: baseEnvelope,
               validation,
             });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (message.includes("revision conflict")) {
-              return staleScriptChunkReceipt({
-                episodeId: input.episodeId,
-                requestedRevision: writeExpectedRevision,
-                currentDraft: await seriesState.getEpisodeScriptDraft(input.episodeId),
-              });
-            }
-            if (message.includes("Agnes submission has started")) {
-              return JSON.stringify({
-                status: "script_chunk_write_blocked",
-                persisted: false,
-                retryable: false,
-                retryThisInvocation: false,
-                noProgress: true,
-                episodeId: input.episodeId,
-                nextAction: "Resume the accepted Agnes work; never change this script.",
-              });
-            }
-            throw error;
+          } else {
+            durablePrefix = null;
           }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("revision conflict") || message.includes("pending chunk conflict")) {
+            return staleScriptChunkReceipt({
+              episodeId: input.episodeId,
+              requestedRevision: writeExpectedRevision,
+              currentDraft: await seriesState.getEpisodeScriptDraft(input.episodeId),
+            });
+          }
+          if (message.includes("Agnes submission has started")) {
+            return JSON.stringify({
+              status: "script_chunk_write_blocked",
+              persisted: false,
+              retryable: false,
+              retryThisInvocation: false,
+              noProgress: true,
+              episodeId: input.episodeId,
+              nextAction: "Resume the accepted Agnes work; never change this script.",
+            });
+          }
+          throw error;
         }
+
         const correctionRetryNumber = durablePrefix
-          ? (correctionRetriesByRange.get(correctionRangeKey) ?? 0) + 1
+          ? correctionState.correctionAttemptNumber
           : 0;
         const retryThisInvocation = Boolean(durablePrefix)
-          && correctionRetryNumber <= EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES;
-        if (durablePrefix) {
-          correctionRetriesByRange.set(correctionRangeKey, correctionRetryNumber);
-        }
+          && correctionState.consecutiveNoProgressAttempts
+            <= EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+          && correctionState.correctionAttemptNumber
+            <= EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION;
         const authoringProgress = durablePrefix
           ? retryThisInvocation
             ? immediateChunkCorrectionProgress(durablePrefix)
             : chunkProgressReceipt(durablePrefix)
           : null;
+        const pendingRepair = storedPendingChunk
+          ? buildEpisodeScriptPendingRepairPayload(storedPendingChunk)
+          : null;
+        const pendingRepairSceneInstruction = pendingRepair
+          ? `only complete scenes ${pendingRepair.requiredSceneNumbers.join(", ")} copied from ` +
+            "pendingRepair.candidateScenes; change only the per-scene fields in " +
+            "pendingRepair.editableFields"
+          : `exactly scenes ${expectedRangeStart}-${pendingSceneEnd}`;
         let nextAction: string;
         if (retryThisInvocation) {
-          nextAction =
-            `Immediately call write_episode_script_chunk with operation=append, episodeId=${input.episodeId}, ` +
-            `expectedDraftRevision=${durablePrefix!.revision}, and exactly scenes ` +
-            `${expectedRangeStart}-${expectedRangeEnd}. Correct only the listed validation issues while ` +
-            "preserving every already-valid field. Omit targetSceneCount and authoringPlan.";
+          if (input.operation !== "restart" || currentEnvelope) {
+            nextAction =
+              `Immediately call write_episode_script_chunk with operation=append, episodeId=${input.episodeId}, ` +
+              `expectedDraftRevision=${durablePrefix!.revision}, and ${pendingRepairSceneInstruction}. ` +
+              "The tool merges them over the durable pending range and retains every other field and scene verbatim. " +
+              "Omit targetSceneCount and authoringPlan.";
+          } else {
+            nextAction =
+              "Immediately call write_episode_script_chunk with operation=restart, " +
+              `episodeId=${input.episodeId}, expectedDraftRevision=${durablePrefix!.revision}, ` +
+              `targetSceneCount=${targetSceneCount}, the same authoringPlan, and ${pendingRepairSceneInstruction}. ` +
+              "The rejected complete draft remains unchanged.";
+          }
         } else if (input.operation === "restart") {
           nextAction =
             "Start a fresh run and call write_episode_script_chunk with operation=restart, " +
@@ -2966,8 +3838,8 @@ export function buildEpisodeScriptChunkTool(
           nextAction =
             `Start a fresh run and reload durable draft revision ${durablePrefix.revision}; then call ` +
             `write_episode_script_chunk with operation=append, episodeId=${input.episodeId}, ` +
-            `expectedDraftRevision=${durablePrefix.revision}, and exactly scenes ` +
-            `${expectedRangeStart}-${expectedRangeEnd} while preserving every already-valid field. ` +
+            `expectedDraftRevision=${durablePrefix.revision}, and ${pendingRepairSceneInstruction}. ` +
+            "The tool merges them over the durable pending range and retains every other field and scene verbatim. " +
             "Omit targetSceneCount and authoringPlan.";
         } else {
           nextAction =
@@ -2979,7 +3851,7 @@ export function buildEpisodeScriptChunkTool(
           scenePrefixPreserved: true,
           retryable: true,
           retryThisInvocation,
-          noProgress: true,
+          noProgress: !correctionState.madeProgress,
           episodeId: input.episodeId,
           ...(durablePrefix
             ? {
@@ -2987,7 +3859,17 @@ export function buildEpisodeScriptChunkTool(
                 contentDigest: durablePrefix.contentDigest,
                 authoringProgress,
                 correctionRetryNumber,
-                correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES,
+                correctionRetryLimit:
+                  EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
+                consecutiveNoProgressAttempts:
+                  correctionState.consecutiveNoProgressAttempts,
+                consecutiveNoProgressLimit:
+                  EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+                progressDirection: correctionState.progressDirection,
+                totalCorrectionAttempts: storedPendingChunk?.totalCorrectionAttempts
+                  ?? correctionState.correctionAttemptNumber,
+                pendingCandidatePreserved: Boolean(storedPendingChunk),
+                ...(pendingRepair === null ? {} : { pendingRepair }),
               }
             : input.operation === "restart" && currentDraft
               ? {
@@ -3001,8 +3883,9 @@ export function buildEpisodeScriptChunkTool(
                   },
                 }
               : {}),
-          validation: publicValidationReceipt(
-            compactProductionValidationEnvelope(candidate, validation),
+          validation: publicValidationReceipt(validationReceipt),
+          castCanonicalization: compactCastCanonicalizationAudit(
+            canonicalizedChunk.audits,
           ),
           nextAction,
         });
@@ -3075,8 +3958,9 @@ export function buildEpisodeScriptChunkTool(
         throw error;
       }
 
-      correctionRetriesByRange.delete(correctionRangeKey);
+      semanticCorrectionStateByRange.delete(correctionRangeKey);
       oversizeCorrectionRetriesByRange.delete(oversizeCorrectionRangeKey);
+      await clearObservedPendingChunk(seriesState, observedPendingChunk);
 
       if (isComplete) {
         return JSON.stringify({
@@ -3112,11 +3996,17 @@ export function buildEpisodeScriptChunkTool(
         episodeId: input.episodeId,
         draftRevision: written.revision,
         contentDigest: written.contentDigest,
+        acceptedSceneCount: effectiveScenes.length,
+        requestedSceneCount: expectedRangeEnd - expectedRangeStart + 1,
+        castCanonicalization: compactCastCanonicalizationAudit(
+          canonicalizedChunk.audits,
+        ),
         authoringProgress,
         nextAction: authoringProgress
           ? `Call write_episode_script_chunk once with operation=append, episodeId=${input.episodeId}, ` +
-            `expectedDraftRevision=${written.revision}, and exactly scenes ` +
-            `${authoringProgress.nextSceneNumber}-${authoringProgress.nextSceneEnd}. ` +
+            `expectedDraftRevision=${written.revision}, starting at scene ` +
+            `${authoringProgress.nextSceneNumber} and continuing through up to scene ` +
+            `${authoringProgress.nextSceneEnd}; target the complete range. ` +
             "Omit targetSceneCount and authoringPlan."
           : "Start a fresh run and reload durable authoring progress.",
       });
@@ -3860,6 +4750,8 @@ function buildDeterministicProductionScriptRefinementTool(
         status: "ready",
         persisted: true,
         episodeId,
+        seriesId: episode.seriesId,
+        episodeNumber: episode.episodeNumber,
         draftRevision: activeDraftRevision,
         sourceDraftRevision: activeDraftRevision,
         sceneCount: candidate.scenes.length,

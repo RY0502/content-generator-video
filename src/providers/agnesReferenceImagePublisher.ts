@@ -43,8 +43,11 @@ export interface PublishAgnesReferenceImageParams {
   /** An existing public HTTPS URL or a path to a local image file. */
   source: string;
   seriesId: number;
-  episodeNumber: number;
-  sceneNumber: number;
+  /** Stable character scope for reusable approved portrait references. */
+  characterName?: string;
+  /** Legacy per-scene scope, retained for scene-image callers. */
+  episodeNumber?: number;
+  sceneNumber?: number;
   /** Optional override; otherwise inferred from the local file extension. */
   contentType?: string;
 }
@@ -211,6 +214,40 @@ export function buildAgnesReferenceImageObjectKey(params: {
     `episode_${episodeNumber}`,
     "scenes",
     `scene_${String(sceneNumber).padStart(3, "0")}_${sha256}${extension}`,
+  ].join("/");
+}
+
+function safeObjectKeySegment(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}._-]+/gu, "_")
+    .replace(/^\.+|\.+$/gu, "")
+    .replace(/^_+|_+$/gu, "");
+  return normalized || "unnamed_character";
+}
+
+/** Stable, episode-independent object key for a reusable character portrait. */
+export function buildAgnesCharacterReferenceImageObjectKey(params: {
+  seriesId: number;
+  characterName: string;
+  sha256: string;
+  extension?: string;
+}): string {
+  const seriesId = positiveInteger("seriesId", params.seriesId);
+  const characterName = params.characterName.trim();
+  if (!characterName) throw new Error("characterName must not be empty.");
+  const extension = (params.extension ?? ".png").trim().toLowerCase();
+  if (!/^\.[a-z0-9]+$/.test(extension)) {
+    throw new Error("extension must begin with a dot and contain only letters or digits.");
+  }
+  const sha256 = params.sha256.trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error("sha256 must be a 64-character hexadecimal SHA-256 digest.");
+  }
+  return [
+    `series_${seriesId}`,
+    "characters",
+    `${safeObjectKeySegment(characterName)}_${sha256}${extension}`,
   ].join("/");
 }
 
@@ -384,13 +421,21 @@ export async function publishAgnesReferenceImage(
   const publicBaseUrl = validatedBaseUrl(options.publicBaseUrl, "publicBaseUrl");
   const timeoutMs = positiveTimeout(options.requestTimeoutMs);
   const localImage = await readValidatedLocalImage(source, params.contentType);
-  const objectKey = buildAgnesReferenceImageObjectKey({
-    seriesId: params.seriesId,
-    episodeNumber: params.episodeNumber,
-    sceneNumber: params.sceneNumber,
-    sha256: createHash("sha256").update(localImage.bytes).digest("hex"),
-    extension: localImage.extension,
-  });
+  const sha256 = createHash("sha256").update(localImage.bytes).digest("hex");
+  const objectKey = params.characterName?.trim()
+    ? buildAgnesCharacterReferenceImageObjectKey({
+        seriesId: params.seriesId,
+        characterName: params.characterName,
+        sha256,
+        extension: localImage.extension,
+      })
+    : buildAgnesReferenceImageObjectKey({
+        seriesId: params.seriesId,
+        episodeNumber: params.episodeNumber ?? 0,
+        sceneNumber: params.sceneNumber ?? 0,
+        sha256,
+        extension: localImage.extension,
+      });
   const uploadUrl = appendObjectKey(uploadBaseUrl, objectKey);
   const publicUrl = appendObjectKey(publicBaseUrl, objectKey);
 

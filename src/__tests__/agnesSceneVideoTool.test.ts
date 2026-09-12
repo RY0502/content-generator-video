@@ -8,6 +8,7 @@ const { materializeScenePromptMock } = vi.hoisted(() => ({
     prompt: "CANONICAL SCENE PROMPT WITH LOCKED CHARACTER AND CONTINUITY ANCHORS",
     characterNames: ["Pip the Ant"],
     characterDescriptions: ["small ruby-red ant, yellow backpack"],
+    characterReferenceSources: [] as Array<{ name: string; source: string }>,
   })),
 }));
 
@@ -65,6 +66,8 @@ import {
   AGNES_PROGRESS_LOG_PREFIX,
   buildAgnesSceneVideoTools as buildAgnesSceneVideoToolsImpl,
   buildAgnesVideoPrompt,
+  createAgnesVideoRequestDigest,
+  deriveAgnesAssetSeed,
   AGNES_NORMALIZATION_VERSION,
   AGNES_STALE_SUBMISSION_LEASE_MS,
   MIN_PRODUCTION_STATUS_INTERVAL_MS,
@@ -72,6 +75,7 @@ import {
   buildSubmitAgnesSceneVideosTool as buildSubmitAgnesSceneVideosToolImpl,
   buildVerifyAgnesSceneVideosTool as buildVerifyAgnesSceneVideosToolImpl,
   planAgnesVideoSegments,
+  parseAgnesReferenceImageUrls,
   resolveStatusRequestIntervalMs,
 } from "../tools/agnesSceneVideoTool.js";
 import {
@@ -146,6 +150,15 @@ function rowFrom(input: UpsertAgnesSceneGenerationInput, id: number, prior?: Agn
     rawOutputPath: input.rawOutputPath ?? prior?.rawOutputPath ?? null,
     normalizedOutputPath: input.normalizedOutputPath ?? prior?.normalizedOutputPath ?? null,
     downloadStatus: input.downloadStatus ?? prior?.downloadStatus ?? "pending",
+    renderRevision: prior?.renderRevision ?? 0,
+    qaStatus: prior?.qaStatus ?? "pending",
+    qaRequestDigest: prior?.qaRequestDigest ?? null,
+    qaVideoSha256: prior?.qaVideoSha256 ?? null,
+    qaResult: prior?.qaResult ?? null,
+    qaContactSheetPath: prior?.qaContactSheetPath ?? null,
+    qaModel: prior?.qaModel ?? null,
+    qaError: prior?.qaError ?? null,
+    qaCheckedAt: prior?.qaCheckedAt ?? null,
     error: input.error === undefined ? prior?.error ?? null : input.error,
     submittedAt: input.submittedAt ?? prior?.submittedAt ?? (input.status === "submitted" ? new Date().toISOString() : null),
     completedAt: input.completedAt ?? prior?.completedAt ?? null,
@@ -809,7 +822,11 @@ describe("three-phase Agnes scene workflow", () => {
       expect(prompt).toContain("No double heads");
       expect(prompt.split(CHARACTER_INTEGRITY_NEGATIVE_BIBLE)).toHaveLength(2);
     }
-    expect([...rows.values()].every(({ seed }) => seed === 1_357_911)).toBe(true);
+    expect([...rows.values()].map(({ seed }) => seed)).toEqual([
+      deriveAgnesAssetSeed(1_357_911, 2, "series-key-art"),
+      deriveAgnesAssetSeed(1_357_911, 2, "episode-key-art"),
+      deriveAgnesAssetSeed(1_357_911, 2, "scene-1"),
+    ]);
   });
 
   it("repairs the complete roster before the first Agnes provider claim", async () => {
@@ -897,7 +914,7 @@ describe("three-phase Agnes scene workflow", () => {
     expect(client.retrieveVideo).not.toHaveBeenCalled();
   });
 
-  it("uses one persisted series seed for every scene request and reuses it after a rerun", async () => {
+  it("derives stable distinct scene seeds from one persisted series seed and reuses them after a rerun", async () => {
     await addAudioFiles(outputDir, 3);
     const { state, rows } = mockState(3);
     const firstRunRequests: AgnesSubmitVideoRequest[] = [];
@@ -920,16 +937,12 @@ describe("three-phase Agnes scene workflow", () => {
 
     expect(firstResult.status).toBe("pending");
     expect(firstRunRequests).toHaveLength(3);
-    expect(firstRunRequests.map(({ seed }) => seed)).toEqual([
-      1_357_911,
-      1_357_911,
-      1_357_911,
-    ]);
-    expect([...rows.values()].map(({ seed }) => seed)).toEqual([
-      1_357_911,
-      1_357_911,
-      1_357_911,
-    ]);
+    const expectedSeeds = [1, 2, 3].map((sceneNumber) => (
+      deriveAgnesAssetSeed(1_357_911, 2, `scene-${sceneNumber}`)
+    ));
+    expect(new Set(expectedSeeds).size).toBe(3);
+    expect(firstRunRequests.map(({ seed }) => seed)).toEqual(expectedSeeds);
+    expect([...rows.values()].map(({ seed }) => seed)).toEqual(expectedSeeds);
 
     const rerunRequests: AgnesSubmitVideoRequest[] = [];
     let accepted = 0;
@@ -951,10 +964,148 @@ describe("three-phase Agnes scene workflow", () => {
 
     expect(rerunResult.status).toBe("submitted");
     expect(rerunRequests).toHaveLength(3);
-    expect(rerunRequests.every(({ seed }) => seed === 1_357_911)).toBe(true);
+    expect(rerunRequests.map(({ seed }) => seed)).toEqual(expectedSeeds);
     expect(state.getOrCreateSeriesAgnesSeed).toHaveBeenCalledTimes(2);
     expect(state.getOrCreateSeriesAgnesSeed).toHaveBeenNthCalledWith(1, 7, undefined);
     expect(state.getOrCreateSeriesAgnesSeed).toHaveBeenNthCalledWith(2, 7, undefined);
+  });
+
+  it("submits every visible approved portrait in ordered Agnes reference mode and reuses one publication", async () => {
+    await addAudioFiles(outputDir, 2);
+    const { state, rows } = mockState(2);
+    const portraitUrl = "https://cdn.example.test/series-7/pip.png";
+    materializeScenePromptMock
+      .mockResolvedValueOnce({
+        prompt: "FIRST REFERENCE SCENE",
+        characterNames: ["Pip the Ant"],
+        characterDescriptions: ["locked Pip identity"],
+        characterReferenceSources: [{ name: "Pip the Ant", source: portraitUrl }],
+      })
+      .mockResolvedValueOnce({
+        prompt: "SECOND REFERENCE SCENE",
+        characterNames: ["Pip the Ant"],
+        characterDescriptions: ["locked Pip identity"],
+        characterReferenceSources: [{ name: "Pip the Ant", source: portraitUrl }],
+      });
+    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
+    const requests: AgnesSubmitVideoRequest[] = [];
+    const client = {
+      submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
+        requests.push(request);
+        return task(`reference-${requests.length}`, "queued");
+      }),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      publishReferenceImage: publishReferenceImage as never,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result.status).toBe("submitted");
+    expect(publishReferenceImage).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request).toMatchObject({
+        mode: "reference",
+        images: [portraitUrl],
+      });
+      expect(request.prompt).toContain(
+        "reference image 1 is the approved portrait of Pip the Ant",
+      );
+    }
+    expect([...rows.values()].every((row) => (
+      parseAgnesReferenceImageUrls(row.publicReferenceUrl).join() === portraitUrl
+    ))).toBe(true);
+  });
+
+  it("falls back atomically to text mode when a visible portrait has no public route", async () => {
+    await addAudioFiles(outputDir, 1);
+    const { state, rows } = mockState(1);
+    materializeScenePromptMock.mockResolvedValueOnce({
+      prompt: "LOCAL PORTRAIT SCENE",
+      characterNames: ["Pip the Ant"],
+      characterDescriptions: ["locked Pip identity"],
+      characterReferenceSources: [{ name: "Pip the Ant", source: "/assets/pip.png" }],
+    });
+    const publishReferenceImage = vi.fn();
+    const requests: AgnesSubmitVideoRequest[] = [];
+    const client = {
+      submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
+        requests.push(request);
+        return task("text-fallback", "queued");
+      }),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const tool = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      publishReferenceImage: publishReferenceImage as never,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    });
+
+    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result.status).toBe("submitted");
+    expect(requests).toMatchObject([{ mode: "text" }]);
+    expect(publishReferenceImage).not.toHaveBeenCalled();
+    expect(rows.get(1)?.publicReferenceUrl).toBeNull();
+  });
+
+  it("does not reuse an unaccepted row's reference URL under a changed prompt or character map", async () => {
+    await addAudioFiles(outputDir, 1);
+    const { state } = mockState(1);
+    const pipUrl = "https://cdn.example.test/pip.png";
+    const miaUrl = "https://cdn.example.test/mia.png";
+    materializeScenePromptMock.mockResolvedValueOnce({
+      prompt: "OLD PIP SHOT",
+      characterNames: ["Pip the Ant"],
+      characterDescriptions: ["locked Pip identity"],
+      characterReferenceSources: [{ name: "Pip the Ant", source: pipUrl }],
+    });
+    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
+    const firstClient = {
+      submitVideo: vi.fn(async () => {
+        throw new AgnesError("queue full", { kind: "provider_capacity" });
+      }),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    await (buildSubmitAgnesSceneVideosTool(state as never, {
+      client: firstClient,
+      publishReferenceImage: publishReferenceImage as never,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    }) as any).func({ seriesId: 7, episodeNumber: 2 });
+
+    materializeScenePromptMock.mockResolvedValueOnce({
+      prompt: "NEW MIA SHOT",
+      characterNames: ["Mia"],
+      characterDescriptions: ["locked Mia identity"],
+      characterReferenceSources: [{ name: "Mia", source: miaUrl }],
+    });
+    const submitted: AgnesSubmitVideoRequest[] = [];
+    const secondClient = {
+      submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
+        submitted.push(request);
+        return task("changed-reference-map", "queued");
+      }),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const result = JSON.parse(await (buildSubmitAgnesSceneVideosTool(state as never, {
+      client: secondClient,
+      publishReferenceImage: publishReferenceImage as never,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    }) as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result.status).toBe("submitted");
+    expect(submitted).toMatchObject([{ mode: "reference", images: [miaUrl] }]);
+    expect(submitted[0]?.prompt).toContain("approved portrait of Mia");
+    expect(submitted[0]?.prompt).not.toContain("approved portrait of Pip the Ant");
+    expect(publishReferenceImage).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an accepted task resumable when a later deployment strengthens prompt wording", async () => {
@@ -964,6 +1115,7 @@ describe("three-phase Agnes scene workflow", () => {
       prompt: "OLD CANONICAL PROMPT",
       characterNames: ["Pip the Ant"],
       characterDescriptions: ["tiny red ant"],
+      characterReferenceSources: [],
     });
     const client = {
       submitVideo: vi.fn(async () => task("accepted-before-prompt-change", "queued")),
@@ -982,9 +1134,15 @@ describe("three-phase Agnes scene workflow", () => {
       prompt: "NEW CANONICAL PROMPT WITH NO DOUBLE HEADS",
       characterNames: ["Pip the Ant"],
       characterDescriptions: ["tiny red ant"],
+      characterReferenceSources: [{
+        name: "Pip the Ant",
+        source: "https://cdn.example.test/newly-configured-pip.png",
+      }],
     });
+    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
     const later = buildSubmitAgnesSceneVideosTool(state as never, {
       client,
+      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
     const result = JSON.parse(await (later as any).func({ seriesId: 7, episodeNumber: 2 }));
@@ -994,6 +1152,92 @@ describe("three-phase Agnes scene workflow", () => {
     expect(client.submitVideo).toHaveBeenCalledOnce();
     expect(rows.get(1)?.prompt).toBe(acceptedPrompt);
     expect(rows.get(1)?.requestDigest).toBe(acceptedDigest);
+    expect(rows.get(1)?.publicReferenceUrl).toBeNull();
+    expect(publishReferenceImage).not.toHaveBeenCalled();
+  });
+
+  it("freezes an unsubmitted revision-one QA retry including its reference mode and seed", async () => {
+    await addAudioFiles(outputDir, 1);
+    const { state, rows } = mockState(1);
+    const persistedReferenceUrl = "https://cdn.example.test/frozen-pip.png";
+    const persistedPrompt = "FROZEN QA RETRY PROMPT WITH THE ORIGINAL CORRECTION";
+    const persistedSeed = 246_810;
+    const providerSeconds = planAgnesVideoSegments(5.2)[0]!;
+    const persistedDigest = createAgnesVideoRequestDigest({
+      prompt: persistedPrompt,
+      providerSeconds,
+      seed: persistedSeed,
+      duration: 5.2,
+      mode: "reference",
+      referenceImageUrls: [persistedReferenceUrl],
+    });
+    const frozen = rowFrom({
+      seriesId: 7,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      status: "pending",
+      prompt: persistedPrompt,
+      requestDigest: persistedDigest,
+      attemptCount: 1,
+      seed: persistedSeed,
+      requestedDurationSeconds: 5.2,
+      providerDurationSeconds: providerSeconds,
+      publicReferenceUrl: JSON.stringify([persistedReferenceUrl]),
+      downloadStatus: "pending",
+    }, 1);
+    Object.assign(frozen, {
+      renderRevision: 1,
+      qaStatus: "awaiting_regeneration",
+      qaRequestDigest: "9".repeat(64),
+      qaVideoSha256: "a".repeat(64),
+      qaResult: { pass: false, issues: [{ code: "identity_drift" }] },
+    });
+    rows.set(1, frozen);
+    materializeScenePromptMock.mockResolvedValueOnce({
+      prompt: "NEWLY DEPLOYED PROMPT THAT MUST NOT REPLACE THE QA RETRY",
+      characterNames: ["Pip the Ant"],
+      characterDescriptions: ["changed identity text"],
+      characterReferenceSources: [{
+        name: "Pip the Ant",
+        source: "https://cdn.example.test/new-pip.png",
+      }],
+    });
+    const publishReferenceImage = vi.fn(async () => {
+      throw new Error("publisher is unavailable on this rerun");
+    });
+    const requests: AgnesSubmitVideoRequest[] = [];
+    const client = {
+      submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
+        requests.push(request);
+        return task("frozen-qa-retry", "queued");
+      }),
+      retrieveVideo: vi.fn(),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const result = JSON.parse(await (buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      publishReferenceImage: publishReferenceImage as never,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    }) as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result.status).toBe("submitted");
+    expect(requests).toEqual([{
+      mode: "reference",
+      prompt: persistedPrompt,
+      seconds: providerSeconds,
+      seed: persistedSeed,
+      images: [persistedReferenceUrl],
+    }]);
+    expect(publishReferenceImage).not.toHaveBeenCalled();
+    expect(state.resetAgnesSceneGenerationForRequest).not.toHaveBeenCalled();
+    expect(rows.get(1)).toMatchObject({
+      requestDigest: persistedDigest,
+      prompt: persistedPrompt,
+      seed: persistedSeed,
+      renderRevision: 1,
+      qaStatus: "awaiting_regeneration",
+    });
   });
 
   it("resubmits a terminally failed provider task exactly once on a later verification run", async () => {

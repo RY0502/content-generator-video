@@ -101,6 +101,16 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
       thumbnailPath,
       privacyStatus,
     }) => {
+      if (!CONFIG.youtubeUploadEnabled) {
+        return JSON.stringify({
+          status: "disabled",
+          uploaded: false,
+          retryUpload: false,
+          message:
+            "YouTube upload is disabled by YOUTUBE_UPLOAD_ENABLED=false. No provider request was made.",
+        });
+      }
+
       if (requiresEpisodeIdentity && (!seriesId || !episodeNumber)) {
         throw new Error(
           "seriesId and episodeNumber are required when YouTube upload state integration is enabled."

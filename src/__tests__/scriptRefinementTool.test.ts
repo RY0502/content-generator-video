@@ -13,8 +13,10 @@ vi.mock("../providers/aiClient.js", () => ({
 
 import {
   EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS,
+  EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
   EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES,
   EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS,
+  EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
   EPISODE_SCRIPT_CHUNK_PROTOCOL,
   EPISODE_SCRIPT_SCENES_PER_CHUNK,
   EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS,
@@ -88,6 +90,7 @@ function productionStateForDraft(
     getEpisodeById: vi.fn().mockResolvedValue({
       id: 17,
       seriesId: 7,
+      episodeNumber: 3,
       title: script.title,
       premise: script.premise ?? "",
       status: "pending",
@@ -363,6 +366,36 @@ describe("scriptRefinementTool", () => {
     ]));
   });
 
+  it("rejects malformed or collective supporting-identity bibles before writing a draft", async () => {
+    const invalidBibles = [
+      ["Luma one tiny golden firefly"],
+      [": one tiny golden firefly"],
+      ["Luma:"],
+      [
+        "Luma: one tiny golden firefly with two pale wings",
+        "Luma: a conflicting blue firefly descriptor",
+      ],
+      ["Mammoths: cinnamon wool and curved ivory tusks"],
+    ];
+
+    for (const supportingEntityBible of invalidBibles) {
+      const fixture = chunkStateForEpisode();
+      const plan = chunkAuthoringPlan();
+      plan.supportingEntityBible = supportingEntityBible;
+      const result = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+        operation: "start",
+        episodeId: 17,
+        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        authoringPlan: plan,
+        scenes: chunkScenes(1, EPISODE_SCRIPT_SCENES_PER_CHUNK),
+      }));
+
+      expect(result).toMatchObject({ status: "invalid_input", persisted: false });
+      expect(fixture.stageEpisodeScriptDraft).not.toHaveBeenCalled();
+      expect(fixture.reviseEpisodeScriptDraft).not.toHaveBeenCalled();
+    }
+  });
+
   it("stages only the first eight scenes with a bounded immutable continuation plan", async () => {
     const { state, getCurrentDraft } = chunkStateForEpisode();
     const tool = buildEpisodeScriptChunkTool(state);
@@ -396,11 +429,59 @@ describe("scriptRefinementTool", () => {
       targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
       plan: chunkAuthoringPlan(),
     });
+    const durableProgress = getEpisodeScriptChunkAuthoringProgress(
+      stored.scriptJson,
+      stored.validation,
+    );
+    expect(durableProgress?.completedBeatLedger).toHaveLength(8);
+    expect(durableProgress?.completedBeatLedger[0]).toContain("S1 [Mia]");
+    expect(JSON.stringify(durableProgress?.completedBeatLedger).length).toBeLessThan(2_500);
     expect(result.authoringProgress.authoringPlan).toBeUndefined();
     expect(result.authoringProgress.activePlanBeat).toBeUndefined();
+    expect(result.authoringProgress.completedBeatLedger).toBeUndefined();
     expect(result.authoringProgress.previousScenes).toBeUndefined();
     expect(raw).not.toContain("clearing number 1");
     expect(raw.length).toBeLessThan(2_000);
+  });
+
+  it("stages a complete shorter opening prefix without losing its plan or resume handoff", async () => {
+    const { state, getCurrentDraft } = chunkStateForEpisode();
+    const scenes = chunkScenes(1, 5);
+
+    const result = JSON.parse(await (buildEpisodeScriptChunkTool(state) as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: chunkAuthoringPlan(),
+      scenes,
+    }));
+
+    expect(result).toMatchObject({
+      status: "script_chunk_staged",
+      persisted: true,
+      retryThisInvocation: true,
+      acceptedSceneCount: 5,
+      requestedSceneCount: 8,
+      authoringProgress: {
+        completedSceneCount: 5,
+        nextSceneNumber: 6,
+        nextSceneEnd: 13,
+      },
+    });
+    const stored = getCurrentDraft();
+    expect(stored.scriptJson.scenes).toEqual(scenes);
+    expect(stored.scriptJson.authoring.plan).toEqual(chunkAuthoringPlan());
+    const durableProgress = getEpisodeScriptChunkAuthoringProgress(
+      stored.scriptJson,
+      stored.validation,
+    );
+    expect(durableProgress).toMatchObject({
+      completedSceneCount: 5,
+      nextSceneNumber: 6,
+      nextSceneEnd: 13,
+    });
+    expect(durableProgress?.completedBeatLedger).toHaveLength(5);
+    expect(durableProgress?.previousScenes.map((scene) => scene.sceneNumber)).toEqual([4, 5]);
   });
 
   it("corrects an oversized start in the same invocation without mutating the draft", async () => {
@@ -658,7 +739,8 @@ describe("scriptRefinementTool", () => {
       expect(result).toMatchObject({
         status: "invalid_script_chunk",
         persisted: false,
-        retryThisInvocation: false,
+        retryThisInvocation: true,
+        draftRevision: accepted.draftRevision,
         validation: {
           invalidPaths: [mismatch.path],
           issues: [expect.stringContaining(mismatch.issue)],
@@ -716,26 +798,42 @@ describe("scriptRefinementTool", () => {
 
   it("fails closed with an actionable receipt for malformed encoded scenes", async () => {
     const fixture = chunkStateForEpisode();
-    const raw = await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+    const tool = buildEpisodeScriptChunkTool(fixture.state);
+    const malformedInput = {
       operation: "start",
       episodeId: 17,
       targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
       authoringPlan: chunkAuthoringPlan(),
       scenes: '[{"sceneNumber":1',
-    });
+    };
+    const raw = await (tool as any).call(malformedInput);
     const result = JSON.parse(raw);
 
     expect(result).toMatchObject({
       status: "invalid_input",
       persisted: false,
-      retryThisInvocation: false,
+      retryThisInvocation: true,
       episodeId: 17,
+      correctionRetryNumber: 1,
+      correctionRetryLimit: 2,
       validation: {
         invalidPaths: ["scenes"],
         issues: [expect.stringContaining("one complete valid JSON array")],
       },
     });
     expect(fixture.getCurrentDraft()).toBeNull();
+
+    const second = JSON.parse(await (tool as any).call(malformedInput));
+    const exhausted = JSON.parse(await (tool as any).call(malformedInput));
+    expect(second).toMatchObject({
+      retryThisInvocation: true,
+      correctionRetryNumber: 2,
+    });
+    expect(exhausted).toMatchObject({
+      retryThisInvocation: false,
+      correctionRetryNumber: 3,
+      correctionRetryLimit: 2,
+    });
   });
 
   it("runs strict nested validation after decoding an encoded scenes array", async () => {
@@ -824,7 +922,7 @@ describe("scriptRefinementTool", () => {
     expect(result).toMatchObject({
       status: "invalid_input",
       persisted: false,
-      retryThisInvocation: false,
+      retryThisInvocation: true,
       validation: {
         invalidPaths: ["scenes.3.lighting"],
         issues: [expect.stringContaining("scenes.3.lighting")],
@@ -859,7 +957,9 @@ describe("scriptRefinementTool", () => {
       noProgress: true,
       draftRevision: 1,
       correctionRetryNumber: 1,
-      correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES,
+      correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
+      consecutiveNoProgressLimit:
+        EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
       authoringProgress: {
         completedSceneCount: 0,
         nextSceneNumber: 1,
@@ -950,7 +1050,7 @@ describe("scriptRefinementTool", () => {
     });
   });
 
-  it("allows only three same-invocation semantic corrections for one exact range", async () => {
+  it("stops only after consecutive same-invocation semantic corrections make no progress", async () => {
     const fixture = chunkStateForEpisode();
     const tool = buildEpisodeScriptChunkTool(fixture.state);
     const invalidScenes = chunkScenes(1, 8);
@@ -976,7 +1076,9 @@ describe("scriptRefinementTool", () => {
         retryThisInvocation:
           retryNumber <= EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES,
         correctionRetryNumber: retryNumber,
-        correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES,
+        correctionRetryLimit: EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
+        consecutiveNoProgressLimit:
+          EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
         authoringProgress: {
           completedSceneCount: 0,
           nextSceneNumber: 1,
@@ -1054,7 +1156,7 @@ describe("scriptRefinementTool", () => {
     expect(repeated).toMatchObject({
       status: "script_chunk_already_present",
       persisted: true,
-      retryThisInvocation: false,
+      retryThisInvocation: true,
       noProgress: true,
       draftRevision: 2,
     });
@@ -1122,7 +1224,39 @@ describe("scriptRefinementTool", () => {
     expect(fixture.getCurrentDraft()).toEqual(before);
   });
 
-  it("rejects gaps and partial non-final ranges without mutating the prefix", async () => {
+  it("persists a valid contiguous partial range and advances from its exact end", async () => {
+    const fixture = chunkStateForEpisode();
+    const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: chunkAuthoringPlan(),
+      scenes: chunkScenes(1, 8),
+    }));
+    const result = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: start.draftRevision,
+      scenes: chunkScenes(9, 7),
+    }));
+
+    expect(result).toMatchObject({
+      status: "script_chunk_appended",
+      persisted: true,
+      retryThisInvocation: true,
+      acceptedSceneCount: 7,
+      requestedSceneCount: 8,
+      authoringProgress: {
+        completedSceneCount: 15,
+        nextSceneNumber: 16,
+        nextSceneEnd: 23,
+      },
+    });
+    expect(fixture.getCurrentDraft().scriptJson.scenes).toHaveLength(15);
+    expect(fixture.getCurrentDraft().scriptJson.scenes.at(-1)?.sceneNumber).toBe(15);
+  });
+
+  it("rejects a gap even when the submitted range is shorter than eight scenes", async () => {
     const fixture = chunkStateForEpisode();
     const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
@@ -1143,14 +1277,73 @@ describe("scriptRefinementTool", () => {
     expect(result).toMatchObject({
       status: "invalid_script_chunk",
       persisted: false,
-      retryThisInvocation: false,
+      retryThisInvocation: true,
     });
-    expect(result.validation.issues.join(" ")).toContain("exactly 8 scenes");
     expect(result.validation.issues.join(" ")).toContain("must be 9");
     expect(fixture.getCurrentDraft()).toEqual(before);
   });
 
-  it("rejects a cross-chunk visual-identity change and preserves only the valid prefix", async () => {
+  it("rejects overflow past the final target, then completes with the exact remainder", async () => {
+    const fixture = chunkStateForEpisode();
+    const tool = buildEpisodeScriptChunkTool(fixture.state);
+    let result = JSON.parse(await (tool as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: chunkAuthoringPlan(),
+      scenes: chunkScenes(1, 8),
+    }));
+
+    for (const [startScene, count] of [[9, 8], [17, 8], [25, 8], [33, 7]]) {
+      result = JSON.parse(await (tool as any).call({
+        operation: "append",
+        episodeId: 17,
+        expectedDraftRevision: result.draftRevision,
+        scenes: chunkScenes(startScene, count),
+      }));
+    }
+    expect(result).toMatchObject({
+      status: "script_chunk_appended",
+      authoringProgress: {
+        completedSceneCount: 39,
+        nextSceneNumber: 40,
+        nextSceneEnd: 40,
+      },
+    });
+    const beforeOverflow = structuredClone(fixture.getCurrentDraft());
+
+    const overflow = JSON.parse(await (tool as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: result.draftRevision,
+      scenes: chunkScenes(40, 2),
+    }));
+
+    expect(overflow).toMatchObject({
+      status: "invalid_script_chunk",
+      persisted: false,
+      retryThisInvocation: true,
+    });
+    expect(overflow.validation.issues.join(" ")).toContain(
+      "at most 1 scene for remaining range 40-40",
+    );
+    expect(fixture.getCurrentDraft()).toEqual(beforeOverflow);
+
+    const completed = JSON.parse(await (tool as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: result.draftRevision,
+      scenes: chunkScenes(40, 1),
+    }));
+    expect(completed).toMatchObject({
+      status: "script_draft_complete",
+      persisted: true,
+      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      validation: { pass: true },
+    });
+  });
+
+  it("canonicalizes a cross-chunk visual-identity change to the accepted identity", async () => {
     const fixture = chunkStateForEpisode();
     const firstScenes = chunkScenes(1, 8);
     for (const scene of firstScenes) {
@@ -1191,18 +1384,108 @@ describe("scriptRefinementTool", () => {
     }));
 
     expect(result).toMatchObject({
+      status: "script_chunk_appended",
+      persisted: true,
+      retryThisInvocation: true,
+      authoringProgress: {
+        completedSceneCount: 16,
+        nextSceneNumber: 17,
+      },
+      castCanonicalization: {
+        changedSceneCount: 8,
+      },
+    });
+    expect(fixture.getCurrentDraft().scriptJson.scenes.slice(0, 8)).toEqual(firstScenes);
+    for (const scene of fixture.getCurrentDraft().scriptJson.scenes.slice(8)) {
+      expect(scene.characterVisuals).toEqual(firstScenes[0]!.characterVisuals);
+    }
+  });
+
+  it("reuses accepted-prefix lighting for an unstaged change at a new-chunk boundary", async () => {
+    const fixture = chunkStateForEpisode();
+    const firstScenes = chunkScenes(1, 8);
+    firstScenes[7] = {
+      ...firstScenes[7]!,
+      environmentDescription: "Moonlit meadow beside one round blue gate.",
+      lighting: "soft silver moonlight with a warm golden lantern edge",
+    };
+    const started = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: chunkAuthoringPlan(),
+      scenes: firstScenes,
+    }));
+    expect(started.status, JSON.stringify(started)).toBe("script_chunk_staged");
+
+    const nextScenes = chunkScenes(9, 8);
+    nextScenes[0] = {
+      ...nextScenes[0]!,
+      environmentDescription: "  moonlit MEADOW beside one round blue gate. ",
+      lighting: "cold blue high-contrast studio light",
+    };
+    const submittedBoundaryScene = structuredClone(nextScenes[0]!);
+
+    const result = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: started.draftRevision,
+      scenes: nextScenes,
+    }));
+
+    expect(result.status, JSON.stringify(result)).toBe("script_chunk_appended");
+    const storedBoundaryScene = fixture.getCurrentDraft().scriptJson.scenes[8];
+    expect(storedBoundaryScene).toEqual({
+      ...submittedBoundaryScene,
+      lighting: firstScenes[7]!.lighting,
+    });
+  });
+
+  it("rejects a paraphrased beat replayed across chunks and preserves the accepted prefix", async () => {
+    const fixture = chunkStateForEpisode();
+    const firstScenes = chunkScenes(1, 8);
+    firstScenes[0] = {
+      ...firstScenes[0]!,
+      narrationText: "Mia traces the bird symbol and studies the zigzag water sign beside the loaf mark.",
+      environmentDescription: "A sunlit sandstone wall carved with three large puzzle symbols.",
+      action: "Mia touches the carved bird, water zigzag, and bread symbol in order.",
+      sceneDetails: "Mia follows the bird carving with one fingertip. The water zigzag and loaf-shaped mark remain beside it.",
+    };
+    const started = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      authoringPlan: chunkAuthoringPlan(),
+      scenes: firstScenes,
+    }));
+    expect(started.status, JSON.stringify(started)).toBe("script_chunk_staged");
+
+    const replayedScenes = chunkScenes(9, 8);
+    replayedScenes[0] = {
+      ...replayedScenes[0]!,
+      narrationText: "Mia presses the bird carving before examining the water zigzag and bread symbol.",
+      environmentDescription: "A sunlit sandstone wall carved with three large puzzle symbols.",
+      action: "Mia taps the bird, zigzag water mark, and loaf-shaped hieroglyph in order.",
+      sceneDetails: "Mia touches the same bird sign with one fingertip. The water carving and oval bread mark stay beside it.",
+    };
+
+    const result = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
+      operation: "append",
+      episodeId: 17,
+      expectedDraftRevision: started.draftRevision,
+      scenes: replayedScenes,
+    }));
+
+    expect(result).toMatchObject({
       status: "invalid_script_chunk",
       persisted: true,
       scenePrefixPreserved: true,
       retryThisInvocation: true,
-      noProgress: true,
-      correctionRetryNumber: 1,
-      authoringProgress: {
-        completedSceneCount: 8,
-        nextSceneNumber: 9,
-      },
+      authoringProgress: { completedSceneCount: 8, nextSceneNumber: 9 },
     });
-    expect(result.validation.issues.join(" ")).toContain("changes locked characterVisuals metadata");
+    expect(result.validation.issues.join(" ")).toContain(
+      "Scene 9 semantically repeats the narration/action beat from Scene 1",
+    );
     expect(fixture.getCurrentDraft().scriptJson.scenes).toEqual(firstScenes);
   });
 
@@ -1371,7 +1654,7 @@ describe("scriptRefinementTool", () => {
       .toBe(EPISODE_SCRIPT_CHUNK_PROTOCOL);
     expect(repeated).toMatchObject({
       status: "script_chunk_already_present",
-      retryThisInvocation: false,
+      retryThisInvocation: true,
       draftRevision: 5,
     });
   });
@@ -1421,18 +1704,18 @@ describe("scriptRefinementTool", () => {
 
     expect(appendResult).toMatchObject({
       status: "script_chunk_restart_required",
-      persisted: false,
-      retryThisInvocation: false,
-      draftRevision: 4,
+      persisted: true,
+      retryThisInvocation: true,
+      draftRevision: 5,
       restartPlan: { nextSceneNumber: 1, nextSceneEnd: 8 },
     });
     expect(appendResult.validation.issues.join(" ")).toContain("collective or generic cast alias");
-    expect(fixture.reviseEpisodeScriptDraft).not.toHaveBeenCalled();
+    expect(fixture.reviseEpisodeScriptDraft).toHaveBeenCalledTimes(1);
 
     const restartResult = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "restart",
       episodeId: 17,
-      expectedDraftRevision: 4,
+      expectedDraftRevision: appendResult.draftRevision,
       targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
       authoringPlan: plan,
       scenes: chunkScenes(1, 8),
@@ -1440,7 +1723,7 @@ describe("scriptRefinementTool", () => {
     expect(restartResult).toMatchObject({
       status: "script_chunk_appended",
       persisted: true,
-      draftRevision: 5,
+      draftRevision: 6,
       authoringProgress: { completedSceneCount: 8, nextSceneNumber: 9 },
     });
   });
@@ -1706,6 +1989,8 @@ describe("scriptRefinementTool", () => {
       status: "ready",
       persisted: true,
       episodeId: 17,
+      seriesId: 7,
+      episodeNumber: 3,
       draftRevision: 3,
       sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
       narrationRepairCallCount: 0,
