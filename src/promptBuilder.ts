@@ -4,16 +4,16 @@
  * Every video-scene prompt is assembled in Agnes Video 2.5's recommended
  * semantic order. Character
  * portraits are the only generated images; scene prompts feed Agnes directly.
- *   1. SUBJECT AND SETTING — locked character descriptions and environment.
+ *   1. SUBJECT AND SETTING — exact character names and environment.
  *   2. ACTION AND CHANGE — one visible story beat and physical movement.
  *   3. CAMERA — authored motion/viewpoint plus cast-compatible framing.
  *   4. VISUAL STYLE — rendering, lighting, color, material, and atmosphere.
  *   5. SOUND AND RHYTHM — visual-only pacing; provider audio is discarded.
  *   6. CONSISTENCY — identity, continuity, anatomy, and temporal negatives.
  *
- * Character portraits still use their own builder but share the same
- * STYLE_BIBLE and CONSISTENCY_BLOCK so sheets and scenes look like they
- * belong to the same show.
+ * Character portraits still use their own builder. Agnes receives those
+ * portraits as ordered image references, so scene prompts intentionally do
+ * not repeat a text character sheet or try to re-describe the portrait.
  */
 import type { CharacterDef } from "./state/seriesState.js";
 export interface StylizedImageSpec {
@@ -36,8 +36,8 @@ export interface StylizedImageSpec {
 const STYLE_BIBLE =
   "SERIES LOOK LOCK: modern 2D hand-painted children's storybook animation; matte painted surfaces, " +
   "soft brush texture, clean rounded shapes, simple facial planes, large expressive eyes, readable silhouettes, " +
-  "child-friendly proportions, and vibrant naturally saturated colors. Use the same linework, two-tone painterly " +
-  "shading, texture density, color grade, and character proportions in every scene. 16:9 landscape.";
+  "child-friendly proportions, and vibrant natural colors. Lock linework, two-tone painterly shading, texture density, " +
+  "color grade, and proportions across scenes. 16:9 landscape.";
 
 /** Character/color lock belongs in Agnes's final consistency section. */
 const CHARACTER_APPEARANCE_BIBLE =
@@ -47,8 +47,9 @@ const CHARACTER_APPEARANCE_BIBLE =
 
 /** Locked rendering — prevents Pixar / CGI drift. */
 const RENDERING_BIBLE =
-  "2D PAINTERLY RENDERING ONLY. Never switch to 3D, CGI, plastic volumetric rendering, photorealism, anime, " +
-  "cel-shaded vector art, or another illustration medium.";
+  "2D PAINTERLY RENDERING ONLY: one full-screen animated story world. No 3D, CGI, plastic volumetrics, " +
+  "photorealism, anime, cel-shaded vector art, or other medium; no live-action or photoreal presenter, host, narrator, " +
+  "spokesperson, talking head, studio person, picture-in-picture, overlay, cutaway, or reaction.";
 
 /** Video-only defects which static-image negative prompts cannot cover. */
 export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
@@ -68,10 +69,10 @@ export const CHARACTER_INTEGRITY_NEGATIVE_BIBLE =
 
 /** Negative prompt — critical constraints, stated once, at the end. */
 const NEGATIVE_BIBLE =
-  "NEGATIVE: no text, captions, logos, watermarks, panels, split-screen, collage, mirrors, character-shaped " +
-  "reflections, portraits, statues, screens, silhouettes, crowds, bystanders, unlisted figures, gender or age changes, " +
-  "wrong anatomy, fused bodies, missing body parts, unlisted wardrobe/accessories/markings, chimera traits, or cropped " +
-  `identity-defining features. ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
+  "NEGATIVE: no text/captions/logos/watermarks; panels/split-screen/collage; mirrors/reflections; portraits/statues/screens; " +
+  "silhouettes/crowds/bystanders/unlisted figures; no gender/age change, wrong anatomy, fused/missing parts, unlisted " +
+  "wardrobe/accessories/markings, chimera traits, or cropped identity features; no live-action/photoreal presenter, host, " +
+  `narrator, spokesperson, talking head, insert, overlay, cutaway, or medium change. ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
 
 // ---------------------------------------------------------------------------
 // Camera presets — only 3 allowed, no freeform strings
@@ -198,25 +199,33 @@ export function buildStylizedImagePrompt(spec: StylizedImageSpec): string {
 }
 
 /**
- * Builds a prompt requesting a single full-body character portrait (no poses,
- * no collage/grid). Includes the character's complete persona and personality
- * from the story so the render reflects both appearance and character traits,
- * with a warm, colorful, storybook-illustration art direction that matches
- * CORE_STYLE exactly. The portrait is distilled into the locked visual
- * description reused by Agnes scene prompts, so it must not introduce style
- * language that those prompts do not share.
+ * Builds the one reusable, single-figure portrait sent to AnyAPI and later to
+ * Agnes as a public image reference. The fixed visual/anatomy constraints stay
+ * intact while the roster description is boundary-trimmed when necessary so
+ * the complete request never exceeds AnyAPI's 1,000-character prompt limit.
  */
 export function buildCharacterPortraitPrompt(params: { characterDescription: string }): string {
-  return [
-    `professional full-body character portrait of ${params.characterDescription}`,
-    "the portrait must reflect the character's complete persona and personality from the story through pose, expression, and body language",
-    "big expressive warm eyes, joyful and friendly emotion, energetic but calm body language",
-    "bright cheerful saturated color palette, high color contrast for readability",
-    "soft high-key lighting, clean plain white or soft pastel gradient background, no harsh shadows",
-    CORE_STYLE,
-    "single full-body character portrait, one character only, centered, no text labels, no annotations, no extra objects, no collage, no grid, no multiple poses",
-    CONSISTENCY_BLOCK,
-  ].join(", ");
+  const prefix = "Create one centered, head-to-toe character reference illustration of: ";
+  const suffix = [
+    "Premium modern 2D hand-painted children's storybook animation",
+    "matte soft-brush texture, clean rounded shapes, expressive eyes, readable silhouette, child-friendly proportions, vibrant natural colors, two-tone painterly shading",
+    "preserve the stated age, species, face, hair or fur, body proportions, colors, markings, clothing, accessories, personality and expression",
+    "relaxed three-quarter pose, soft high-key studio light, plain light pastel background",
+    "exactly one complete figure and one pose",
+    "no duplicate or clone, extra, missing, or fused limbs, appendages, heads, or faces",
+    "no redesign, age, gender, or species change; no extra props, scenery, text, labels, logos, watermarks, collage, or grid",
+    "2D only; no photorealism, live action, 3D, CGI, anime, vector art, or cel shading",
+  ].join("; ");
+  const normalizedDescription = params.characterDescription.replace(/\s+/gu, " ").trim();
+  const descriptionBudget = Math.max(1, 1_000 - prefix.length - suffix.length - 2);
+  let description = normalizedDescription.slice(0, descriptionBudget);
+  if (description.length < normalizedDescription.length) {
+    const lastBoundary = description.lastIndexOf(" ");
+    if (lastBoundary > Math.floor(descriptionBudget * 0.75)) {
+      description = description.slice(0, lastBoundary);
+    }
+  }
+  return `${prefix}${description}. ${suffix}`;
 }
 
 /**
@@ -380,7 +389,9 @@ function buildExactCastLedger(
 
   return (
     `VISIBLE CAST — EXACTLY ${names.length} ${names.length === 1 ? "FIGURE" : "FIGURES"}, NO OTHERS: ` +
-    `${names.map((name) => `[${name}] × 1`).join("; ")}. This ledger is authoritative for the complete shot.`
+    `${names.map((name) => `[${name}] × 1`).join("; ")}. Each listed identity appears once; every unlisted adult/child, ` +
+    "animal, creature, living object, presenter/host, foreground/background figure, lookalike, substitute, or species " +
+    "appears zero times."
   );
 }
 
@@ -416,7 +427,7 @@ function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number)
       ? "medium"
       : requestedPreset;
   const castFraming = totalFigureCount > 0
-    ? `Keep all ${totalFigureCount} ledger figures readable and spatially distinct without reflections, repeated foreground faces, or over-the-shoulder body doubles.`
+    ? `Keep all ${totalFigureCount} figures readable and separate; no reflections, repeated faces, or body doubles.`
     : "Keep the environment empty of figures.";
 
   return `CAMERA — ${CAMERA_PRESETS[effectivePreset]}; ${resolveCameraViewpoint(authoredIntent)}; ` +
@@ -430,8 +441,8 @@ function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number)
  * scenes even though they are placed in the semantic section where Agnes is
  * expected to use them.
  *
- * Character descriptions passed here should be the locked "character bible"
- * entries stored as `generationPrompt` in the database. Supporting entities
+ * Main-character appearance comes exclusively from ordered portrait image
+ * references. The prompt contains exact roster names only. Supporting entities
  * are optional recurring secondary figures for this episode only, repeated
  * verbatim across relevant scenes so video generation keeps them
  * visually stable without changing the main-character pipeline. Continuity
@@ -442,7 +453,8 @@ function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number)
 export function buildStylizedScenePrompt(params: {
   characterNames?: string[];
   characterVisuals?: SceneCharacterVisual[];
-  characterDescriptions: string[];
+  /** Legacy compatibility only; ignored when exact characterNames are supplied. */
+  characterDescriptions?: string[];
   environmentDescription: string;
   action: string;
   narrationText: string;
@@ -463,12 +475,17 @@ export function buildStylizedScenePrompt(params: {
     .map((entity) => entity.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  if (params.characterDescriptions.length !== (params.characterNames?.length ?? params.characterDescriptions.length)) {
-    throw new Error("Scene characterNames and characterDescriptions must align 1:1.");
+  const exactNames = (params.characterNames ?? [])
+    .map((name) => name.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  // A few non-production callers predate characterNames. Preserve only their
+  // anonymous cardinality; never leak their old appearance prose to Agnes.
+  const normalizedCharacterNames = exactNames.length > 0
+    ? exactNames
+    : (params.characterDescriptions ?? []).map((_, index) => `Character ${index + 1}`);
+  if (normalizedCharacterNames.length > 5) {
+    throw new Error("Agnes accepts at most five main-character portrait references per scene.");
   }
-  const normalizedCharacterNames = params.characterDescriptions.map((_, index) => (
-    params.characterNames?.[index]?.replace(/\s+/g, " ").trim() || `Character ${index + 1}`
-  ));
   if (new Set(normalizedCharacterNames.map((name) => name.toLocaleLowerCase())).size !== normalizedCharacterNames.length) {
     throw new Error("Scene visible cast must contain each main character exactly once.");
   }
@@ -478,25 +495,17 @@ export function buildStylizedScenePrompt(params: {
     throw new Error("Scene visible cast must contain each main or supporting figure exactly once.");
   }
 
-  // SUBJECT — preserve each locked identity entry verbatim apart from whitespace.
-  // These entries may contain exact age and portrait-derived traits and must not
-  // be summarized again at the provider boundary.
-  const characters = params.characterDescriptions
-    .map((description, index) => {
-      const compactDescription = description.replace(/\s+/g, " ").trim();
-      return `[${normalizedCharacterNames[index]}]: ${compactDescription}`;
-    })
-    .join(" | ");
-  const charCount = params.characterDescriptions.length;
+  const charCount = normalizedCharacterNames.length;
   const supportingCount = normalizedSupportingEntities.length;
   const totalFigureCount = charCount + supportingCount;
   const castLedger = buildExactCastLedger(
-    params.characterNames,
+    normalizedCharacterNames,
     charCount,
     normalizedSupportingEntities,
   );
   const charLayer = charCount > 0
-    ? `IDENTITY REFERENCES — ${characters}`
+    ? `REFERENCE-CONDITIONED MAIN CAST — ${normalizedCharacterNames.map((name) => `[${name}]`).join("; ")}. ` +
+      "Use each matching supplied portrait as the sole appearance authority; do not invent or infer a second design from text."
     : supportingCount > 0
       ? "MAIN-CAST EXCLUSION — no main-series character is visible; only the supporting figures in the ledger appear."
       : "EMPTY-SCENE LOCK — exactly zero people, animals, creatures, living objects, silhouettes, or other figures.";
@@ -511,8 +520,8 @@ export function buildStylizedScenePrompt(params: {
 
   const figureCountLayer = totalFigureCount > 0
     ? `COUNT AND TRAJECTORY LOCK — keep those same ${totalFigureCount} ledger ${totalFigureCount === 1 ? "identity" : "identities"} ` +
-      "from first frame to last, each on one continuous trajectory with species-correct anatomy. No identity splits, forks, " +
-      "re-enters, appears in two depth planes, or gains a second copy after movement, occlusion, or portal crossing."
+      "throughout, one continuous path each with species-correct anatomy. Never split, fork, duplicate across depth, " +
+      "re-enter, or copy after movement, occlusion, or portals."
     : "";
 
   // CONSISTENCY — episode-local recurring props/setup continuity.
@@ -524,9 +533,6 @@ export function buildStylizedScenePrompt(params: {
   const continuityLayer = continuityAnchors
     ? `INANIMATE CONTINUITY — ${continuityAnchors}. These anchors never authorize another figure.`
     : "";
-
-  const creatureIdentityLayer = buildCreatureIdentityGuard(params.characterVisuals);
-  const objectCharacterInstanceLayer = buildObjectCharacterInstanceLock(params.characterVisuals);
 
   // ACTION is the only dynamic instruction. DETAILS supplies blocking and the
   // desired end-state, so legacy prose cannot accidentally introduce a second
@@ -551,8 +557,8 @@ export function buildStylizedScenePrompt(params: {
   const action = params.action.replace(/\s+/g, " ").trim();
   const actionLayer = `ACTION AND CHANGE — ONE CONTINUOUS BEAT: ${action}. ` +
     (blockingParts.length > 0 ? `STATIC BLOCKING AND END-STATE REFERENCE: ${blockingParts.join(". ")}. ` : "") +
-    "Animate only the movement explicitly stated in the continuous beat. Every other ledger figure keeps its assigned " +
-    "position with a subtle natural reaction. No extra entrance, exit, replay, cut, montage, or time jump.";
+    "Animate only that movement; others stay assigned with subtle reactions. No extra entrance, exit, " +
+    "replay, cut, montage, or time jump.";
 
   // CONSISTENCY — static and temporal exclusions, stated once at the end.
   const negativeLayer = totalFigureCount === 0
@@ -571,18 +577,16 @@ export function buildStylizedScenePrompt(params: {
   const visualStyleLayer = [
     "VISUAL STYLE —",
     STYLE_BIBLE,
-    `LIGHTING PROFILE (${lightingProfile.toUpperCase()}) — ${LIGHTING_PROFILES[lightingProfile]}. Keep this profile, exposure, and color grade unchanged for the full shot.`,
+    `LIGHTING PROFILE (${lightingProfile.toUpperCase()}) — ${LIGHTING_PROFILES[lightingProfile]}. Lock profile, exposure, and grade throughout.`,
     RENDERING_BIBLE,
   ].filter(Boolean).join(" ");
   const soundAndRhythmLayer =
-    "SOUND AND RHYTHM — silent visual-only shot; gentle readable pacing; no speech, music, or sound effects.";
+    "SOUND AND RHYTHM — silent visual; gentle readable pacing; no speech, music, or effects.";
   const consistencyLayer = [
     "CONSISTENCY REQUIREMENTS —",
     totalFigureCount > 0 ? CHARACTER_APPEARANCE_BIBLE : "",
     figureCountLayer,
     continuityLayer,
-    creatureIdentityLayer,
-    objectCharacterInstanceLayer,
     TEMPORAL_STABILITY_NEGATIVE_BIBLE,
     negativeLayer,
   ].filter(Boolean).join(" ");
@@ -716,26 +720,16 @@ const TITLE_CARD_NEGATIVE_BIBLE =
   "changes, malformed anatomy, unlisted wardrobe, or unlisted accessories. " +
   CHARACTER_INTEGRITY_NEGATIVE_BIBLE;
 
-function lockedSeriesCharacterText(params: {
+function lockedSeriesCharacterName(params: {
   characters?: CharacterDef[];
   characterDescriptions?: string[];
   characterNames?: string[];
-}): { name: string; appearance: string } {
+}): string {
   if (params.characters && params.characters.length > 0) {
-    const character = params.characters[0]!;
-    return {
-      name: character.name.replace(/\s+/g, " ").trim(),
-      appearance: character.description.replace(/\s+/g, " ").trim(),
-    };
+    return params.characters[0]!.name.replace(/\s+/g, " ").trim();
   }
-  const descriptions = params.characterDescriptions ?? [];
-  const description = descriptions[0];
-  if (!description) return { name: "Main character", appearance: "one friendly preschool protagonist" };
   const name = params.characterNames?.[0]?.replace(/\s+/g, " ").trim();
-  return {
-    name: name || "Main character",
-    appearance: description.replace(/\s+/g, " ").trim(),
-  };
+  return name || "Main character";
 }
 
 /**
@@ -755,12 +749,12 @@ export function buildSeriesKeyArtVideoPrompt(params: {
   const title = params.conceptName.replace(/\s+/g, " ").trim();
   const environment = params.environmentDescription?.replace(/\s+/g, " ").trim()
     || "A warm, uncluttered storybook setting with cheerful colors and generous open space";
-  const characters = lockedSeriesCharacterText(params);
+  const characterName = lockedSeriesCharacterName(params);
   return [
     `SUBJECT AND SETTING — A full-bleed animated children's series title card in this figure-free location: ${environment}.`,
     `Render the exact title ${JSON.stringify(title)} once in large, playful, clearly readable lettering at the upper center.`,
-    `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${characters.name}] × 1.`,
-    `REQUIRED FOREGROUND PROTAGONIST — show that one ${characters.name}, fully visible and prominent: [${characters.name} appearance]: ${characters.appearance}.`,
+    `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${characterName}] × 1.`,
+    `REQUIRED FOREGROUND PROTAGONIST — show that one ${characterName}, fully visible and prominent. Its supplied portrait is the sole appearance authority.`,
     "The title words are typography only and never authorize another person, creature, living object, or depiction.",
     "ACTION AND CHANGE — ONE CONTINUOUS BEAT: gentle breathing, one blink, and one small friendly gesture by the protagonist; subtle environmental motion only. Keep title and layout unchanged; no entrance, exit, plot beat, replay, cut, montage, or time jump.",
     "CAMERA — medium-wide eye-level 16:9 shot; protagonist centered in the lower half; environment readable; open title space above; one slow straight push-in; no other camera move.",
@@ -776,7 +770,8 @@ export function buildEpisodeKeyArtVideoPrompt(params: {
   episodeTitle: string;
   episodePremise: string;
   environmentDescription?: string;
-  mainCharacterDescription: string;
+  /** Legacy compatibility only; portrait image reference is authoritative. */
+  mainCharacterDescription?: string;
   mainCharacterName?: string;
   otherCharacters?: Array<{ name: string; description: string }>;
   supportingEntities?: string[];
@@ -786,13 +781,12 @@ export function buildEpisodeKeyArtVideoPrompt(params: {
   const environment = params.environmentDescription?.replace(/\s+/g, " ").trim()
     || "A warm, uncluttered storybook setting with cheerful colors and generous open space";
   const protagonistName = params.mainCharacterName?.replace(/\s+/g, " ").trim() || "Main character";
-  const protagonist = `[${protagonistName} appearance]: ${params.mainCharacterDescription.replace(/\s+/g, " ").trim()}`;
   return [
     `SUBJECT AND SETTING — A full-bleed animated children's episode title card in this figure-free location: ${environment}.`,
     `Render the exact episode title ${JSON.stringify(episodeTitle)} once in large, playful, clearly readable lettering at the upper center.`,
     `SERIES CONTEXT: ${JSON.stringify(seriesTitle)}.`,
     `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${protagonistName}] × 1.`,
-    `REQUIRED FOREGROUND PROTAGONIST — show that one ${protagonistName}, fully visible and prominent: ${protagonist}.`,
+    `REQUIRED FOREGROUND PROTAGONIST — show that one ${protagonistName}, fully visible and prominent. Its supplied portrait is the sole appearance authority.`,
     "The series and episode title words are typography only and never authorize another person, creature, living object, or depiction.",
     "ACTION AND CHANGE — ONE CONTINUOUS BEAT: hold one readable premise-related pose with gentle breathing, one blink, and one small friendly gesture; subtle environmental motion only. Keep title and layout unchanged; no extra plot beat, replay, cut, montage, or time jump.",
     "CAMERA — medium-wide eye-level 16:9 title-card shot; protagonist centered in the lower half; setting readable; open title space above; one slow straight push-in; no other camera move.",

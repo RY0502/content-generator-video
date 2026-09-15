@@ -204,6 +204,138 @@ describe("sceneCastCanonicalizer", () => {
     );
   });
 
+  it("promotes one safe roster short alias out of supportingEntities without changing cast size", () => {
+    const input = baseScene({
+      action: "Mia steadies Bobo as its yellow straps begin to glow.",
+      supportingEntities: [
+        "Bobo: playful magical living backpack with button eyes and yellow straps",
+      ],
+      sceneDetails: "Mia stands left while Bobo waits on the right.",
+    });
+
+    const first = canonicalizeSceneCast(input, {
+      mainCharacterNames: ["Mia", "Bobo the Backpack"],
+      supportingEntityBible: [
+        "Bobo: playful magical living backpack with button eyes and yellow straps",
+      ],
+    });
+    const second = canonicalizeSceneCast(first.scene, {
+      mainCharacterNames: ["Mia", "Bobo the Backpack"],
+    });
+
+    expect(first.scene.characterNames).toEqual(["Mia", "Bobo the Backpack"]);
+    expect(first.scene.characterVisuals).toEqual([
+      MIA_VISUAL,
+      {
+        name: "Bobo the Backpack",
+        visualForm: "object_character",
+        speciesOrType: "backpack",
+        humanoidAllowed: false,
+      },
+    ]);
+    expect(first.scene.supportingEntities).toEqual([]);
+    expect(first.scene.action).toBe(
+      "Mia steadies Bobo the Backpack as its yellow straps begin to glow.",
+    );
+    expect(first.scene.sceneDetails).toBe(
+      "Mia stands left while Bobo the Backpack waits on the right.",
+    );
+    expect(first.exactCastNames).toEqual(["Mia", "Bobo the Backpack"]);
+    expect(first.audit.applied).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "canonical_main_character_alias",
+        field: "supportingEntities",
+        alias: "Bobo",
+        name: "Bobo the Backpack",
+      }),
+      expect.objectContaining({
+        kind: "inferred_object_character_visual",
+        name: "Bobo the Backpack",
+      }),
+    ]));
+    expect(second.scene).toEqual(first.scene);
+    expect(second.changed).toBe(false);
+  });
+
+  it("removes a supporting alias duplicate when the exact roster character is already declared", () => {
+    const fullBoboVisual = {
+      ...BOBO_VISUAL,
+      name: "Bobo the Backpack",
+      speciesOrType: "backpack",
+    };
+    const result = canonicalizeSceneCast(baseScene({
+      action: "Mia and Bobo the Backpack face the stream.",
+      characterNames: ["Mia", "Bobo the Backpack"],
+      characterVisuals: [MIA_VISUAL, fullBoboVisual],
+      supportingEntities: ["Bobo: blue living backpack with yellow straps"],
+      sceneDetails: "Mia stands left of Bobo the Backpack.",
+    }), {
+      mainCharacterNames: ["Mia", "Bobo the Backpack"],
+    });
+
+    expect(result.scene.characterNames).toEqual(["Mia", "Bobo the Backpack"]);
+    expect(result.scene.supportingEntities).toEqual([]);
+    expect(result.exactCastNames).toEqual(["Mia", "Bobo the Backpack"]);
+  });
+
+  it("rewrites a safe short alias in staging text when the cast already uses the exact roster name", () => {
+    const result = canonicalizeSceneCast(baseScene({
+      action: "Mia steadies Bobo beside the stream.",
+      characterNames: ["Mia", "Bobo the Backpack"],
+      characterVisuals: [
+        MIA_VISUAL,
+        {
+          ...BOBO_VISUAL,
+          name: "Bobo the Backpack",
+          speciesOrType: "backpack",
+        },
+      ],
+      sceneDetails: "Mia stands left while Bobo waits on the right.",
+    }), {
+      mainCharacterNames: ["Mia", "Bobo the Backpack"],
+    });
+
+    expect(result.scene.action).toBe(
+      "Mia steadies Bobo the Backpack beside the stream.",
+    );
+    expect(result.scene.sceneDetails).toBe(
+      "Mia stands left while Bobo the Backpack waits on the right.",
+    );
+  });
+
+  it("fails closed when one short alias could name multiple roster object characters", () => {
+    const input = baseScene({
+      action: "Mia steadies Bobo beside the stream.",
+      supportingEntities: ["Bobo: one bright living bag"],
+      sceneDetails: "Mia stands left while Bobo waits on the right.",
+    });
+    const result = canonicalizeSceneCast(input, {
+      mainCharacterNames: ["Mia", "Bobo the Backpack", "Bobo the Satchel"],
+    });
+
+    expect(result.scene.characterNames).toEqual(["Mia"]);
+    expect(result.scene.supportingEntities).toEqual(input.supportingEntities);
+    expect(result.audit.unresolved).toContainEqual({
+      kind: "ambiguous_main_character_alias",
+      field: "supportingEntities",
+      alias: "Bobo",
+      candidates: ["Bobo the Backpack", "Bobo the Satchel"],
+      index: 0,
+    });
+    expect(result.audit.unresolved).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "ambiguous_main_character_alias",
+        field: "action",
+        alias: "Bobo",
+      }),
+      expect.objectContaining({
+        kind: "ambiguous_main_character_alias",
+        field: "sceneDetails",
+        alias: "Bobo",
+      }),
+    ]));
+  });
+
   it("masks a declared long name before looking for a shorter legacy identity", () => {
     expect(findMentionedUnlistedFigureNames(
       "Mia waves while Bobo the Backpack nudges snow.",

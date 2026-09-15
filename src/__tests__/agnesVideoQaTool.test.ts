@@ -3,8 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONFIG } from "../config.js";
+import { createAgnesVideoRequestDigest } from "../tools/agnesSceneVideoTool.js";
+import {
+  buildAgnesVideoQaTool,
+  parseAgnesPromptReferenceMap,
+  type AgnesStaticMediaProbe,
+} from "../tools/agnesVideoQaTool.js";
 import type { AgnesSceneGenerationRow } from "../state/seriesState.js";
-import { buildAgnesVideoQaTool } from "../tools/agnesVideoQaTool.js";
 
 const originalOutputDir = CONFIG.outputDir;
 
@@ -12,26 +17,58 @@ afterEach(() => {
   (CONFIG as { outputDir: string }).outputDir = originalOutputDir;
 });
 
-function row(sceneNumber: number, videoPath: string): AgnesSceneGenerationRow {
+const portraitUrl = "https://project.supabase.co/storage/v1/object/public/characters/series_7/characters/mia.png";
+
+function keyPrompt(label: string): string {
+  return `${label}. EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [Mia] × 1. ` +
+    "REFERENCE IMAGE IDENTITY MAP — <Picture 1> is mia.png, the approved portrait of Mia. " +
+    "Treat each portrait as the authoritative identity and art-style reference.";
+}
+
+function scenePrompt(): string {
+  return "SETTING — A painted attic. VISIBLE CAST — EXACTLY 1 FIGURE, NO OTHERS: [Mia] × 1. " +
+    "Each listed identity appears once; every unlisted figure appears zero times. " +
+    "REFERENCE IMAGE IDENTITY MAP — <Picture 1> is mia.png, the approved portrait of Mia. " +
+    "Treat each portrait as the authoritative identity and art-style reference.";
+}
+
+function row(params: {
+  sceneNumber: number;
+  videoPath: string;
+  prompt: string;
+  publicReferenceUrl?: string | null;
+}): AgnesSceneGenerationRow {
+  const seed = 12_345 + params.sceneNumber;
+  const publicReferenceUrl = params.publicReferenceUrl === undefined
+    ? JSON.stringify([portraitUrl])
+    : params.publicReferenceUrl;
+  const urls = publicReferenceUrl ? JSON.parse(publicReferenceUrl) as string[] : [];
   return {
-    id: sceneNumber + 10,
+    id: params.sceneNumber + 10,
     seriesId: 7,
     episodeNumber: 2,
-    sceneNumber,
+    sceneNumber: params.sceneNumber,
     variant: "text",
     status: "completed",
-    prompt: `Prompt for ${sceneNumber}`,
-    requestDigest: `${Math.abs(sceneNumber) + 1}`.padStart(64, "0"),
+    prompt: params.prompt,
+    requestDigest: createAgnesVideoRequestDigest({
+      prompt: params.prompt,
+      providerSeconds: 6,
+      seed,
+      duration: 6,
+      mode: urls.length > 0 ? "reference" : "text",
+      referenceImageUrls: urls,
+    }),
     attemptCount: 1,
-    seed: 1234 + sceneNumber,
+    seed,
     requestedDurationSeconds: 6,
     providerDurationSeconds: 6,
-    publicReferenceUrl: null,
-    providerTaskId: `task-${sceneNumber}`,
+    publicReferenceUrl,
+    providerTaskId: `task-${params.sceneNumber}`,
     providerReceipt: { accepted: true },
     providerVideoUrl: "https://provider.invalid/video.mp4",
     rawOutputPath: null,
-    normalizedOutputPath: videoPath,
+    normalizedOutputPath: params.videoPath,
     downloadStatus: "downloaded",
     renderRevision: 0,
     qaStatus: "pending",
@@ -50,232 +87,213 @@ function row(sceneNumber: number, videoPath: string): AgnesSceneGenerationRow {
   };
 }
 
-async function fixture() {
-  const outputDir = await mkdtemp(path.join(os.tmpdir(), "agnes-video-qa-tool-"));
+async function fixture(options: { duplicateSceneAndEpisodeKeyArt?: boolean } = {}) {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "agnes-static-video-qa-"));
   (CONFIG as { outputDir: string }).outputDir = outputDir;
-  const portraitPath = path.join(outputDir, "mia.png");
-  await writeFile(portraitPath, "portrait");
   const rows = new Map<number, AgnesSceneGenerationRow>();
-  for (const sceneNumber of [-2, -1, 1]) {
+  for (const [index, sceneNumber] of [-2, -1, 1].entries()) {
     const videoPath = path.join(outputDir, `${sceneNumber}.mp4`);
-    await writeFile(videoPath, `video-${sceneNumber}`);
-    rows.set(sceneNumber, row(sceneNumber, videoPath));
+    const byte = options.duplicateSceneAndEpisodeKeyArt && sceneNumber === 1 ? 2 : index + 1;
+    await writeFile(videoPath, Buffer.alloc(2_048, byte));
+    rows.set(sceneNumber, row({
+      sceneNumber,
+      videoPath,
+      prompt: sceneNumber === 1 ? scenePrompt() : keyPrompt(`Key ${sceneNumber}`),
+    }));
   }
   const state = {
     getSeriesInfo: vi.fn().mockResolvedValue({
       conceptName: "Pocket Stars",
-      episodeFormula: "Mia solves gentle mysteries.",
-      charactersJson: [{
-        name: "Mia",
-        description: "Mia is exactly a six-year-old girl with black pigtails and a yellow coat.",
-      }],
+      charactersJson: [{ name: "Mia", description: "A young explorer." }],
     }),
     getEpisodeByNumber: vi.fn().mockResolvedValue({
       title: "The Glowing Map",
       scriptJson: {
         scenes: [{
           sceneNumber: 1,
-          narrationText: "Mia carefully opens the glowing map and smiles.",
-          environmentDescription: "A warm painted attic with a round window.",
-          action: "Mia opens one folded map on the table.",
+          narrationText: "Mia opens the map.",
           characterNames: ["Mia"],
           supportingEntities: [],
-          sceneDetails: "Mia stands left of the table, with one map centered and the window behind her.",
-          cameraAngle: "medium fixed eye-level shot",
-          lighting: "warm amber interior light",
         }],
       },
     }),
-    listAgnesSceneGenerations: vi.fn(async () => [...rows.values()]),
     getSeriesCharacters: vi.fn(),
     getCharacterSheet: vi.fn().mockResolvedValue({
       approvedAt: "2026-09-01T00:00:00.000Z",
-      generationPrompt: "Exactly six-year-old girl; round face; black pigtails; yellow coat.",
-      referenceImagePaths: { portrait: { path: portraitPath } },
+      referenceImagePaths: { portrait: { path: "/tmp/mia.png", publicUrl: portraitUrl } },
     }),
-    getOrCreateSeriesAgnesSeed: vi.fn().mockResolvedValue(98765),
+    listAgnesSceneGenerations: vi.fn(async () => [...rows.values()]),
     recordAgnesVideoQaVerdict: vi.fn(async (input: any) => {
       const current = rows.get(input.sceneNumber)!;
-      if (
-        current.requestDigest !== input.expectedRequestDigest
+      if (current.requestDigest !== input.expectedRequestDigest
         || current.renderRevision !== input.expectedRenderRevision
         || current.normalizedOutputPath !== input.expectedNormalizedOutputPath
         || current.qaStatus !== input.expectedQaStatus
-        || current.qaRequestDigest !== input.expectedQaRequestDigest
-      ) return { recorded: false, row: current };
-      const updated: AgnesSceneGenerationRow = {
+        || current.qaRequestDigest !== input.expectedQaRequestDigest) {
+        return { recorded: false, row: current };
+      }
+      const updated = {
         ...current,
         qaStatus: input.status,
         qaRequestDigest: input.qaRequestDigest,
         qaVideoSha256: input.videoSha256,
         qaResult: input.result,
+        qaContactSheetPath: input.contactSheetPath,
         qaModel: input.model,
-      };
+        qaError: null,
+      } as AgnesSceneGenerationRow;
       rows.set(input.sceneNumber, updated);
       return { recorded: true, row: updated };
     }),
-    recordAgnesVideoQaError: vi.fn(async (input: any) => {
-      const current = rows.get(input.sceneNumber)!;
-      if (
-        current.requestDigest === input.expectedRequestDigest
-        && current.renderRevision === input.expectedRenderRevision
-        && current.normalizedOutputPath === input.expectedNormalizedOutputPath
-        && current.qaStatus === input.expectedQaStatus
-        && current.qaRequestDigest === input.expectedQaRequestDigest
-      ) rows.set(input.sceneNumber, { ...current, qaError: input.error });
-    }),
-    requeueAgnesSceneAfterQaFailure: vi.fn(async (input: any) => {
-      const current = rows.get(input.sceneNumber)!;
-      if (
-        current.requestDigest !== input.expectedRequestDigest
-        || current.renderRevision !== input.expectedRenderRevision
-        || current.normalizedOutputPath !== input.expectedNormalizedOutputPath
-        || current.qaStatus !== input.expectedQaStatus
-        || current.qaRequestDigest !== input.expectedQaRequestDigest
-      ) return { requeued: false, row: current };
-      const updated: AgnesSceneGenerationRow = {
-        ...current,
-        status: "pending",
-        downloadStatus: "pending",
-        normalizedOutputPath: null,
-        renderRevision: 1,
-        qaStatus: "awaiting_regeneration",
-        prompt: input.retryPrompt,
-        requestDigest: input.retryRequestDigest,
-        seed: input.retrySeed,
-      };
-      rows.set(input.sceneNumber, updated);
-      return { requeued: true, row: updated };
-    }),
+    recordAgnesVideoQaError: vi.fn(),
   };
-  const createReferenceBoard = vi.fn(async ({ outputPath }: { outputPath: string }) => {
-    await mkdir(path.dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, "reference-board");
-    return outputPath;
-  });
-  const createContactSheet = vi.fn(async ({ outputPath }: { outputPath: string }) => {
-    await mkdir(path.dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, "contact-sheet");
-    return outputPath;
-  });
-  return { state, rows, createReferenceBoard, createContactSheet };
+  const probeMedia = vi.fn(async (): Promise<AgnesStaticMediaProbe> => ({
+    durationSeconds: 6,
+    codecName: "h264",
+    width: 1_920,
+    height: 1_080,
+    videoStreamCount: 1,
+    audioStreamCount: 0,
+  }));
+  await mkdir(path.join(outputDir, "unused"), { recursive: true });
+  return { outputDir, rows, state, probeMedia };
 }
 
-function verdictFor(userText: string, failedScene?: number): string {
-  const sceneNumbers = [...userText.matchAll(/TARGET [^\n]+\(sceneNumber=(-?\d+)\)/gu)]
-    .map((match) => Number(match[1]));
-  return JSON.stringify({
-    assets: sceneNumbers.map((sceneNumber) => sceneNumber === failedScene
-      ? {
-          sceneNumber,
-          pass: false,
-          confidence: 0.98,
-          issues: [{
-            code: "duplicate_entity",
-            characterNames: ["Mia"],
-            frames: ["middle"],
-            description: "Two copies of Mia are visible.",
-          }],
-        }
-      : { sceneNumber, pass: true, confidence: 0.97, issues: [] }),
+describe("parseAgnesPromptReferenceMap", () => {
+  it("accepts a canonical filename before the exact approved-portrait name", () => {
+    expect(parseAgnesPromptReferenceMap(
+      "REFERENCE IMAGE IDENTITY MAP — <Picture 1> is bobo_the_backpack.png, the approved portrait of Bobo the Backpack. Treat each portrait as authoritative.",
+      ["Bobo the Backpack"],
+    )).toEqual({ names: ["Bobo the Backpack"] });
   });
-}
+});
 
-describe("qa_agnes_episode_videos", () => {
-  it("persists passes for both key arts and every scene before assembly", async () => {
-    const { state, createReferenceBoard, createContactSheet } = await fixture();
-    const analyze = vi.fn(async ({ userText }: { userText: string }) => verdictFor(userText));
-    const tool = buildAgnesVideoQaTool(state as any, {
-      analyze: analyze as any,
-      createReferenceBoard: createReferenceBoard as any,
-      createContactSheet: createContactSheet as any,
-      maxVisionCalls: 20,
-      preferredTargetsPerSheet: 3,
-    });
+describe("qa_agnes_episode_videos static audit", () => {
+  it("persists source-bound passes without making an analysis API call", async () => {
+    const { state, rows, probeMedia } = await fixture();
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
 
     const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
-    expect(result).toMatchObject({ status: "passed", assetCount: 3, passed: 3, apiCalls: 2 });
-    expect(analyze).toHaveBeenCalledTimes(2);
+
+    expect(result).toMatchObject({
+      status: "passed",
+      stopRun: false,
+      assetCount: 3,
+      passed: 3,
+      failed: 0,
+      persisted: 3,
+      apiCalls: 0,
+    });
     expect(state.recordAgnesVideoQaVerdict).toHaveBeenCalledTimes(3);
-    expect(state.requeueAgnesSceneAfterQaFailure).not.toHaveBeenCalled();
+    expect([...rows.values()].every((item) => item.qaStatus === "passed")).toBe(true);
+    expect([...rows.values()].every((item) => (
+      (item.qaResult as { pipeline?: string }).pipeline === "deterministic_static_media_integrity"
+    ))).toBe(true);
   });
 
-  it("archives and requeues only a failed asset with a new deterministic retry request", async () => {
-    const { state, rows, createReferenceBoard, createContactSheet } = await fixture();
-    const originalSeed = rows.get(1)!.seed;
-    const analyze = vi.fn(async ({ userText }: { userText: string }) => verdictFor(userText, 1));
-    const tool = buildAgnesVideoQaTool(state as any, {
-      analyze: analyze as any,
-      createReferenceBoard: createReferenceBoard as any,
-      createContactSheet: createContactSheet as any,
-      maxRegenerations: 1,
-    });
-
-    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
-    expect(result).toMatchObject({ status: "regeneration_required", requeued: 1, stopRun: true });
-    expect(state.requeueAgnesSceneAfterQaFailure).toHaveBeenCalledOnce();
-    const retry = state.requeueAgnesSceneAfterQaFailure.mock.calls[0]![0];
-    expect(retry.sceneNumber).toBe(1);
-    expect(retry.retryPrompt).toContain("Render each listed figure exactly once");
-    expect(retry.retrySeed).not.toBe(originalSeed);
-    expect(retry.retryRequestDigest).toMatch(/^[a-f0-9]{64}$/u);
-    expect(rows.get(1)).toMatchObject({
-      status: "pending",
-      renderRevision: 1,
-      qaStatus: "awaiting_regeneration",
-    });
-  });
-
-  it("does not let a later batch error regress an earlier verdict from the same batch", async () => {
-    const { state, rows, createReferenceBoard, createContactSheet } = await fixture();
-    const persistVerdict = state.recordAgnesVideoQaVerdict.getMockImplementation()!;
-    state.recordAgnesVideoQaVerdict
-      .mockImplementationOnce(persistVerdict)
-      .mockRejectedValueOnce(new Error("simulated second persistence failure"));
-    const analyze = vi.fn(async ({ userText }: { userText: string }) => verdictFor(userText));
-    const tool = buildAgnesVideoQaTool(state as any, {
-      analyze: analyze as any,
-      createReferenceBoard: createReferenceBoard as any,
-      createContactSheet: createContactSheet as any,
-    });
+  it("reuses every current static verdict on a rerun", async () => {
+    const { state, probeMedia } = await fixture();
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+    await (tool as any).call({ seriesId: 7, episodeNumber: 2 });
+    state.recordAgnesVideoQaVerdict.mockClear();
 
     const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
 
-    expect(result).toMatchObject({ status: "pending", stopRun: true });
-    expect(rows.get(-2)).toMatchObject({ qaStatus: "passed", qaError: null });
-    expect(rows.get(-1)).toMatchObject({ qaStatus: "pending", qaError: "simulated second persistence failure" });
-    expect(state.recordAgnesVideoQaError).toHaveBeenCalledTimes(2);
-    expect(state.recordAgnesVideoQaError.mock.calls[0]?.[0]).toMatchObject({
-      expectedQaStatus: "pending",
-      expectedQaRequestDigest: null,
-    });
-  });
-
-  it("keeps a low-confidence judgment pending instead of spending the Agnes rerender", async () => {
-    const { state, createReferenceBoard, createContactSheet } = await fixture();
-    const analyze = vi.fn(async ({ userText }: { userText: string }) => {
-      const sceneNumbers = [...userText.matchAll(/TARGET [^\n]+\(sceneNumber=(-?\d+)\)/gu)]
-        .map((match) => Number(match[1]));
-      return JSON.stringify({
-        assets: sceneNumbers.map((sceneNumber) => ({
-          sceneNumber,
-          pass: true,
-          confidence: 0.4,
-          issues: [],
-        })),
-      });
-    });
-    const tool = buildAgnesVideoQaTool(state as any, {
-      analyze: analyze as any,
-      createReferenceBoard: createReferenceBoard as any,
-      createContactSheet: createContactSheet as any,
-      minConfidence: 0.8,
-    });
-
-    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
-    expect(result).toMatchObject({ status: "pending", requeued: 0, stopRun: true });
-    expect(state.requeueAgnesSceneAfterQaFailure).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "passed", persisted: 0, reused: 3 });
     expect(state.recordAgnesVideoQaVerdict).not.toHaveBeenCalled();
-    expect(state.recordAgnesVideoQaError).toHaveBeenCalledTimes(3);
+  });
+
+  it("persists actionable failures for byte-identical episode assets and never requeues", async () => {
+    const { state, rows, probeMedia } = await fixture({ duplicateSceneAndEpisodeKeyArt: true });
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "failed", stopRun: true, failed: 2, apiCalls: 0 });
+    expect(result.failures.flatMap((failure: any) => failure.issues))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: "duplicate_video_file" })]));
+    expect(rows.get(-1)?.qaStatus).toBe("exhausted");
+    expect(rows.get(1)?.qaStatus).toBe("exhausted");
+    expect((state as any).requeueAgnesSceneAfterQaFailure).toBeUndefined();
+  });
+
+  it("reuses source-bound failed verdicts instead of repeating persistence on rerun", async () => {
+    const { state, probeMedia } = await fixture({ duplicateSceneAndEpisodeKeyArt: true });
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+    await (tool as any).call({ seriesId: 7, episodeNumber: 2 });
+    state.recordAgnesVideoQaVerdict.mockClear();
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "failed", persisted: 0, reused: 3, failed: 2 });
+    expect(state.recordAgnesVideoQaVerdict).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched visible-character references and prompt mappings", async () => {
+    const { state, rows, probeMedia } = await fixture();
+    const current = rows.get(1)!;
+    const wrongUrl = "https://project.supabase.co/storage/v1/object/public/characters/wrong.png";
+    const wrongPrompt = current.prompt.replace("approved portrait of Mia", "approved portrait of Unknown");
+    rows.set(1, {
+      ...current,
+      prompt: wrongPrompt,
+      publicReferenceUrl: JSON.stringify([wrongUrl]),
+      requestDigest: createAgnesVideoRequestDigest({
+        prompt: wrongPrompt,
+        providerSeconds: 6,
+        seed: current.seed!,
+        duration: 6,
+        mode: "reference",
+        referenceImageUrls: [wrongUrl],
+      }),
+    });
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    const issues = result.failures.flatMap((failure: any) => failure.issues);
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "reference_identity_map_valid" }),
+      expect.objectContaining({ code: "reference_identity_map_matches_visible_main_cast" }),
+      expect.objectContaining({ code: "reference_urls_match_approved_portraits" }),
+    ]));
+  });
+
+  it("rejects a visible cast member without an approved public portrait URL", async () => {
+    const { state, probeMedia } = await fixture();
+    state.getCharacterSheet.mockResolvedValue({
+      approvedAt: "2026-09-01T00:00:00.000Z",
+      referenceImagePaths: { portrait: { path: "/tmp/mia.png" } },
+    });
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "failed", failed: 3 });
+    expect(result.failures.flatMap((failure: any) => failure.issues))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "approved_public_portraits_present" }),
+      ]));
+  });
+
+  it("rejects clips with audio or a mismatched duration", async () => {
+    const { state, probeMedia } = await fixture();
+    probeMedia.mockResolvedValueOnce({
+      durationSeconds: 8,
+      codecName: "h264",
+      width: 1_920,
+      height: 1_080,
+      videoStreamCount: 1,
+      audioStreamCount: 1,
+    });
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    const issues = result.failures.flatMap((failure: any) => failure.issues);
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "video_contains_no_audio" }),
+      expect.objectContaining({ code: "normalized_duration_matches_audio" }),
+    ]));
   });
 });

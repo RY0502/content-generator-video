@@ -7,6 +7,7 @@ import {
 } from "@langchain/core/messages";
 import type { ClientTool, ServerTool } from "@langchain/core/tools";
 import { createMiddleware } from "langchain";
+import { NARRATION_MAX_SPOKEN_WORDS } from "./narrationContract.js";
 
 export const PRODUCTION_TOOL_PROTOCOL_MIDDLEWARE_NAME =
   "ProductionToolProtocolMiddleware";
@@ -30,11 +31,11 @@ const PROTOCOL_RETRY_INSTRUCTION =
 const NONTERMINAL_WORKFLOW_TOOLS = new Set([
   "get_or_create_series",
   "bulk_insert_episode_list",
-  "ensure_series_character_sheets",
-  "generate_character_sheet",
+  "ensure_series_character_portraits",
   "write_episode_script_chunk",
   "stage_episode_script_draft",
   "refine_episode_script",
+  "synthesize_episode_narration_audio",
 ]);
 
 const TERMINAL_EPISODE_AVAILABILITY_KINDS = new Set([
@@ -213,24 +214,53 @@ function bootstrapToolAfterReceipt(
     }
 
     if (
+      status === "script_chunk_replan_required"
+      && receipt.persisted === false
+      && draftRevision !== null
+    ) {
+      const minimumReplacementSpokenWords = positiveInteger(
+        receipt.minimumReplacementSpokenWords,
+      );
+      return minimumReplacementSpokenWords === null
+        ? null
+        : {
+            toolName: "write_episode_script_chunk",
+            expectedArgs: {
+              episodeId,
+              operation: "restart",
+              expectedDraftRevision: draftRevision,
+              minimumReplacementSpokenWords,
+            },
+          };
+    }
+
+    if (
       status === "script_chunk_restart_required"
       && receipt.persisted === true
       && draftRevision !== null
       && isRecord(receipt.restartPlan)
     ) {
       const targetSceneCount = positiveInteger(receipt.restartPlan.targetSceneCount);
+      const minimumReplacementSpokenWords = positiveInteger(
+        receipt.restartPlan.minimumReplacementSpokenWords,
+      );
       const authoringPlan = isRecord(receipt.restartPlan.authoringPlan)
         ? receipt.restartPlan.authoringPlan
         : null;
       if (targetSceneCount !== null && authoringPlan !== null) {
+        const planIsReachable = minimumReplacementSpokenWords === null
+          || targetSceneCount * NARRATION_MAX_SPOKEN_WORDS
+            >= minimumReplacementSpokenWords;
         return {
           toolName: "write_episode_script_chunk",
           expectedArgs: {
             episodeId,
             operation: "restart",
             expectedDraftRevision: draftRevision,
-            targetSceneCount,
-            authoringPlan,
+            ...(minimumReplacementSpokenWords === null
+              ? {}
+              : { minimumReplacementSpokenWords }),
+            ...(planIsReachable ? { targetSceneCount, authoringPlan } : {}),
           },
         };
       }
@@ -286,6 +316,9 @@ function bootstrapToolAfterReceipt(
       }
       if (operation === "start" || operation === "restart") {
         const targetSceneCount = positiveInteger(lastToolArgs?.targetSceneCount);
+        const minimumReplacementSpokenWords = positiveInteger(
+          lastToolArgs?.minimumReplacementSpokenWords,
+        );
         const authoringPlan = isRecord(lastToolArgs?.authoringPlan)
           ? lastToolArgs.authoringPlan
           : null;
@@ -305,6 +338,9 @@ function bootstrapToolAfterReceipt(
             operation,
             ...(operation === "restart" ? { expectedDraftRevision } : {}),
             targetSceneCount,
+            ...(operation !== "restart" || minimumReplacementSpokenWords === null
+              ? {}
+              : { minimumReplacementSpokenWords }),
             authoringPlan,
           },
         };
@@ -332,6 +368,9 @@ function bootstrapToolAfterReceipt(
       }
       if (operation === "start" || operation === "restart") {
         const targetSceneCount = positiveInteger(lastToolArgs?.targetSceneCount);
+        const minimumReplacementSpokenWords = positiveInteger(
+          lastToolArgs?.minimumReplacementSpokenWords,
+        );
         const authoringPlan = isRecord(lastToolArgs?.authoringPlan)
           ? lastToolArgs.authoringPlan
           : null;
@@ -351,6 +390,9 @@ function bootstrapToolAfterReceipt(
             operation,
             ...(operation === "restart" ? { expectedDraftRevision } : {}),
             targetSceneCount,
+            ...(operation !== "restart" || minimumReplacementSpokenWords === null
+              ? {}
+              : { minimumReplacementSpokenWords }),
             authoringPlan,
           },
         };
@@ -379,6 +421,48 @@ function bootstrapToolAfterReceipt(
       };
     }
     return null;
+  }
+
+  if (lastToolName === "synthesize_episode_narration_audio") {
+    if (status !== "repair_required" || receipt.readyForAgnes !== false) return null;
+    const episodeId = positiveInteger(receipt.episodeId);
+    const measuredNarrationSceneCount = positiveInteger(
+      receipt.measuredNarrationSceneCount,
+    );
+    const measuredTotalNarrationSeconds = receipt.measuredTotalNarrationSeconds;
+    const rawDurationEvidence = receipt.durationExceededScenes;
+    if (
+      episodeId === null
+      || measuredNarrationSceneCount === null
+      || typeof measuredTotalNarrationSeconds !== "number"
+      || !Number.isFinite(measuredTotalNarrationSeconds)
+      || measuredTotalNarrationSeconds <= 0
+      || !Array.isArray(rawDurationEvidence)
+      || rawDurationEvidence.length > 60
+    ) return null;
+    const durationExceededScenes = rawDurationEvidence.flatMap((entry) => {
+      if (!isRecord(entry)) return [];
+      const sceneNumber = positiveInteger(entry.sceneNumber);
+      const durationSeconds = entry.durationSeconds;
+      if (
+        sceneNumber === null
+        || typeof durationSeconds !== "number"
+        || !Number.isFinite(durationSeconds)
+        || durationSeconds <= 0
+        || durationSeconds > 300
+      ) return [];
+      return [{ sceneNumber, durationSeconds }];
+    });
+    if (durationExceededScenes.length !== rawDurationEvidence.length) return null;
+    return {
+      toolName: "refine_episode_script",
+      expectedArgs: {
+        episodeId,
+        durationExceededScenes,
+        measuredTotalNarrationSeconds,
+        measuredNarrationSceneCount,
+      },
+    };
   }
 
   if (lastToolName === "refine_episode_script") {
@@ -476,18 +560,48 @@ function bootstrapToolAfterReceipt(
     const authoringRequiredAction = typeof authoringProgress?.requiredAction === "string"
       ? authoringProgress.requiredAction
       : null;
+    const draftValidation = isRecord(scriptDraft?.validation)
+      ? scriptDraft.validation
+      : null;
+    const draftValidationRequiredAction = typeof draftValidation?.requiredAction === "string"
+      ? draftValidation.requiredAction
+      : null;
+    const durableTimingEvidence = isRecord(draftValidation?.durableTimingEvidence)
+      ? draftValidation.durableTimingEvidence
+      : null;
+    const minimumReplacementSpokenWords = positiveInteger(
+      durableTimingEvidence?.minimumReplacementSpokenWords,
+    );
 
     switch (resumeAction) {
       case "script_and_audio":
         return authoritativeSeriesId === null
           ? null
           : {
-              toolName: "ensure_series_character_sheets",
+              toolName: "ensure_series_character_portraits",
               expectedArgs: { seriesId: authoritativeSeriesId },
             };
       case "script_authoring":
+        if (draftValidationRequiredAction === "reauthor_complete_script") {
+          return episodeId === null || draftRevision === null
+            ? null
+            : {
+                toolName: "write_episode_script_chunk",
+                expectedArgs: {
+                  episodeId,
+                  operation: "restart",
+                  expectedDraftRevision: draftRevision,
+                  ...(minimumReplacementSpokenWords === null
+                    ? {}
+                    : { minimumReplacementSpokenWords }),
+                },
+              };
+        }
         if (authoringRequiredAction === "restart_script_authoring") {
           const targetSceneCount = positiveInteger(authoringProgress?.targetSceneCount);
+          const authoringMinimumSpokenWords = positiveInteger(
+            authoringProgress?.minimumSpokenWords,
+          );
           const authoringPlan = isRecord(authoringProgress?.authoringPlan)
             ? authoringProgress.authoringPlan
             : null;
@@ -502,8 +616,17 @@ function bootstrapToolAfterReceipt(
                   episodeId,
                   operation: "restart",
                   expectedDraftRevision: draftRevision,
-                  targetSceneCount,
-                  authoringPlan,
+                  ...(authoringMinimumSpokenWords === null
+                    ? {}
+                    : {
+                        minimumReplacementSpokenWords:
+                          authoringMinimumSpokenWords,
+                      }),
+                  ...(authoringMinimumSpokenWords !== null
+                    && targetSceneCount * NARRATION_MAX_SPOKEN_WORDS
+                      < authoringMinimumSpokenWords
+                    ? {}
+                    : { targetSceneCount, authoringPlan }),
                 },
               };
         }
@@ -671,7 +794,7 @@ function requiredProductionToolDecision(
     lastToolName === "get_next_episode"
     || NONTERMINAL_WORKFLOW_TOOLS.has(lastToolName)
   ) {
-    const bootstrapTransition = lastToolName === "ensure_series_character_sheets"
+    const bootstrapTransition = lastToolName === "ensure_series_character_portraits"
       ? toolAfterRosterPreflight(request.messages, lastToolMessageIndex)
       : bootstrapToolAfterReceipt(
           lastToolName,
@@ -773,12 +896,37 @@ function bindAuthoritativeToolCallArgs(
   const removedArgKeys: string[] = [];
   if (requiredToolName === "write_episode_script_chunk") {
     const incompatibleKeys = expectedArgs.operation === "append"
-      ? ["targetSceneCount", "authoringPlan"] as const
+      ? ["targetSceneCount", "minimumReplacementSpokenWords", "authoringPlan"] as const
       : expectedArgs.operation === "start"
-        ? ["expectedDraftRevision"] as const
+        ? ["expectedDraftRevision", "minimumReplacementSpokenWords"] as const
         : [];
     for (const key of incompatibleKeys) {
       if (key in normalizedArgs) {
+        delete normalizedArgs[key];
+        removedArgKeys.push(key);
+      }
+    }
+    if (
+      expectedArgs.operation === "restart"
+      && !Object.prototype.hasOwnProperty.call(
+        expectedArgs,
+        "minimumReplacementSpokenWords",
+      )
+      && "minimumReplacementSpokenWords" in normalizedArgs
+    ) {
+      delete normalizedArgs.minimumReplacementSpokenWords;
+      removedArgKeys.push("minimumReplacementSpokenWords");
+    }
+  }
+  if (
+    requiredToolName === "refine_episode_script"
+    && Object.prototype.hasOwnProperty.call(
+      expectedArgs,
+      "measuredTotalNarrationSeconds",
+    )
+  ) {
+    for (const key of Object.keys(normalizedArgs)) {
+      if (!Object.prototype.hasOwnProperty.call(expectedArgs, key)) {
         delete normalizedArgs[key];
         removedArgKeys.push(key);
       }

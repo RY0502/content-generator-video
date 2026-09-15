@@ -2,6 +2,7 @@ import {
   AIMessage,
   HumanMessage,
   SystemMessage,
+  ToolMessage,
 } from "@langchain/core/messages";
 import { classifyProviderError } from "freetier-deepagent-framework/dist/providers/errorClassifier.js";
 import type { ProviderName } from "freetier-deepagent-framework/dist/providers/providerManager.js";
@@ -12,7 +13,10 @@ import {
   ProductionModelProviderPoolExhaustedError,
   type ProductionProviderManager,
 } from "../services/productionModelCallFailoverMiddleware.js";
-import { ProductionToolCallProtocolError } from "../services/productionToolProtocolMiddleware.js";
+import {
+  createProductionToolProtocolMiddleware,
+  ProductionToolCallProtocolError,
+} from "../services/productionToolProtocolMiddleware.js";
 
 type Candidate = {
   provider: ProviderName;
@@ -75,6 +79,31 @@ function modelRequest(model: object) {
 
 function response(content = "ok") {
   return new AIMessage(content);
+}
+
+function lengthLimitedResponse() {
+  return new AIMessage({
+    content: "",
+    response_metadata: { finish_reason: "length" },
+    usage_metadata: {
+      input_tokens: 10_836,
+      output_tokens: 2_111,
+      total_tokens: 12_947,
+      output_token_details: { reasoning: 2_110 },
+    },
+  });
+}
+
+function toolCallResponse(name = "get_next_episode") {
+  return new AIMessage({
+    content: "",
+    tool_calls: [{
+      id: `${name}-call`,
+      name,
+      args: {},
+      type: "tool_call",
+    }],
+  });
 }
 
 async function invoke(
@@ -164,6 +193,304 @@ describe("production model-call failover middleware", () => {
       timeout: PRODUCTION_MODEL_CALL_TIMEOUT_MS,
       maxRetries: 0,
     });
+  });
+
+  it("switches candidates when a forced exact tool response exhausts its output on reasoning", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const expected = toolCallResponse();
+    const handler = vi.fn()
+      .mockResolvedValueOnce(lengthLimitedResponse())
+      .mockResolvedValueOnce(expected);
+    const request = modelRequest(primary);
+
+    expect(await invoke(
+      createProductionModelCallFailoverMiddleware({
+        providerManagerFactory: () => pool.manager,
+      }),
+      request,
+      handler,
+    )).toBe(expected);
+
+    expect(handler.mock.calls.map(([candidateRequest]) => candidateRequest.model)).toEqual([
+      primary,
+      fallback,
+    ]);
+    expect(handler.mock.calls[1]![0].toolChoice).toBe(request.toolChoice);
+    expect(pool.switchToNext).toHaveBeenCalledOnce();
+  });
+
+  it("does not rotate a length-limited response when tool choice is automatic", async () => {
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const expected = lengthLimitedResponse();
+    const handler = vi.fn().mockResolvedValue(expected);
+    const request = {
+      ...modelRequest(primary),
+      toolChoice: "auto" as const,
+    };
+
+    expect(await invoke(
+      createProductionModelCallFailoverMiddleware({
+        providerManagerFactory: () => pool.manager,
+      }),
+      request as unknown as ReturnType<typeof modelRequest>,
+      handler,
+    )).toBe(expected);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(pool.switchToNext).not.toHaveBeenCalled();
+  });
+
+  it("does not rotate a length-limited response that contains a parsed tool call", async () => {
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const expected = new AIMessage({
+      content: "",
+      response_metadata: { finish_reason: "length" },
+      tool_calls: [{
+        id: "get-next-call",
+        name: "get_next_episode",
+        args: {},
+        type: "tool_call",
+      }],
+    });
+    const handler = vi.fn().mockResolvedValue(expected);
+
+    expect(await invoke(
+      createProductionModelCallFailoverMiddleware({
+        providerManagerFactory: () => pool.manager,
+      }),
+      modelRequest(primary),
+      handler,
+    )).toBe(expected);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(pool.switchToNext).not.toHaveBeenCalled();
+  });
+
+  it("exhausts each candidate once when every forced response ends at length without a tool call", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const handler = vi.fn().mockImplementation(async () => lengthLimitedResponse());
+
+    let thrown: unknown;
+    try {
+      await invoke(
+        createProductionModelCallFailoverMiddleware({
+          providerManagerFactory: () => pool.manager,
+        }),
+        modelRequest(primary),
+        handler,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProductionModelProviderPoolExhaustedError);
+    expect((thrown as ProductionModelProviderPoolExhaustedError).attempts).toBe(2);
+    expect((thrown as Error).cause).toMatchObject({
+      name: expect.stringMatching(/Length|Truncat|Incomplete/u),
+    });
+    expect(handler.mock.calls.map(([candidateRequest]) => candidateRequest.model)).toEqual([
+      primary,
+      fallback,
+    ]);
+    expect(pool.switchToNext).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets the protocol guard accept a fallback forced tool call without a same-candidate correction retry", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const expected = toolCallResponse("get_or_create_series");
+    const baseHandler = vi.fn()
+      .mockResolvedValueOnce(lengthLimitedResponse())
+      .mockResolvedValueOnce(expected);
+    const failover = createProductionModelCallFailoverMiddleware({
+      providerManagerFactory: () => pool.manager,
+    });
+    const failoverHandler = vi.fn((candidateRequest) =>
+      failover.wrapModelCall!(candidateRequest as any, baseHandler as any)
+    );
+    const protocol = createProductionToolProtocolMiddleware();
+    const request = {
+      ...modelRequest(primary),
+      tools: [{ name: "get_or_create_series" }] as any[],
+      toolChoice: "auto" as const,
+    };
+
+    expect(await protocol.wrapModelCall!(
+      request as any,
+      failoverHandler as any,
+    )).toBe(expected);
+    expect(failoverHandler).toHaveBeenCalledOnce();
+    expect(baseHandler).toHaveBeenCalledTimes(2);
+    expect(baseHandler.mock.calls.map(([candidateRequest]) => candidateRequest.model)).toEqual([
+      primary,
+      fallback,
+    ]);
+  });
+
+  it("rotates a length-limited durable restart and preserves the exact restart contract", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const primary = { id: "primary" };
+    const fallback = { id: "fallback" };
+    const pool = fakeManager([
+      { provider: "nvidia", model: primary },
+      { provider: "anyapi", model: fallback },
+    ]);
+    const authoringPlan = {
+      storyArc: "The complete rescue is rewritten as a coherent visual journey.",
+      educationalIdea: "Careful observation helps friends solve problems.",
+      endingInsight: "Patient teamwork can guide everyone safely home.",
+      beats: [{
+        startScene: 1,
+        endScene: 50,
+        storyBeat: "The friends discover, investigate, and resolve the rescue.",
+        setting: "A bright valley beside the clubhouse.",
+        continuityOutcome: "Everyone returns safely with the clue preserved.",
+      }],
+      supportingEntityBible: [],
+      continuityBible: [],
+    };
+    const scenes = Array.from({ length: 8 }, (_, index) => ({
+      sceneNumber: index + 1,
+      narrationText: `Narration for exact restart scene ${index + 1}.`,
+      sceneDetails: {
+        action: `The friends complete visual beat ${index + 1}.`,
+      },
+    }));
+    const fallbackResponse = new AIMessage({
+      content: "",
+      tool_calls: [{
+        id: "restart-chunk-call",
+        name: "write_episode_script_chunk",
+        args: {
+          // These stale model-owned routing values must be rebound from the
+          // durable get_next_episode receipt before ToolNode can execute them.
+          episodeId: 999,
+          operation: "append",
+          expectedDraftRevision: 1,
+          targetSceneCount: 99,
+          minimumReplacementSpokenWords: 750,
+          authoringPlan: { storyArc: "stale plan" },
+          scenes,
+        },
+        type: "tool_call",
+      }],
+    });
+    const baseHandler = vi.fn()
+      .mockResolvedValueOnce(lengthLimitedResponse())
+      .mockResolvedValueOnce(fallbackResponse);
+    const failover = createProductionModelCallFailoverMiddleware({
+      providerManagerFactory: () => pool.manager,
+    });
+    const failoverHandler = vi.fn((candidateRequest) =>
+      failover.wrapModelCall!(candidateRequest as any, baseHandler as any)
+    );
+    const protocol = createProductionToolProtocolMiddleware();
+    const getNextCallId = "get-next-episode-call";
+    const request = {
+      ...modelRequest(primary),
+      messages: [
+        new HumanMessage("Continue the durable episode workflow."),
+        new AIMessage({
+          content: "",
+          tool_calls: [{
+            id: getNextCallId,
+            name: "get_next_episode",
+            args: { seriesId: 13 },
+            type: "tool_call",
+          }],
+        }),
+        new ToolMessage({
+          name: "get_next_episode",
+          tool_call_id: getNextCallId,
+          content: JSON.stringify({
+            kind: "ready",
+            episode: { id: 129, seriesId: 13, episodeNumber: 4 },
+            resumeAction: "script_authoring",
+            scriptDraft: {
+              episodeId: 129,
+              revision: 6,
+              authoringProgress: {
+                requiredAction: "restart_script_authoring",
+                targetSceneCount: 50,
+                minimumSpokenWords: 831,
+                nextSceneNumber: 1,
+                nextSceneEnd: 8,
+                authoringPlan,
+              },
+            },
+          }),
+        }),
+      ],
+      tools: [
+        { name: "get_or_create_series" },
+        { name: "get_next_episode" },
+        { name: "write_episode_script_chunk" },
+      ] as any[],
+      toolChoice: "auto" as const,
+    };
+
+    const result = await protocol.wrapModelCall!(
+      request as any,
+      failoverHandler as any,
+    ) as AIMessage;
+    const args = result.tool_calls?.[0]?.args as Record<string, unknown>;
+
+    expect(result.tool_calls?.[0]?.name).toBe("write_episode_script_chunk");
+    expect(args).toMatchObject({
+      episodeId: 129,
+      operation: "restart",
+      expectedDraftRevision: 6,
+      targetSceneCount: 50,
+      minimumReplacementSpokenWords: 831,
+      authoringPlan,
+    });
+    expect(args.scenes).toBe(scenes);
+    expect((args.scenes as typeof scenes)).toHaveLength(8);
+    expect((args.scenes as typeof scenes).map((scene) => scene.sceneNumber)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8,
+    ]);
+    expect(failoverHandler).toHaveBeenCalledOnce();
+    expect(baseHandler).toHaveBeenCalledTimes(2);
+    expect(baseHandler.mock.calls.map(([candidateRequest]) => candidateRequest.model)).toEqual([
+      primary,
+      fallback,
+    ]);
+    for (const [candidateRequest] of baseHandler.mock.calls) {
+      expect(candidateRequest.toolChoice).toEqual({
+        type: "function",
+        function: { name: "write_episode_script_chunk" },
+      });
+    }
+    expect(pool.switchToNext).toHaveBeenCalledOnce();
   });
 
   it.each([

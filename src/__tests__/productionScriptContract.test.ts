@@ -40,7 +40,7 @@ describe("productionScriptContract", () => {
     });
   });
 
-  it("rejects guests in characterNames and missing direct-video metadata", () => {
+  it("rejects guests in characterNames while treating visual metadata as advisory", () => {
     const script = productionScript();
     script.scenes[4]!.characterNames = ["Surprise Fox"];
     script.scenes[4]!.characterVisuals[0]!.name = "Surprise Fox";
@@ -49,21 +49,19 @@ describe("productionScriptContract", () => {
     const result = inspectProductionScript(script, ["Pip the Ant"]);
     expect(result.pass).toBe(false);
     expect(result.issues.join(" ")).toContain("non-roster name");
-    expect(result.issues.join(" ")).toContain("missing required cameraAngle");
+    expect(result.issues.join(" ")).not.toContain("cameraAngle");
   });
 
-  it("rejects changed recurring supporting descriptors and character ontology", () => {
+  it("does not reject advisory descriptor or legacy characterVisual changes", () => {
     const script = productionScript();
     script.scenes[2]!.supportingEntities = ["Ladybug friend: large purple beetle with silver wings"];
     script.scenes[3]!.characterVisuals[0]!.visualForm = "humanoid";
 
     const result = inspectProductionScript(script, ["Pip the Ant"]);
-    expect(result.pass).toBe(false);
-    expect(result.issues.join(" ")).toContain("repeat recurring descriptors verbatim");
-    expect(result.issues.join(" ")).toContain("changes locked characterVisuals metadata");
+    expect(result.pass).toBe(true);
   });
 
-  it("rejects a renumbered duplicate scene before it can create duplicate media", () => {
+  it("does not use subjective duplicate-beat detection as a persistence gate", () => {
     const script = productionScript();
     script.scenes[8] = {
       ...structuredClone(script.scenes[7]!),
@@ -71,11 +69,25 @@ describe("productionScriptContract", () => {
     };
 
     const result = inspectProductionScript(script, ["Pip the Ant"]);
-    expect(result.pass).toBe(false);
-    expect(result.issues.join(" ")).toContain("duplicates the complete narration/action beat");
+    expect(result.pass).toBe(true);
   });
 
-  it("rejects group entities, living anchors, aliases, and uncounted background figures without imposing a cast ceiling", () => {
+  it("rejects unmistakable generated placeholders without imposing subjective prose QA", () => {
+    const script = productionScript();
+    script.scenes[4]!.narrationText = "scene 5 narration";
+    script.scenes[5]!.environmentDescription = "...";
+    script.scenes[6]!.action = "scene 7 action";
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    const issues = result.issues.join(" ");
+
+    expect(result.pass).toBe(false);
+    expect(issues).toContain("synthetic scene-number placeholder");
+    expect(issues).toContain("Scene 6 environmentDescription must be real filmable prose");
+    expect(issues).toContain("Scene 7 action must be real filmable prose");
+  });
+
+  it("keeps semantic cast and anchor guidance advisory", () => {
     const script = productionScript();
     const scene = script.scenes[0]!;
     scene.characterNames = ["Pip the Ant", "Mia", "Leo"];
@@ -94,15 +106,11 @@ describe("productionScriptContract", () => {
       ["Pip the Ant", "Mia", "Leo"],
     );
     const text = result.issues.join(" ");
-    expect(result.pass).toBe(false);
-    expect(text).not.toContain("allow at most");
-    expect(text).toContain("Each supportingEntities entry must identify exactly one visible individual");
-    expect(text).toContain("continuityAnchors are only for non-living props");
-    expect(text).toContain("environmentDescription introduces uncounted background figures");
-    expect(text).toContain("uses a collective or generic cast alias");
+    expect(result.pass).toBe(true);
+    expect(text).toBe("");
   });
 
-  it("rejects plural supporting identities that can expand into duplicate bodies", () => {
+  it("does not semantically interpret supporting-entity labels", () => {
     const script = productionScript();
     const scene = script.scenes[0]!;
     scene.supportingEntities = ["Mammoths: cinnamon wool, curved ivory tusks, and round brown eyes"];
@@ -112,10 +120,7 @@ describe("productionScriptContract", () => {
       "The clubhouse and short grass remain clear behind them.";
 
     const result = inspectProductionScript(script, ["Pip the Ant"]);
-    expect(result.pass).toBe(false);
-    expect(result.issues.join(" ")).toContain(
-      "Each supportingEntities entry must identify exactly one visible individual",
-    );
+    expect(result.pass).toBe(true);
   });
 
   it("does not mistake an exact object-character name for a generic alias", () => {
@@ -129,13 +134,31 @@ describe("productionScriptContract", () => {
       humanoidAllowed: false,
     }];
     scene.action = "Bobo the Backpack bounces once beside the berry.";
-    scene.sceneDetails = "Bobo the Backpack waits left of the berry; Bobo smiles; the meadow stays clear; no one else enters.";
+    scene.sceneDetails = "Bobo the Backpack waits left of the berry; Bobo the Backpack smiles; the meadow stays clear; no one else enters.";
 
     const result = inspectProductionScript(script, ["Pip the Ant", "Bobo the Backpack"]);
     expect(result.issues.join(" ")).not.toContain("collective or generic cast alias");
+    expect(result.issues.join(" ")).not.toContain("main-character alias");
   });
 
-  it("does not treat a legacy short identity inside a declared canonical name as another body", () => {
+  it("accepts a legacy unique roster alias on read so durable episodes can be canonicalized at prompt time", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = ["Bobo the Backpack"];
+    scene.characterVisuals = [{
+      name: "Bobo the Backpack",
+      visualForm: "object_character",
+      speciesOrType: "living backpack",
+      humanoidAllowed: false,
+    }];
+    scene.action = "Bobo bounces once beside the berry.";
+    scene.sceneDetails = "Bobo waits left of the berry while the meadow stays clear.";
+
+    const result = inspectProductionScript(script, ["Pip the Ant", "Bobo the Backpack"]);
+    expect(result.issues.join(" ")).not.toContain("main-character alias");
+  });
+
+  it("accepts legacy aliases because exact roster identity comes from characterNames", () => {
     const script = productionScript();
     script.scenes[0] = {
       ...script.scenes[0]!,
@@ -170,6 +193,7 @@ describe("productionScriptContract", () => {
       script,
       ["Pip the Ant", "Bobo the Backpack"],
     );
+    expect(result.issues.join(" ")).not.toContain("main-character alias");
     expect(result.issues.join(" ")).not.toContain(
       'action/sceneDetails mentions unlisted figure "bobo"',
     );
@@ -179,12 +203,26 @@ describe("productionScriptContract", () => {
     expect(inspectProductionScript(
       script,
       ["Pip the Ant", "Bobo the Backpack"],
-    ).issues.join(" ")).toContain(
-      'action/sceneDetails mentions unlisted figure "bobo"',
-    );
+    ).pass).toBe(true);
   });
 
-  it("rejects a declared figure that is not explicitly staged by exact name", () => {
+  it("does not infer roster identity from prose aliases", () => {
+    const script = productionScript();
+    script.scenes[0] = {
+      ...script.scenes[0]!,
+      action: "Pip the Ant greets Bobo beside the berry.",
+      supportingEntities: ["Bobo: one small blue living bag"],
+      sceneDetails: "Pip the Ant waits left while Bobo stands on the right.",
+    };
+
+    const result = inspectProductionScript(
+      script,
+      ["Pip the Ant", "Bobo the Backpack", "Bobo the Satchel"],
+    );
+    expect(result.pass).toBe(true);
+  });
+
+  it("does not reject subjective prose staging", () => {
     const script = productionScript();
     const scene = script.scenes[0]!;
     scene.characterNames = ["Pip the Ant", "Mia"];
@@ -196,13 +234,10 @@ describe("productionScriptContract", () => {
     });
 
     const result = inspectProductionScript(script, ["Pip the Ant", "Mia"]);
-    expect(result.pass).toBe(false);
-    expect(result.issues.join(" ")).toContain(
-      "declares figure \"Mia\" but never names it in action/sceneDetails",
-    );
+    expect(result.pass).toBe(true);
   });
 
-  it("rejects figures smuggled outside the exact per-scene cast arrays", () => {
+  it("does not semantically scan environment/action/anchors for figure names", () => {
     const script = productionScript();
     const scene = script.scenes[0]!;
     scene.environmentDescription = "A sunny meadow where Mia waits beside the clubhouse.";
@@ -212,11 +247,27 @@ describe("productionScriptContract", () => {
     ];
 
     const result = inspectProductionScript(script, ["Pip the Ant", "Mia", "Leo"]);
-    const text = result.issues.join(" ");
+    expect(result.pass).toBe(true);
+  });
+
+  it("enforces unique exact roster names and the five-name Agnes reference cap", () => {
+    const script = productionScript();
+    const roster = ["Pip", "Mia", "Leo", "Tara", "Bobo", "Nia"];
+    script.scenes[0]!.characterNames = roster;
+    let result = inspectProductionScript(script, roster);
     expect(result.pass).toBe(false);
-    expect(text).toContain("environmentDescription mentions visible figure");
-    expect(text).toContain("action/sceneDetails mentions unlisted figure");
-    expect(text).toContain("continuityAnchors are only for non-living props");
+    expect(result.issues.join(" ")).toContain("at most 5 exact roster names");
+
+    script.scenes[0]!.characterNames = ["Pip", "Pip"];
+    result = inspectProductionScript(script, roster);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("duplicate entries");
+  });
+
+  it("accepts omitted characterVisuals and optional structurally valid arrays", () => {
+    const script = productionScript();
+    delete (script.scenes[0] as Partial<(typeof script.scenes)[number]>).characterVisuals;
+    expect(inspectProductionScript(script, ["Pip the Ant"])).toMatchObject({ pass: true });
   });
 
   it("returns repair_required only before durable Agnes work begins", () => {

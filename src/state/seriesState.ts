@@ -19,8 +19,13 @@ import {
   AGNES_SERIES_KEY_ART_TRACKING_SCENE,
   agnesKeyArtPaths,
 } from "../services/agnesKeyArtService.js";
-import { AGNES_VIDEO_QA_POLICY_VERSION } from "../services/agnesVideoQaService.js";
 import {
+  AGNES_STATIC_VIDEO_QA_MODEL,
+  createAgnesStaticEpisodeAssetSetDigest,
+  isCurrentAgnesStaticQaResult,
+} from "../services/agnesStaticVideoQaService.js";
+import {
+  AUDIO_DURATION_METADATA_TOLERANCE_SECONDS,
   createNarrationAudioRequestDigest,
   narrationAudioMetadataPath,
   readNarrationAudioMetadata,
@@ -127,8 +132,7 @@ export type BeginEpisodeNarrationAudioMutationResult =
 
 export type EpisodeAudioReadinessFailureReason =
   | "artifact_missing_or_stale"
-  | "duration_exceeded"
-  | "total_duration_too_short";
+  | "duration_exceeded";
 
 /**
  * Expected, recoverable failure from the local narration preflight. Keeping
@@ -185,6 +189,24 @@ export interface EpisodeNarrationAudioManifestScene {
 export interface EpisodeNarrationAudioManifest {
   totalDurationSeconds: number;
   scenes: EpisodeNarrationAudioManifestScene[];
+}
+
+/**
+ * Read-only timing audit for a specific script revision. Unlike the readiness
+ * manifest, this deliberately reports valid overlong audio and the measured
+ * total so script refinement can make per-scene decisions from canonical files
+ * instead of trusting duration numbers copied through an LLM tool call.
+ */
+export interface EpisodeNarrationAudioTimingAudit {
+  complete: boolean;
+  sceneCount: number;
+  verifiedSceneCount: number;
+  totalDurationSeconds?: number;
+  durationExceededScenes: Array<{
+    sceneNumber: number;
+    durationSeconds: number;
+  }>;
+  invalidSceneNumbers: number[];
 }
 
 export const MAX_EPISODE_SCRIPT_DRAFT_VALIDATION_ISSUES = 12;
@@ -439,6 +461,22 @@ export interface ReferenceImage {
    * re-analyzes the existing portrait without regenerating the image.
    */
   identitySchemaVersion?: number;
+  /** Stable, human-readable filename shared with the public reference URL. */
+  canonicalFileName?: string;
+  /** Digest of the immutable portrait-generation request. */
+  requestDigest?: string;
+  /** SHA-256 of the exact image bytes bound to this reference. */
+  sha256?: string;
+  /** Image model used when the portrait had to be generated. */
+  model?: string;
+  /** Anonymous HTTPS URL sent to Agnes as an image reference. */
+  publicUrl?: string;
+  /** Exact object key owned by this character in the configured public bucket. */
+  publicObjectKey?: string;
+  /** MIME type returned while verifying the public object. */
+  contentType?: string;
+  /** ISO timestamp of the most recent successful public-object verification. */
+  publicVerifiedAt?: string;
 }
 
 export interface KeyArtRow {
@@ -594,6 +632,11 @@ export interface RecordAgnesVideoQaVerdictInput {
   model: string;
   status: "passed" | "exhausted";
 }
+
+export type RecordAgnesVideoQaScreeningInput = Omit<
+  RecordAgnesVideoQaVerdictInput,
+  "status"
+>;
 
 export interface RequeueAgnesSceneAfterQaFailureInput extends Omit<
   RecordAgnesVideoQaVerdictInput,
@@ -813,7 +856,6 @@ function boundEpisodeScriptDraftRepairEvidence(
   // also drops legacy zero-second/recovery-target snapshots on their next read.
   const hasCompleteMeasuredTotal = measuredTotalNarrationSeconds !== undefined
     && measuredNarrationSceneCount !== undefined;
-
   if (
     durationExceededScenes.length === 0
     && !hasCompleteMeasuredTotal
@@ -2767,7 +2809,6 @@ export class SeriesState {
       }
     }
 
-    let totalNarrationDuration = 0;
     for (const sceneNumber of sceneNumbers) {
       const sceneStem = `scene_${String(sceneNumber).padStart(3, "0")}`;
       const narrationPath = path.join(episodeDir, "audio", `${sceneStem}_narrator.wav`);
@@ -2785,8 +2826,6 @@ export class SeriesState {
           `every scene must be at most ${NARRATION_MAX_AUDIO_SECONDS} seconds for one Agnes request.`
         );
       }
-      totalNarrationDuration += narrationDuration;
-
       for (const variant of requiredAgnesSceneVariants()) {
         const row = rowBySceneVariant.get(`${sceneNumber}:${variant}`);
         if (!row || row.status !== "completed" || row.downloadStatus !== "downloaded") {
@@ -2813,13 +2852,6 @@ export class SeriesState {
           );
         }
       }
-    }
-
-    if (totalNarrationDuration < 300) {
-      throw new Error(
-        `Cannot mark episode done: measured narration runtime is ${totalNarrationDuration.toFixed(3)}s; ` +
-        "the episode must contain at least 300 seconds of narration."
-      );
     }
 
     const outputs = await this.listEpisodeVideoOutputs(seriesId, episodeNumber);
@@ -2936,16 +2968,100 @@ export class SeriesState {
         durationSeconds: duration,
       });
     }
-    if (totalDurationSeconds < 300) {
-      throw new EpisodeAudioReadinessError({
-        reason: "total_duration_too_short",
-        totalDurationSeconds,
-        message:
-          `Measured episode narration is ${totalDurationSeconds.toFixed(3)}s. ` +
-          "Re-author the complete script until narration reaches at least 300 seconds.",
-      });
-    }
     return { totalDurationSeconds, scenes };
+  }
+
+  /**
+   * Audits the canonical narration files against the exact supplied draft.
+   * Every WAV must have a matching request-digest sidecar and a duration status
+   * that agrees with a fresh ffprobe measurement. Partial results are never
+   * authoritative: callers must regenerate/reuse the episode audio first.
+   */
+  async auditEpisodeNarrationAudioTiming(
+    episodeId: number,
+    scriptJson: unknown,
+  ): Promise<EpisodeNarrationAudioTimingAudit> {
+    await this.initialize();
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+
+    const sceneNumbers = episodeScriptSceneNumbers(scriptJson);
+    const narrationByScene = episodeScriptNarrationMap(scriptJson);
+    const episodeDir = path.resolve(
+      CONFIG.outputDir,
+      `series_${episode.seriesId}`,
+      `episode_${episode.episodeNumber}`,
+    );
+    let totalDurationSeconds = 0;
+    let verifiedSceneCount = 0;
+    const durationExceededScenes: EpisodeNarrationAudioTimingAudit["durationExceededScenes"] = [];
+    const invalidSceneNumbers: number[] = [];
+
+    for (const sceneNumber of sceneNumbers) {
+      const narrationText = narrationByScene.get(sceneNumber) ?? "";
+      const narrationPath = path.join(
+        episodeDir,
+        "audio",
+        `scene_${String(sceneNumber).padStart(3, "0")}_narrator.wav`,
+      );
+      try {
+        await requireNonEmptyFile(narrationPath, `scene ${sceneNumber} narration`);
+        const durationSeconds = await probeMediaDuration(narrationPath);
+        const metadata = await readNarrationAudioMetadata(
+          narrationAudioMetadataPath(narrationPath),
+        );
+        const expectedDigest = createNarrationAudioRequestDigest({
+          text: narrationText,
+          model: CONFIG.groqTtsModel,
+          voice: CONFIG.groqTtsVoice,
+        });
+        const expectedDurationStatus = durationSeconds > NARRATION_MAX_AUDIO_SECONDS
+          ? "duration_exceeded"
+          : "ready";
+        const metadataDurationSeconds = metadata?.durationSeconds ?? Number.NaN;
+        const durationDelta = Math.abs(metadataDurationSeconds - durationSeconds);
+        // ffprobe can vary by a few hundredths at a codec boundary. When the
+        // canonical sidecar and fresh measurement agree within the existing
+        // reuse tolerance and both straddle 12s only inside that tolerance,
+        // keep the audit complete and let the fresh measurement decide. This
+        // prevents an immutable file/sidecar pair from cycling forever between
+        // TTS reuse and an "incomplete" timing audit.
+        const durationStatusMatches = metadata?.durationStatus === expectedDurationStatus
+          || (
+            durationDelta <= AUDIO_DURATION_METADATA_TOLERANCE_SECONDS
+            && Math.abs(metadataDurationSeconds - NARRATION_MAX_AUDIO_SECONDS)
+              <= AUDIO_DURATION_METADATA_TOLERANCE_SECONDS
+            && Math.abs(durationSeconds - NARRATION_MAX_AUDIO_SECONDS)
+              <= AUDIO_DURATION_METADATA_TOLERANCE_SECONDS
+          );
+        if (
+          !metadata
+          || metadata.requestDigest !== expectedDigest
+          || durationDelta > AUDIO_DURATION_METADATA_TOLERANCE_SECONDS
+          || !durationStatusMatches
+        ) {
+          throw new Error("narration metadata does not match the exact script and measured WAV");
+        }
+        verifiedSceneCount += 1;
+        totalDurationSeconds += durationSeconds;
+        if (durationSeconds > NARRATION_MAX_AUDIO_SECONDS) {
+          durationExceededScenes.push({ sceneNumber, durationSeconds });
+        }
+      } catch {
+        invalidSceneNumbers.push(sceneNumber);
+      }
+    }
+
+    const complete = verifiedSceneCount === sceneNumbers.length
+      && invalidSceneNumbers.length === 0;
+    return {
+      complete,
+      sceneCount: sceneNumbers.length,
+      verifiedSceneCount,
+      ...(complete ? { totalDurationSeconds } : {}),
+      durationExceededScenes: complete ? durationExceededScenes : [],
+      invalidSceneNumbers,
+    };
   }
 
   /** Fail closed before Agnes when narration cannot satisfy one-request-per-scene. */
@@ -3785,6 +3901,31 @@ export class SeriesState {
   }
 
   /**
+   * True only when the complete fixed season has a durable successful YouTube
+   * receipt for every episode. Scheduler skips intentionally do not count as
+   * completion, so they can never trigger deletion of shared portrait assets.
+   */
+  async isSeriesFullyCompleted(seriesId: number): Promise<boolean> {
+    await this.initialize();
+    if (!Number.isSafeInteger(seriesId) || seriesId <= 0) return false;
+    const result = await this.client.execute({
+      sql: `SELECT COUNT(*) AS episode_count,
+                   SUM(CASE WHEN status = 'done'
+                              AND uploaded_at IS NOT NULL AND trim(uploaded_at) <> ''
+                              AND completed_at IS NOT NULL AND trim(completed_at) <> ''
+                              AND youtube_video_id IS NOT NULL AND trim(youtube_video_id) <> ''
+                              AND youtube_url IS NOT NULL AND trim(youtube_url) <> ''
+                            THEN 1 ELSE 0 END) AS completed_count
+            FROM episodes
+            WHERE series_id = ?`,
+      args: [seriesId],
+    });
+    const episodeCount = Number(result.rows[0]?.episode_count ?? 0);
+    const completedCount = Number(result.rows[0]?.completed_count ?? 0);
+    return episodeCount === SERIES_EPISODE_COUNT && completedCount === episodeCount;
+  }
+
+  /**
    * Atomically records a successful YouTube upload and removes the bulky,
    * episode-local generation rows. The episode row, canonical output path,
    * YouTube receipt, fixed series roster, and character sheets are retained.
@@ -4545,6 +4686,75 @@ export class SeriesState {
     return { recorded: updated.rowsAffected === 1, row };
   }
 
+  /**
+   * Persists the cheap first-stage QA result while deliberately keeping the
+   * render pending. A later run can validate this checkpoint and resume at the
+   * Pro escalation instead of paying for the same screening call again.
+   */
+  async recordAgnesVideoQaScreening(
+    input: RecordAgnesVideoQaScreeningInput,
+  ): Promise<{ recorded: boolean; row: AgnesSceneGenerationRow | null }> {
+    await this.initialize();
+    const qaRequestDigest = input.qaRequestDigest.trim();
+    const videoSha256 = input.videoSha256.trim();
+    if (!/^[a-f0-9]{64}$/u.test(qaRequestDigest)) {
+      throw new Error("Agnes video QA screening request digest must be a lowercase SHA-256 digest.");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(videoSha256)) {
+      throw new Error("Agnes video QA screening source digest must be a lowercase SHA-256 digest.");
+    }
+    if (![0, 1].includes(input.expectedRenderRevision)) {
+      throw new Error("Agnes video render revision must be zero or one.");
+    }
+    if (!input.model.trim() || !input.contactSheetPath.trim()) {
+      throw new Error("Agnes video QA screening requires a model and contact sheet path.");
+    }
+    const expectedQaRequestDigest = input.expectedQaRequestDigest?.trim() ?? null;
+    if (input.expectedQaRequestDigest !== null && !/^[a-f0-9]{64}$/u.test(expectedQaRequestDigest!)) {
+      throw new Error("Expected Agnes video QA request digest must be null or a lowercase SHA-256 digest.");
+    }
+    const resultJson = JSON.stringify(input.result);
+    if (!resultJson || resultJson.length > 32_000) {
+      throw new Error("Agnes video QA screening result must be JSON-serializable and at most 32000 characters.");
+    }
+    const updated = await this.client.execute({
+      sql: `UPDATE agnes_scene_generations
+            SET qa_status = 'pending', qa_request_digest = ?, qa_video_sha256 = ?,
+                qa_result_json = ?, qa_contact_sheet_path = ?, qa_model = ?,
+                qa_error = NULL, qa_checked_at = datetime('now'), updated_at = datetime('now')
+            WHERE series_id = ? AND episode_number = ? AND scene_number = ? AND variant = ?
+              AND request_digest = ? AND render_revision = ?
+              AND normalized_output_path = ?
+              AND qa_status = ?
+              AND ((? IS NULL AND qa_request_digest IS NULL) OR qa_request_digest = ?)
+              AND status = 'completed' AND download_status = 'downloaded'`,
+      args: [
+        qaRequestDigest,
+        videoSha256,
+        resultJson,
+        input.contactSheetPath,
+        input.model,
+        input.seriesId,
+        input.episodeNumber,
+        input.sceneNumber,
+        input.variant,
+        input.expectedRequestDigest,
+        input.expectedRenderRevision,
+        input.expectedNormalizedOutputPath,
+        input.expectedQaStatus,
+        expectedQaRequestDigest,
+        expectedQaRequestDigest,
+      ],
+    });
+    const row = await this.getAgnesSceneGeneration(
+      input.seriesId,
+      input.episodeNumber,
+      input.sceneNumber,
+      input.variant,
+    );
+    return { recorded: updated.rowsAffected === 1, row };
+  }
+
   /** Records a transient judge failure while deliberately leaving QA pending. */
   async recordAgnesVideoQaError(input: {
     seriesId: number;
@@ -4760,35 +4970,14 @@ export class SeriesState {
     return { requeued: (results[1]?.rowsAffected ?? 0) === 1, row };
   }
 
-  /** Ensures every title/scene file has a current, source-bound Gemini pass. */
+  /** Ensures every title/scene file has a current, source-bound static QA pass. */
   async assertAgnesVideoQaReady(
     seriesId: number,
     episodeNumber: number,
   ): Promise<{ assetCount: number }> {
     await this.initialize();
-    const [episode, seriesInfo] = await Promise.all([
-      this.getEpisodeByNumber(seriesId, episodeNumber),
-      this.getSeriesInfo(seriesId),
-    ]);
+    const episode = await this.getEpisodeByNumber(seriesId, episodeNumber);
     if (!episode) throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
-    if (!seriesInfo) throw new Error(`Series ${seriesId} was not found.`);
-    const roster = seriesInfo.charactersJson.length > 0
-      ? seriesInfo.charactersJson
-      : await this.getSeriesCharacters(seriesId);
-    if (roster.length === 0) throw new Error("Agnes video QA cannot pass without a main-character roster.");
-    const portraitSourceDigests: Array<{ name: string; sha256: string }> = [];
-    for (const character of roster) {
-      const sheet = await this.getCharacterSheet(seriesId, character.name);
-      const portraitPath = sheet?.referenceImagePaths?.portrait?.path;
-      if (!sheet?.approvedAt || !portraitPath) {
-        throw new Error(`Agnes video QA pass is stale because ${character.name} has no approved portrait.`);
-      }
-      await requireNonEmptyFile(portraitPath, `${character.name} approved QA portrait`);
-      portraitSourceDigests.push({ name: character.name, sha256: await sha256File(portraitPath) });
-    }
-    const portraitSetDigest = createHash("sha256")
-      .update(JSON.stringify(portraitSourceDigests))
-      .digest("hex");
     const requiredNumbers = [
       AGNES_SERIES_KEY_ART_TRACKING_SCENE,
       AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
@@ -4796,6 +4985,11 @@ export class SeriesState {
     ];
     const rows = await this.listAgnesSceneGenerations(seriesId, episodeNumber, "text");
     const byNumber = new Map(rows.map((row) => [row.sceneNumber, row] as const));
+    const boundRows: Array<{
+      row: AgnesSceneGenerationRow;
+      label: string;
+      videoSha256: string;
+    }> = [];
     for (const sceneNumber of requiredNumbers) {
       const label = sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE
         ? "series key art"
@@ -4808,38 +5002,46 @@ export class SeriesState {
         throw new Error(`Agnes video QA cannot pass: ${label} is not completed and downloaded.`);
       }
       if (row.qaStatus === "exhausted") {
-        throw new Error(`Agnes video QA exhausted its single retry for ${label}; manual review is required.`);
+        throw new Error(`Static Agnes video QA rejected ${label}; inspect its persisted actionable issues.`);
       }
-      if (row.qaStatus !== "passed" || !row.qaRequestDigest || !row.qaVideoSha256 || !row.qaModel) {
+      if (row.qaStatus !== "passed" || !row.qaRequestDigest || !row.qaVideoSha256
+        || row.qaModel !== AGNES_STATIC_VIDEO_QA_MODEL) {
         throw new Error(`Agnes video QA has not passed the current render of ${label}.`);
       }
-      if (row.qaModel !== CONFIG.anyApiVideoQaModel) {
-        throw new Error(`Agnes video QA pass is stale because the configured judge changed for ${label}.`);
-      }
-      if (!row.qaResult || typeof row.qaResult !== "object" || Array.isArray(row.qaResult)) {
-        throw new Error(`Agnes video QA pass has no valid source binding for ${label}.`);
-      }
-      const qaResult = row.qaResult as Record<string, unknown>;
-      const bindingMatches = qaResult.policyVersion === AGNES_VIDEO_QA_POLICY_VERSION
-        && qaResult.model === CONFIG.anyApiVideoQaModel
-        && qaResult.sceneNumber === sceneNumber
-        && qaResult.pass === true
-        && qaResult.generationRequestDigest === row.requestDigest
-        && qaResult.renderRevision === row.renderRevision
-        && qaResult.qaRequestDigest === row.qaRequestDigest
-        && qaResult.videoSha256 === row.qaVideoSha256
-        && qaResult.portraitSetDigest === portraitSetDigest
-        && typeof qaResult.referenceBoardSha256 === "string"
-        && /^[a-f0-9]{64}$/u.test(qaResult.referenceBoardSha256)
-        && typeof qaResult.contactSheetSha256 === "string"
-        && /^[a-f0-9]{64}$/u.test(qaResult.contactSheetSha256);
-      if (!bindingMatches) {
-        throw new Error(`Agnes video QA pass is stale or incompletely bound for ${label}.`);
-      }
       await requireNonEmptyFile(row.normalizedOutputPath, `${label} QA source video`);
-      if (await sha256File(row.normalizedOutputPath) !== row.qaVideoSha256) {
+      const videoSha256 = await sha256File(row.normalizedOutputPath);
+      if (videoSha256 !== row.qaVideoSha256) {
         throw new Error(`Agnes video QA pass is stale because ${label} changed on disk.`);
       }
+      boundRows.push({ row, label, videoSha256 });
+    }
+    const episodeAssetSetDigest = createAgnesStaticEpisodeAssetSetDigest(
+      boundRows.map(({ row, videoSha256 }) => ({
+        sceneNumber: row.sceneNumber,
+        generationRequestDigest: row.requestDigest!,
+        renderRevision: row.renderRevision,
+        videoSha256,
+      })),
+    );
+    for (const { row, label, videoSha256 } of boundRows) {
+      if (!isCurrentAgnesStaticQaResult({
+        result: row.qaResult,
+        rowQaRequestDigest: row.qaRequestDigest,
+        rowQaVideoSha256: row.qaVideoSha256,
+        rowQaModel: row.qaModel,
+        sceneNumber: row.sceneNumber,
+        generationRequestDigest: row.requestDigest!,
+        renderRevision: row.renderRevision,
+        videoSha256,
+        episodeAssetSetDigest,
+        expectedPass: true,
+      })) {
+        throw new Error(`Static Agnes video QA pass is stale or incompletely bound for ${label}.`);
+      }
+      if (!row.qaContactSheetPath) {
+        throw new Error(`Static Agnes video QA evidence path is missing for ${label}.`);
+      }
+      await requireNonEmptyFile(row.qaContactSheetPath, `${label} static QA evidence report`);
     }
     return { assetCount: requiredNumbers.length };
   }

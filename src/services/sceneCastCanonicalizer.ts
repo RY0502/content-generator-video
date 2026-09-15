@@ -37,6 +37,8 @@ export interface SceneCastCanonicalizationOptions {
   supportingEntityBible?: readonly string[];
   /** Explicit descriptors have precedence over the bible and accepted scenes. */
   canonicalSupportingDescriptors?: CanonicalSupportingDescriptorSource;
+  /** Exact immutable series roster used to heal safe object-character short aliases. */
+  mainCharacterNames?: readonly string[];
   /** Protect the script tool's production sceneDetails bound. Defaults to 2,500. */
   maximumSceneDetailsLength?: number;
 }
@@ -55,6 +57,20 @@ export type SceneCastAppliedChange =
       name: string;
       index: number;
       source: "explicit" | "bible" | "durable";
+    }
+  | {
+      kind: "canonical_main_character_alias";
+      field: "characterNames" | "characterVisuals" | "supportingEntities" | "action" | "sceneDetails";
+      alias: string;
+      name: string;
+      index?: number;
+    }
+  | {
+      kind: "inferred_object_character_visual";
+      field: "characterVisuals";
+      name: string;
+      index: number;
+      speciesOrType: string;
     }
   | {
       kind: "safe_object_alias";
@@ -91,6 +107,13 @@ export type SceneCastUnresolvedIssue =
       kind: "invalid_cast_entry";
       field: "characterNames" | "characterVisuals" | "supportingEntities";
       index: number;
+    }
+  | {
+      kind: "ambiguous_main_character_alias";
+      field: "characterNames" | "characterVisuals" | "supportingEntities" | "action" | "sceneDetails";
+      alias: string;
+      candidates: string[];
+      index?: number;
     }
   | {
       kind: "ambiguous_object_alias";
@@ -143,6 +166,7 @@ const COLLECTIVE_SUPPORTING_IDENTITY_PATTERN =
 const OBJECT_ENTITY_NOUN_PATTERN = /\b(?:backpack|bag|satchel)\b/iu;
 const OBJECT_ENTITY_DESCRIPTION_PATTERN =
   /(?:\b(?:animated|enchanted|living|magic(?:al)?|sentient|talking)\b.{0,60}\b(?:backpack|bag|satchel)\b|\b(?:backpack|bag|satchel)\b.{0,60}\b(?:character|face|living|sentient|speaks|talking|talks)\b)/iu;
+const SAFE_MAIN_OBJECT_NAME_PATTERN = /^(.+?)\s+the\s+(backpack|bag|satchel)$/iu;
 
 function normalizedText(value: unknown): string {
   return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
@@ -154,6 +178,71 @@ function identityKey(value: string): string {
 
 function descriptorIdentity(descriptor: string): string {
   return normalizedText(descriptor.split(":", 1)[0]);
+}
+
+export type MainCharacterAliasResolution =
+  | { status: "none" }
+  | { status: "unique"; canonicalName: string; speciesOrType: string }
+  | { status: "ambiguous"; candidates: string[] };
+
+/**
+ * Resolves only a deliberately narrow, meaning-preserving roster alias. For
+ * example, `Bobo` may resolve to `Bobo the Backpack`; arbitrary first names or
+ * nicknames are never guessed. Multiple matching roster entries fail closed.
+ */
+export function resolveSafeMainCharacterAlias(
+  rawAlias: string,
+  mainCharacterNames: readonly string[],
+): MainCharacterAliasResolution {
+  const alias = normalizedText(rawAlias);
+  if (!alias) return { status: "none" };
+  const exact = mainCharacterNames
+    .map(normalizedText)
+    .find((name) => identityKey(name) === identityKey(alias));
+  if (exact) {
+    const exactMatch = exact.match(SAFE_MAIN_OBJECT_NAME_PATTERN);
+    return exactMatch
+      ? { status: "unique", canonicalName: exact, speciesOrType: exactMatch[2]!.toLocaleLowerCase() }
+      : { status: "none" };
+  }
+  const matches = uniqueNames(mainCharacterNames.map(normalizedText)).flatMap((name) => {
+    const match = name.match(SAFE_MAIN_OBJECT_NAME_PATTERN);
+    return match && identityKey(match[1]!) === identityKey(alias)
+      ? [{ canonicalName: name, speciesOrType: match[2]!.toLocaleLowerCase() }]
+      : [];
+  });
+  if (matches.length === 0) return { status: "none" };
+  if (matches.length > 1) {
+    return { status: "ambiguous", candidates: matches.map(({ canonicalName }) => canonicalName) };
+  }
+  return { status: "unique", ...matches[0]! };
+}
+
+export type MainCharacterAliasMention = {
+  alias: string;
+  resolution: Exclude<MainCharacterAliasResolution, { status: "none" }>;
+};
+
+/**
+ * Finds only the narrow object-character aliases understood by
+ * `resolveSafeMainCharacterAlias`. Exact roster names are masked first, so
+ * `Bobo` inside `Bobo the Backpack` is never reported as a second identity.
+ */
+export function findSafeMainCharacterAliasMentions(
+  text: string,
+  mainCharacterNames: readonly string[],
+): MainCharacterAliasMention[] {
+  const normalizedRoster = uniqueNames(mainCharacterNames.map(normalizedText));
+  const withoutCanonicalNames = textWithoutExactNames(text, normalizedRoster);
+  const candidateAliases = uniqueNames(normalizedRoster.flatMap((name) => {
+    const match = name.match(SAFE_MAIN_OBJECT_NAME_PATTERN);
+    return match ? [normalizedText(match[1])] : [];
+  }));
+  return candidateAliases.flatMap((alias) => {
+    if (!containsExactName(withoutCanonicalNames, alias)) return [];
+    const resolution = resolveSafeMainCharacterAlias(alias, normalizedRoster);
+    return resolution.status === "none" ? [] : [{ alias, resolution }];
+  });
 }
 
 function isRecord(value: unknown): value is SceneCastRecord {
@@ -471,12 +560,52 @@ function auditGenericAliases(
   });
 }
 
+function replaceCanonicalMainAliases(
+  rawText: unknown,
+  field: "action" | "sceneDetails",
+  replacements: ReadonlyMap<string, { alias: string; canonicalName: string }>,
+  applied: SceneCastAppliedChange[],
+): unknown {
+  if (typeof rawText !== "string" || replacements.size === 0) return rawText;
+  let output = rawText;
+  for (const { alias, canonicalName } of replacements.values()) {
+    if (identityKey(alias) === identityKey(canonicalName)) continue;
+    const canonicalSpans = [...output.matchAll(new RegExp(
+      `(?<![\\p{L}\\p{N}_])${escapedPattern(canonicalName)}(?![\\p{L}\\p{N}_])`,
+      "giu",
+    ))].flatMap((match) => match.index === undefined
+      ? []
+      : [{ start: match.index, end: match.index + match[0].length }]);
+    let replacementsMade = 0;
+    output = output.replace(
+      new RegExp(`(?<![\\p{L}\\p{N}_])${escapedPattern(alias)}(?![\\p{L}\\p{N}_])`, "giu"),
+      (match, ...args: unknown[]) => {
+        const offset = args.at(-2);
+        if (typeof offset !== "number") return match;
+        const end = offset + match.length;
+        if (canonicalSpans.some((span) => offset >= span.start && end <= span.end)) return match;
+        replacementsMade += 1;
+        return canonicalName;
+      },
+    );
+    if (replacementsMade > 0) {
+      applied.push({
+        kind: "canonical_main_character_alias",
+        field,
+        alias,
+        name: canonicalName,
+      });
+    }
+  }
+  return output;
+}
+
 /**
  * Locks cast metadata and performs only mechanical, meaning-preserving text
  * edits. In particular, narrative, environment, cast arrays, anchors, camera,
- * and lighting pass through untouched. Action changes are limited to replacing
- * a definite bag/backpack alias when exactly one declared object character can
- * possibly be its referent.
+ * and lighting pass through untouched. Action and staging changes are limited
+ * to replacing a definite bag/backpack alias, or a safe roster-derived short
+ * alias such as `Bobo`, when exactly one object character can be its referent.
  */
 export function canonicalizeSceneCast<TScene extends SceneCastLike>(
   input: TScene,
@@ -487,15 +616,145 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
   const visualSources = collectVisualSources(options, unresolved);
   const descriptorSources = collectDescriptorSources(options, unresolved);
   const next = { ...input } as Record<string, unknown>;
+  const mainCharacterNames = uniqueNames((options.mainCharacterNames ?? []).map(normalizedText));
+  const rosterAliasReplacements = new Map<string, {
+    alias: string;
+    canonicalName: string;
+    speciesOrType: string;
+  }>();
+  const canonicalObjectTypes = new Map<string, string>();
+
+  // Seed exact-text rewrites from the immutable roster, not only from cast
+  // arrays. This also heals `Bobo` in action/details when characterNames
+  // already correctly contains `Bobo the Backpack`.
+  mainCharacterNames.forEach((canonicalName) => {
+    const match = canonicalName.match(SAFE_MAIN_OBJECT_NAME_PATTERN);
+    if (!match) return;
+    const alias = normalizedText(match[1]);
+    const resolution = resolveSafeMainCharacterAlias(alias, mainCharacterNames);
+    if (
+      resolution.status === "unique"
+      && identityKey(resolution.canonicalName) === identityKey(canonicalName)
+    ) {
+      rosterAliasReplacements.set(identityKey(alias), {
+        alias,
+        canonicalName,
+        speciesOrType: resolution.speciesOrType,
+      });
+      canonicalObjectTypes.set(identityKey(canonicalName), resolution.speciesOrType);
+    }
+  });
 
   const characterNames: string[] = [];
   if (Array.isArray(input.characterNames)) {
     input.characterNames.forEach((value, index) => {
       const name = normalizedText(value);
-      if (name) characterNames.push(name);
-      else unresolved.push({ kind: "invalid_cast_entry", field: "characterNames", index });
+      if (!name) {
+        unresolved.push({ kind: "invalid_cast_entry", field: "characterNames", index });
+        return;
+      }
+      const alias = resolveSafeMainCharacterAlias(name, mainCharacterNames);
+      if (alias.status === "ambiguous") {
+        unresolved.push({
+          kind: "ambiguous_main_character_alias",
+          field: "characterNames",
+          alias: name,
+          candidates: alias.candidates,
+          index,
+        });
+        characterNames.push(name);
+        return;
+      }
+      const canonicalName = alias.status === "unique" ? alias.canonicalName : name;
+      characterNames.push(canonicalName);
+      if (alias.status === "unique") {
+        canonicalObjectTypes.set(identityKey(canonicalName), alias.speciesOrType);
+        if (identityKey(name) !== identityKey(canonicalName)) {
+          rosterAliasReplacements.set(identityKey(name), {
+            alias: name,
+            canonicalName,
+            speciesOrType: alias.speciesOrType,
+          });
+          applied.push({
+            kind: "canonical_main_character_alias",
+            field: "characterNames",
+            alias: name,
+            name: canonicalName,
+            index,
+          });
+        }
+      }
     });
   }
+
+  const supportingNames: string[] = [];
+  const resolvedSupportingDescriptors: string[] = [];
+  const retainedSupportingEntities: unknown[] = [];
+  if (Array.isArray(input.supportingEntities)) {
+    input.supportingEntities.forEach((value, index) => {
+      const descriptor = normalizedText(value);
+      const name = descriptorIdentity(descriptor);
+      if (!descriptor || !name) {
+        unresolved.push({ kind: "invalid_cast_entry", field: "supportingEntities", index });
+        retainedSupportingEntities.push(value);
+        return;
+      }
+      const alias = resolveSafeMainCharacterAlias(name, mainCharacterNames);
+      if (alias.status === "ambiguous") {
+        unresolved.push({
+          kind: "ambiguous_main_character_alias",
+          field: "supportingEntities",
+          alias: name,
+          candidates: alias.candidates,
+          index,
+        });
+      } else if (alias.status === "unique") {
+        canonicalObjectTypes.set(identityKey(alias.canonicalName), alias.speciesOrType);
+        if (!characterNames.some((candidate) => identityKey(candidate) === identityKey(alias.canonicalName))) {
+          characterNames.push(alias.canonicalName);
+        }
+        rosterAliasReplacements.set(identityKey(name), {
+          alias: name,
+          canonicalName: alias.canonicalName,
+          speciesOrType: alias.speciesOrType,
+        });
+        applied.push({
+          kind: "canonical_main_character_alias",
+          field: "supportingEntities",
+          alias: name,
+          name: alias.canonicalName,
+          index,
+        });
+        return;
+      }
+
+      const canonical = descriptorSources.get(identityKey(name));
+      if (!canonical) {
+        unresolved.push({ kind: "missing_supporting_descriptor", field: "supportingEntities", name });
+        supportingNames.push(name);
+        resolvedSupportingDescriptors.push(descriptor);
+        retainedSupportingEntities.push(value);
+        return;
+      }
+      const canonicalName = descriptorIdentity(canonical.value);
+      supportingNames.push(canonicalName);
+      resolvedSupportingDescriptors.push(canonical.value);
+      retainedSupportingEntities.push(canonical.value);
+      if (canonical.value !== value) {
+        applied.push({
+          kind: "canonical_supporting_descriptor",
+          field: "supportingEntities",
+          name: canonicalName,
+          index,
+          source: canonical.source,
+        });
+      }
+    });
+    if (!sameValue(input.supportingEntities, retainedSupportingEntities)) {
+      next.supportingEntities = retainedSupportingEntities;
+    }
+  }
+  if (!sameValue(input.characterNames, characterNames)) next.characterNames = characterNames;
 
   const currentVisualsByName = new Map<string, SceneCastRecord>();
   if (Array.isArray(input.characterVisuals)) {
@@ -505,19 +764,61 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
         return;
       }
       const name = normalizedText(visual.name);
-      if (name) currentVisualsByName.set(identityKey(name), visual);
+      if (!name) return;
+      const alias = resolveSafeMainCharacterAlias(name, mainCharacterNames);
+      if (alias.status === "ambiguous") {
+        unresolved.push({
+          kind: "ambiguous_main_character_alias",
+          field: "characterVisuals",
+          alias: name,
+          candidates: alias.candidates,
+          index,
+        });
+        currentVisualsByName.set(identityKey(name), visual);
+        return;
+      }
+      const canonicalName = alias.status === "unique" ? alias.canonicalName : name;
+      const canonicalVisual = { ...visual, name: canonicalName };
+      currentVisualsByName.set(identityKey(canonicalName), canonicalVisual);
+      if (alias.status === "unique") {
+        canonicalObjectTypes.set(identityKey(canonicalName), alias.speciesOrType);
+        if (identityKey(name) !== identityKey(canonicalName)) {
+          applied.push({
+            kind: "canonical_main_character_alias",
+            field: "characterVisuals",
+            alias: name,
+            name: canonicalName,
+            index,
+          });
+        }
+      }
     });
   }
 
   const resolvedVisuals: Array<SceneCastRecord | undefined> = characterNames.map((name, index) => {
     const canonical = visualSources.get(identityKey(name));
     const current = currentVisualsByName.get(identityKey(name));
-    const resolved = canonical?.value ?? current;
+    const objectType = canonicalObjectTypes.get(identityKey(name));
+    const resolved = canonical?.value ?? current ?? (objectType ? {
+      name,
+      visualForm: "object_character",
+      speciesOrType: objectType,
+      humanoidAllowed: false,
+    } : undefined);
     if (!resolved) {
       unresolved.push({ kind: "missing_character_visual", field: "characterVisuals", name });
       return undefined;
     }
     const aligned: SceneCastRecord = { ...resolved, name };
+    if (!canonical && !current && objectType) {
+      applied.push({
+        kind: "inferred_object_character_visual",
+        field: "characterVisuals",
+        name,
+        index,
+        speciesOrType: objectType,
+      });
+    }
     if (canonical && !sameValue(current, aligned)) {
       applied.push({
         kind: "canonical_character_visual",
@@ -534,42 +835,6 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
   if (resolvedVisuals.every((visual): visual is SceneCastRecord => Boolean(visual))) {
     const canonicalVisuals = resolvedVisuals;
     if (!sameValue(input.characterVisuals, canonicalVisuals)) next.characterVisuals = canonicalVisuals;
-  }
-
-  const supportingNames: string[] = [];
-  const resolvedSupportingDescriptors: string[] = [];
-  if (Array.isArray(input.supportingEntities)) {
-    const supportingEntities = input.supportingEntities.map((value, index) => {
-      const descriptor = normalizedText(value);
-      const name = descriptorIdentity(descriptor);
-      if (!descriptor || !name) {
-        unresolved.push({ kind: "invalid_cast_entry", field: "supportingEntities", index });
-        return value;
-      }
-      const canonical = descriptorSources.get(identityKey(name));
-      if (!canonical) {
-        unresolved.push({ kind: "missing_supporting_descriptor", field: "supportingEntities", name });
-        supportingNames.push(name);
-        resolvedSupportingDescriptors.push(descriptor);
-        return value;
-      }
-      const canonicalName = descriptorIdentity(canonical.value);
-      supportingNames.push(canonicalName);
-      resolvedSupportingDescriptors.push(canonical.value);
-      if (canonical.value !== value) {
-        applied.push({
-          kind: "canonical_supporting_descriptor",
-          field: "supportingEntities",
-          name: canonicalName,
-          index,
-          source: canonical.source,
-        });
-      }
-      return canonical.value;
-    });
-    if (!sameValue(input.supportingEntities, supportingEntities)) {
-      next.supportingEntities = supportingEntities;
-    }
   }
 
   const exactCastNames = uniqueNames([...characterNames, ...supportingNames]);
@@ -593,22 +858,48 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
     ...supportingObjectCharacterNames,
   ]);
 
-  const canonicalAction = replaceSafeObjectAliases(
+  const rosterCanonicalAction = replaceCanonicalMainAliases(
     input.action,
+    "action",
+    rosterAliasReplacements,
+    applied,
+  );
+  const canonicalAction = replaceSafeObjectAliases(
+    rosterCanonicalAction,
     "action",
     objectCharacterNames,
     applied,
     unresolved,
   );
   if (canonicalAction !== input.action) next.action = canonicalAction;
-  const canonicalSceneDetails = replaceSafeObjectAliases(
+  const rosterCanonicalSceneDetails = replaceCanonicalMainAliases(
     input.sceneDetails,
+    "sceneDetails",
+    rosterAliasReplacements,
+    applied,
+  );
+  const canonicalSceneDetails = replaceSafeObjectAliases(
+    rosterCanonicalSceneDetails,
     "sceneDetails",
     objectCharacterNames,
     applied,
     unresolved,
   );
   if (canonicalSceneDetails !== input.sceneDetails) next.sceneDetails = canonicalSceneDetails;
+
+  (["action", "sceneDetails"] as const).forEach((field) => {
+    const value = next[field];
+    if (typeof value !== "string") return;
+    findSafeMainCharacterAliasMentions(value, mainCharacterNames).forEach(({ alias, resolution }) => {
+      if (resolution.status !== "ambiguous") return;
+      unresolved.push({
+        kind: "ambiguous_main_character_alias",
+        field,
+        alias,
+        candidates: resolution.candidates,
+      });
+    });
+  });
 
   const visibleText = `${typeof next.action === "string" ? next.action : ""} ${
     typeof next.sceneDetails === "string" ? next.sceneDetails : ""

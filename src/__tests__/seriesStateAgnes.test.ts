@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -15,13 +15,31 @@ import {
   agnesKeyArtPaths,
 } from "../services/agnesKeyArtService.js";
 import {
+  AGNES_STATIC_VIDEO_QA_MODEL,
+  AGNES_STATIC_VIDEO_QA_PIPELINE,
+  AGNES_STATIC_VIDEO_QA_PIPELINE_VERSION,
+  AGNES_STATIC_VIDEO_QA_POLICY_VERSION,
+  createAgnesStaticEpisodeAssetSetDigest,
+  createAgnesStaticVideoQaRequestDigest,
+  currentAgnesStaticVideoQaPolicyDigest,
+} from "../services/agnesStaticVideoQaService.js";
+import {
   NARRATION_METADATA_KIND,
   NARRATION_METADATA_SCHEMA_VERSION,
+  buildTtsTool,
   createNarrationAudioRequestDigest,
   narrationAudioMetadataPath,
 } from "../tools/ttsTool.js";
 
 const openStates: SeriesState[] = [];
+const AGNES_VIDEO_QA_POLICY_VERSION = 3;
+const AGNES_VIDEO_QA_PIPELINE = "retired_test_cascade";
+const AGNES_VIDEO_QA_PIPELINE_VERSION = 1;
+const LEGACY_SCREENING_MODEL = "retired-screening-model";
+const LEGACY_ESCALATION_MODEL = "retired-escalation-model";
+const currentAgnesVideoQaPolicyDigest = () => createHash("sha256")
+  .update("retired-test-cascade-policy")
+  .digest("hex");
 
 async function createStateWithEpisode(): Promise<SeriesState> {
   const state = new SeriesState("file::memory:", "");
@@ -95,6 +113,145 @@ describe("SeriesState Agnes persistence", () => {
       });
     } finally {
       (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
+    }
+  });
+
+  it("audits a metadata-tolerant 12-second crossover from the fresh measured duration", async () => {
+    const state = await createStateWithEpisode();
+    const previousOutputDir = CONFIG.outputDir;
+    const previousFfprobePath = CONFIG.ffprobePath;
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "audio-audit-boundary-"));
+    const fakeProbe = path.join(outputDir, "fake-ffprobe.sh");
+    await writeFile(fakeProbe, "#!/bin/sh\nprintf '12.02\\n'\n", "utf8");
+    await chmod(fakeProbe, 0o755);
+    (CONFIG as { outputDir: string }).outputDir = outputDir;
+    (CONFIG as { ffprobePath: string }).ffprobePath = fakeProbe;
+
+    try {
+      const narrationText =
+        "Pip carries the bright berry while patient friends smile beside their little clubhouse.";
+      const script = {
+        title: "Boundary Check",
+        scenes: [{ sceneNumber: 1, narrationText }],
+      };
+      const narrationPath = path.join(
+        outputDir,
+        "series_1",
+        "episode_2",
+        "audio",
+        "scene_001_narrator.wav",
+      );
+      await mkdir(path.dirname(narrationPath), { recursive: true });
+      await writeFile(narrationPath, "boundary-wave", "utf8");
+      await writeFile(narrationAudioMetadataPath(narrationPath), JSON.stringify({
+        schemaVersion: NARRATION_METADATA_SCHEMA_VERSION,
+        kind: NARRATION_METADATA_KIND,
+        requestDigest: createNarrationAudioRequestDigest({
+          text: narrationText,
+          model: CONFIG.groqTtsModel,
+          voice: CONFIG.groqTtsVoice,
+        }),
+        model: CONFIG.groqTtsModel,
+        voice: CONFIG.groqTtsVoice,
+        responseFormat: "wav",
+        textLength: narrationText.length,
+        spokenWordCount: 13,
+        durationSeconds: 11.98,
+        durationStatus: "ready",
+      }), "utf8");
+
+      const audit = await state.auditEpisodeNarrationAudioTiming(1, script);
+
+      expect(audit).toEqual({
+        complete: true,
+        sceneCount: 1,
+        verifiedSceneCount: 1,
+        totalDurationSeconds: 12.02,
+        durationExceededScenes: [{ sceneNumber: 1, durationSeconds: 12.02 }],
+        invalidSceneNumbers: [],
+      });
+    } finally {
+      (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
+      (CONFIG as { ffprobePath: string }).ffprobePath = previousFfprobePath;
+    }
+  });
+
+  it("regenerates a reverse-boundary sidecar before SeriesState accepts episode audio", async () => {
+    const state = await createStateWithEpisode();
+    const previousOutputDir = CONFIG.outputDir;
+    const previousFfprobePath = CONFIG.ffprobePath;
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "audio-readiness-convergence-"));
+    const fakeProbe = path.join(outputDir, "fake-ffprobe.sh");
+    await writeFile(
+      fakeProbe,
+      "#!/bin/sh\ncase \"$*\" in\n*scene_001_narrator.wav*) printf '11.99\\n' ;;\n*) printf '7.5\\n' ;;\nesac\n",
+      "utf8",
+    );
+    await chmod(fakeProbe, 0o755);
+    (CONFIG as { outputDir: string }).outputDir = outputDir;
+    (CONFIG as { ffprobePath: string }).ffprobePath = fakeProbe;
+
+    try {
+      const script = productionScript();
+      await state.updateEpisodeStatus(1, "script", { scriptJson: script });
+      let sceneOneDuration = 12.01;
+      let generationCount = 0;
+      const tts = buildTtsTool({
+        outputDir,
+        audioGenerator: {
+          invoke: async ({ outputPath }) => {
+            generationCount += 1;
+            await writeFile(outputPath, `wave-${generationCount}`, "utf8");
+            return outputPath;
+          },
+        },
+        probeDurationSeconds: async (filePath) =>
+          filePath.includes("scene_001_") ? sceneOneDuration : 7.5,
+        retryDelayMs: () => 0,
+      });
+
+      const first = JSON.parse(await (tts as any).func({
+        seriesId: 1,
+        episodeNumber: 2,
+        sceneNumber: 1,
+        text: script.scenes[0]!.narrationText,
+      }));
+      expect(first).toMatchObject({
+        status: "duration_exceeded",
+        readyForAgnes: false,
+        reused: false,
+        durationSeconds: 12.01,
+      });
+
+      sceneOneDuration = 11.99;
+      const converged = JSON.parse(await (tts as any).func({
+        seriesId: 1,
+        episodeNumber: 2,
+        sceneNumber: 1,
+        text: script.scenes[0]!.narrationText,
+      }));
+      expect(converged).toMatchObject({
+        status: "generated",
+        readyForAgnes: true,
+        reused: false,
+        durationSeconds: 11.99,
+      });
+
+      for (const scene of script.scenes.slice(1)) {
+        await (tts as any).func({
+          seriesId: 1,
+          episodeNumber: 2,
+          sceneNumber: scene.sceneNumber,
+          text: scene.narrationText,
+        });
+      }
+
+      expect(generationCount).toBe(41);
+      const readiness = await state.assertEpisodeAudioReady(1);
+      expect(readiness.totalDurationSeconds).toBeCloseTo(304.49, 5);
+    } finally {
+      (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
+      (CONFIG as { ffprobePath: string }).ffprobePath = previousFfprobePath;
     }
   });
 
@@ -294,7 +451,7 @@ describe("SeriesState Agnes persistence", () => {
       ...expectedSnapshot,
       qaRequestDigest: "5".repeat(64),
       videoSha256,
-      result: { policyVersion: 1, pass: true },
+      result: { policyVersion: AGNES_VIDEO_QA_POLICY_VERSION, pass: true },
       contactSheetPath: path.join(directory, "passing-sheet.jpg"),
       model: "openai/gpt-5-image",
       status: "passed",
@@ -309,7 +466,7 @@ describe("SeriesState Agnes persistence", () => {
       ...expectedSnapshot,
       qaRequestDigest: "6".repeat(64),
       videoSha256,
-      result: { policyVersion: 1, pass: false },
+      result: { policyVersion: AGNES_VIDEO_QA_POLICY_VERSION, pass: false },
       contactSheetPath: path.join(directory, "stale-sheet.jpg"),
       model: "openai/gpt-5-image",
       status: "exhausted",
@@ -332,7 +489,7 @@ describe("SeriesState Agnes persistence", () => {
       ...expectedSnapshot,
       qaRequestDigest: "7".repeat(64),
       videoSha256,
-      result: { policyVersion: 1, pass: false },
+      result: { policyVersion: AGNES_VIDEO_QA_POLICY_VERSION, pass: false },
       contactSheetPath: path.join(directory, "stale-sheet.jpg"),
       model: "openai/gpt-5-image",
       retryPrompt: "Stale retry prompt",
@@ -351,6 +508,155 @@ describe("SeriesState Agnes persistence", () => {
       client: { execute(sql: string): Promise<{ rows: any[] }> };
     }).client;
     expect((await client.execute("SELECT id FROM agnes_scene_generation_history")).rows).toEqual([]);
+  });
+
+  it("persists a CAS-bound screening checkpoint and resumes with only the final Pro verdict", async () => {
+    const state = await createStateWithEpisode();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "qa-screening-resume-state-"));
+    const videoPath = path.join(directory, "scene_001.mp4");
+    await writeFile(videoPath, "screened-video");
+    const requestDigest = "9".repeat(64);
+    const videoSha256 = createHash("sha256").update("screened-video").digest("hex");
+    const screenRequestDigest = "a".repeat(64);
+    const finalRequestDigest = "b".repeat(64);
+    const referenceBoardSha256 = "c".repeat(64);
+    const portraitSetDigest = "d".repeat(64);
+    const contactSheetSha256 = "e".repeat(64);
+    const policyDigest = currentAgnesVideoQaPolicyDigest();
+    const screenVerdict = {
+      sceneNumber: 1,
+      pass: false,
+      confidence: 0.96,
+      issues: [{
+        code: "duplicate_entity",
+        characterNames: ["Pip the Ant"],
+        frames: ["middle"],
+        description: "Pip appears twice in the middle frame.",
+      }],
+    };
+
+    await state.upsertAgnesSceneGeneration({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      status: "completed",
+      downloadStatus: "downloaded",
+      prompt: "Current prompt",
+      requestDigest,
+      attemptCount: 1,
+      seed: 100,
+      requestedDurationSeconds: 6,
+      providerDurationSeconds: 6,
+      normalizedOutputPath: videoPath,
+    });
+
+    const screeningResult = {
+      policyVersion: AGNES_VIDEO_QA_POLICY_VERSION,
+      pipeline: AGNES_VIDEO_QA_PIPELINE,
+      pipelineVersion: AGNES_VIDEO_QA_PIPELINE_VERSION,
+      policyDigest,
+      decision: "screening",
+      model: LEGACY_SCREENING_MODEL,
+      screeningModel: LEGACY_SCREENING_MODEL,
+      escalationModel: LEGACY_ESCALATION_MODEL,
+      referenceBoardSha256,
+      portraitSetDigest,
+      contactSheetSha256,
+      videoSha256,
+      qaRequestDigest: screenRequestDigest,
+      generationRequestDigest: requestDigest,
+      renderRevision: 0,
+      sceneNumber: 1,
+      screenVerdict,
+    };
+    const originalSnapshot = {
+      expectedRequestDigest: requestDigest,
+      expectedRenderRevision: 0,
+      expectedNormalizedOutputPath: videoPath,
+      expectedQaStatus: "pending" as const,
+      expectedQaRequestDigest: null,
+    };
+    const screening = await state.recordAgnesVideoQaScreening({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...originalSnapshot,
+      qaRequestDigest: screenRequestDigest,
+      videoSha256,
+      result: screeningResult,
+      contactSheetPath: path.join(directory, "screening-sheet.jpg"),
+      model: LEGACY_SCREENING_MODEL,
+    });
+
+    expect(screening.recorded).toBe(true);
+    expect(screening.row).toMatchObject({
+      qaStatus: "pending",
+      qaRequestDigest: screenRequestDigest,
+      qaVideoSha256: videoSha256,
+      qaModel: LEGACY_SCREENING_MODEL,
+      qaResult: screeningResult,
+      qaError: null,
+    });
+
+    const staleScreening = await state.recordAgnesVideoQaScreening({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      ...originalSnapshot,
+      qaRequestDigest: "f".repeat(64),
+      videoSha256,
+      result: { ...screeningResult, qaRequestDigest: "f".repeat(64) },
+      contactSheetPath: path.join(directory, "stale-sheet.jpg"),
+      model: LEGACY_SCREENING_MODEL,
+    });
+    expect(staleScreening.recorded).toBe(false);
+
+    const resumed = await state.getAgnesSceneGeneration(1, 2, 1, "text");
+    expect(resumed).toMatchObject({
+      qaStatus: "pending",
+      qaRequestDigest: screenRequestDigest,
+      qaResult: screeningResult,
+    });
+    const reviewVerdict = { sceneNumber: 1, pass: true, confidence: 0.99, issues: [] };
+    const finalResult = {
+      ...screeningResult,
+      decision: "final",
+      model: LEGACY_ESCALATION_MODEL,
+      finalJudgeModel: LEGACY_ESCALATION_MODEL,
+      screenRequestDigest,
+      reviewReason: ["screen_failure"],
+      reviewVerdict,
+      qaRequestDigest: finalRequestDigest,
+      ...reviewVerdict,
+    };
+    const finalVerdict = await state.recordAgnesVideoQaVerdict({
+      seriesId: 1,
+      episodeNumber: 2,
+      sceneNumber: 1,
+      variant: "text",
+      expectedRequestDigest: requestDigest,
+      expectedRenderRevision: 0,
+      expectedNormalizedOutputPath: videoPath,
+      expectedQaStatus: "pending",
+      expectedQaRequestDigest: screenRequestDigest,
+      qaRequestDigest: finalRequestDigest,
+      videoSha256,
+      result: finalResult,
+      contactSheetPath: path.join(directory, "pro-sheet.jpg"),
+      model: LEGACY_ESCALATION_MODEL,
+      status: "passed",
+    });
+
+    expect(finalVerdict.recorded).toBe(true);
+    expect(finalVerdict.row).toMatchObject({
+      qaStatus: "passed",
+      qaRequestDigest: finalRequestDigest,
+      qaModel: LEGACY_ESCALATION_MODEL,
+      qaResult: finalResult,
+    });
   });
 
   it("leases narration mutations, advances revisions on commit, and fences expired owners", async () => {
@@ -1070,13 +1376,6 @@ describe("SeriesState Agnes persistence", () => {
       { portrait: { path: portraitPath } },
       "One small red ant with an exact locked preschool design.",
     );
-    const portraitSetDigest = createHash("sha256").update(JSON.stringify([{
-      name: "Pip the Ant",
-      sha256: createHash("sha256").update("valid-pip-portrait").digest("hex"),
-    }])).digest("hex");
-    const referenceBoardSha256 = createHash("sha256").update("reference-board").digest("hex");
-    const contactSheetSha256 = createHash("sha256").update("contact-sheet").digest("hex");
-
     for (const scene of scenes) {
       const stem = `scene_${String(scene.sceneNumber).padStart(3, "0")}`;
       const narrationPath = path.join(episodeDir, "audio", `${stem}_narrator.wav`);
@@ -1114,37 +1413,6 @@ describe("SeriesState Agnes persistence", () => {
         requestedDurationSeconds: 7.5,
         providerDurationSeconds: 8,
         normalizedOutputPath: videoPath,
-      });
-      const qaRequestDigest = createHash("sha256").update(`qa-${scene.sceneNumber}`).digest("hex");
-      const videoSha256 = createHash("sha256").update("valid-video").digest("hex");
-      await state.recordAgnesVideoQaVerdict({
-        seriesId: 1,
-        episodeNumber: 2,
-        sceneNumber: scene.sceneNumber,
-        variant: "text",
-        expectedRequestDigest: requestDigest,
-        expectedRenderRevision: 0,
-        expectedNormalizedOutputPath: videoPath,
-        expectedQaStatus: "pending",
-        expectedQaRequestDigest: null,
-        qaRequestDigest,
-        videoSha256,
-        result: {
-          policyVersion: 1,
-          model: CONFIG.anyApiVideoQaModel,
-          sceneNumber: scene.sceneNumber,
-          pass: true,
-          generationRequestDigest: requestDigest,
-          renderRevision: 0,
-          qaRequestDigest,
-          videoSha256,
-          portraitSetDigest,
-          referenceBoardSha256,
-          contactSheetSha256,
-        },
-        contactSheetPath: "/tmp/contact-sheet.jpg",
-        model: CONFIG.anyApiVideoQaModel,
-        status: "passed",
       });
     }
 
@@ -1199,35 +1467,74 @@ describe("SeriesState Agnes persistence", () => {
         providerDurationSeconds: 8,
         normalizedOutputPath: paths.normalizedVideoPath,
       });
-      const qaRequestDigest = createHash("sha256").update(`qa-${spec.kind}`).digest("hex");
-      const videoSha256 = createHash("sha256").update("valid-key-art-video").digest("hex");
+    }
+
+    const qaReportPath = path.join(episodeDir, "agnes_text", "qa", "static_media_integrity_v1.json");
+    await mkdir(path.dirname(qaReportPath), { recursive: true });
+    await writeFile(qaReportPath, "static QA evidence", "utf8");
+    const agnesRows = await state.listAgnesSceneGenerations(1, 2, "text");
+    const sources = await Promise.all(agnesRows.map(async (row) => ({
+      row,
+      videoSha256: createHash("sha256")
+        .update(await readFile(row.normalizedOutputPath!))
+        .digest("hex"),
+    })));
+    const episodeAssetSetDigest = createAgnesStaticEpisodeAssetSetDigest(
+      sources.map(({ row, videoSha256 }) => ({
+        sceneNumber: row.sceneNumber,
+        generationRequestDigest: row.requestDigest!,
+        renderRevision: row.renderRevision,
+        videoSha256,
+      })),
+    );
+    for (const { row, videoSha256 } of sources) {
+      const media = {
+        durationSeconds: 7.5,
+        codecName: "h264",
+        width: 1_920,
+        height: 1_080,
+        videoStreamCount: 1,
+        audioStreamCount: 0,
+      };
+      const digestInput = {
+        sceneNumber: row.sceneNumber,
+        generationRequestDigest: row.requestDigest!,
+        renderRevision: row.renderRevision,
+        videoSha256,
+        episodeAssetSetDigest,
+        expectedMainCast: ["Pip the Ant"],
+        referenceImageUrls: [],
+        media,
+      };
+      const qaRequestDigest = createAgnesStaticVideoQaRequestDigest(digestInput);
       await state.recordAgnesVideoQaVerdict({
         seriesId: 1,
         episodeNumber: 2,
-        sceneNumber: spec.trackingSceneNumber,
+        sceneNumber: row.sceneNumber,
         variant: "text",
-        expectedRequestDigest: requestDigest,
-        expectedRenderRevision: 0,
-        expectedNormalizedOutputPath: paths.normalizedVideoPath,
+        expectedRequestDigest: row.requestDigest!,
+        expectedRenderRevision: row.renderRevision,
+        expectedNormalizedOutputPath: row.normalizedOutputPath!,
         expectedQaStatus: "pending",
         expectedQaRequestDigest: null,
         qaRequestDigest,
         videoSha256,
         result: {
-          policyVersion: 1,
-          model: CONFIG.anyApiVideoQaModel,
-          sceneNumber: spec.trackingSceneNumber,
-          pass: true,
-          generationRequestDigest: requestDigest,
-          renderRevision: 0,
+          policyVersion: AGNES_STATIC_VIDEO_QA_POLICY_VERSION,
+          pipeline: AGNES_STATIC_VIDEO_QA_PIPELINE,
+          pipelineVersion: AGNES_STATIC_VIDEO_QA_PIPELINE_VERSION,
+          policyDigest: currentAgnesStaticVideoQaPolicyDigest(),
+          decision: "final",
+          model: AGNES_STATIC_VIDEO_QA_MODEL,
+          ...digestInput,
           qaRequestDigest,
-          videoSha256,
-          portraitSetDigest,
-          referenceBoardSha256,
-          contactSheetSha256,
+          pass: true,
+          checks: [],
+          issues: [],
+          evidencePath: qaReportPath,
         },
-        contactSheetPath: "/tmp/contact-sheet.jpg",
-        model: CONFIG.anyApiVideoQaModel,
+        contactSheetPath: qaReportPath,
+        model: AGNES_STATIC_VIDEO_QA_MODEL,
         status: "passed",
       });
     }
@@ -1276,7 +1583,7 @@ describe("SeriesState Agnes persistence", () => {
     }
   });
 
-  it("invalidates prior video QA when an approved character portrait changes", async () => {
+  it("does not bind static video QA to a replaceable local portrait cache", async () => {
     const state = await createStateWithEpisode();
     const previousOutputDir = CONFIG.outputDir;
     const outputDir = await mkdtemp(path.join(os.tmpdir(), "qa-portrait-binding-"));
@@ -1285,7 +1592,7 @@ describe("SeriesState Agnes persistence", () => {
       await prepareProductionEpisode(state, outputDir);
       await writeFile(path.join(outputDir, "pip_portrait.png"), "changed-pip-portrait", "utf8");
       await expect(state.assertAgnesVideoQaReady(1, 2))
-        .rejects.toThrow("stale or incompletely bound");
+        .resolves.toMatchObject({ assetCount: 42 });
     } finally {
       (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
     }

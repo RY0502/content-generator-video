@@ -44,16 +44,29 @@ export class AnyApiModelBusyError extends Error {
   }
 }
 
+export class AnyApiAccessDeniedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AnyApiAccessDeniedError";
+  }
+}
+
+function anyApiEndpoint(path: string): string {
+  const baseUrl = CONFIG.anyApiBaseUrl.replace(/\/+$/gu, "");
+  const versionedBaseUrl = /\/v1$/iu.test(baseUrl) ? baseUrl : `${baseUrl}/v1`;
+  return `${versionedBaseUrl}/${path.replace(/^\/+|\/+$/gu, "")}`;
+}
+
 async function generateWithAnyApiKey(
   prompt: string,
   apiKey: string,
   model: string = CONFIG.anyApiImageModel,
-  size: string = "1792x1024"
+  size: string = "1024x1024"
 ): Promise<Buffer> {
   // Extract key identifier for logging (first 8 chars + last 4 chars)
   const keyId = apiKey.length > 12 ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : "unknown";
   
-  const response = await fetch("https://api.anyapi.ai/v1/images/generations", {
+  const response = await fetch(anyApiEndpoint("images/generations"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -64,7 +77,6 @@ async function generateWithAnyApiKey(
       model: model,
       n: 1,
       size: size,
-      response_format: "b64_json",
     }),
   });
 
@@ -80,6 +92,13 @@ async function generateWithAnyApiKey(
 
     const errorMessage = errorData.error?.message || responseText;
     const errorCode = errorData.error?.code || String(response.status);
+
+    if (response.status === 401 || response.status === 403) {
+      console.warn(`[AnyAPI] Access denied on key ${keyId}: ${errorMessage}`);
+      throw new AnyApiAccessDeniedError(
+        `AnyAPI access denied for model "${model}" (HTTP ${response.status}): ${errorMessage}`,
+      );
+    }
 
     if (response.status === 429 || errorMessage.toLowerCase().includes("rate limit")) {
       console.warn(`[AnyAPI] Rate limit on key ${keyId}: ${errorMessage}`);
@@ -189,6 +208,13 @@ function classifyAnyApiError(
   const errorMessage = errorData.error?.message || responseText;
   const errorCode = errorData.error?.code || String(response.status);
 
+  if (response.status === 401 || response.status === 403) {
+    console.warn(`[AnyAPI] Access denied on key ${keyId}: ${errorMessage}`);
+    throw new AnyApiAccessDeniedError(
+      `${label} access denied (HTTP ${response.status}): ${errorMessage}`,
+    );
+  }
+
   if (response.status === 429 || errorMessage.toLowerCase().includes("rate limit")) {
     console.warn(`[AnyAPI] Rate limit on key ${keyId}: ${errorMessage}`);
     throw new AnyApiRateLimitError(`Rate limit exceeded: ${errorMessage}`);
@@ -232,7 +258,7 @@ async function editWithAnyApiKey(params: {
 
   const base64Image = imageBytes.toString("base64");
 
-  const response = await fetch("https://api.anyapi.ai/v1/chat/completions", {
+  const response = await fetch(anyApiEndpoint("chat/completions"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -464,7 +490,7 @@ async function editWithReferenceAnyApiKey(params: {
   const base64Reference = referenceImageBytes.toString("base64");
   const base64Scene = imageBytes.toString("base64");
 
-  const response = await fetch("https://api.anyapi.ai/v1/chat/completions", {
+  const response = await fetch(anyApiEndpoint("chat/completions"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,

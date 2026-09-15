@@ -13,11 +13,13 @@ export const DEEP_AGENT_PROVIDER_HTTP_TIMEOUTS = Object.freeze({
 });
 export const NVIDIA_DEEP_AGENT_MAX_TOKENS = 32_768;
 /**
- * Keep the hard thinking allowance below the observed failure boundary so a
- * long internal plan cannot consume the response before the structured tool
- * call. The full completion allowance remains available for detailed scenes.
+ * Nemotron can use nearly all of a small reasoning allowance before it emits
+ * the required tool call. Give complex script-authoring turns enough room to
+ * plan while retaining a separate 32K completion ceiling for detailed scene
+ * payloads. Truncated forced-tool responses are handled by the model-call
+ * failover middleware before any domain tool can execute.
  */
-export const NVIDIA_DEEP_AGENT_REASONING_BUDGET = 2_048;
+export const NVIDIA_DEEP_AGENT_REASONING_BUDGET = 16_384;
 export const NVIDIA_DEEP_AGENT_TEMPERATURE = 1;
 export const NVIDIA_DEEP_AGENT_TOP_P = 0.95;
 export const NVIDIA_DEEP_AGENT_CHAT_TEMPLATE_KWARGS = Object.freeze({

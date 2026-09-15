@@ -501,6 +501,83 @@ describe("seriesStateTools", () => {
     expect(getEpisodeScriptDraft).toHaveBeenCalledWith(7);
   });
 
+  it("routes a complete legacy runtime-rejected draft through compact revalidation", async () => {
+    const availability = {
+      kind: "ready",
+      episode: {
+        id: 7,
+        seriesId: 12,
+        episodeNumber: 3,
+        title: "The Windy Picnic",
+        premise: "Pip and friends save a picnic from the wind.",
+        status: "audio",
+        scriptJson: buildProductionScript(),
+        outputPath: null,
+        youtubeVideoId: null,
+        youtubeUrl: null,
+        uploadedAt: null,
+        completedAt: null,
+        completionLocalDate: null,
+      },
+      timeZone: "Asia/Kolkata",
+      localDate: "2026-09-04",
+    };
+    const assertEpisodeAudioReady = vi.fn();
+    const tools = buildSeriesStateTools({
+      getNextEpisodeAvailability: vi.fn().mockResolvedValue(availability),
+      getSeriesCharacters: vi.fn().mockResolvedValue([
+        { name: "Pip the Ant", description: "A patient red ant." },
+      ]),
+      listAgnesSceneGenerations: vi.fn().mockResolvedValue([]),
+      getEpisodeScriptDraft: vi.fn().mockResolvedValue({
+        episodeId: 7,
+        revision: 5,
+        contentDigest: "b".repeat(64),
+        // A complete draft has no in-progress chunk-authoring envelope.
+        scriptJson: buildProductionScript(),
+        validation: {
+          pass: false,
+          sceneCount: 40,
+          totalSpokenWords: 780,
+          issueCount: 1,
+          issues: [
+            "Measured total narration is 284.952 seconds; the production minimum is 300 seconds.",
+          ],
+          omittedIssueCount: 0,
+          repairEvidence: {
+            durationExceededScenes: [],
+            measuredTotalNarrationSeconds: 284.952,
+            measuredNarrationSceneCount: 40,
+            minimumReplacementSpokenWords: 825,
+          },
+        },
+        createdAt: "2026-09-04T01:00:00.000Z",
+        updatedAt: "2026-09-04T02:00:00.000Z",
+      }),
+      assertEpisodeAudioReady,
+    } as any);
+    const tool = tools.find((entry) => entry.name === "get_next_episode");
+
+    const parsed = JSON.parse(await (tool as any).call({ seriesId: 12 }));
+
+    expect(parsed.resumeAction).toBe("repair_script");
+    expect(parsed.scriptDraft).toMatchObject({
+      episodeId: 7,
+      revision: 5,
+      validation: {
+        pass: false,
+        requiredAction: "refine",
+        durableTimingEvidence: {
+          durationExceededSceneCount: 0,
+          hasMeasuredTotalNarrationSeconds: true,
+          measuredNarrationSceneCount: 40,
+        },
+      },
+    });
+    expect(parsed.scriptDraft).not.toHaveProperty("authoringProgress");
+    expect(assertEpisodeAudioReady).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       label: "repairable before Agnes",

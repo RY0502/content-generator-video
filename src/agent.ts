@@ -2,10 +2,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import {
   CONFIG as FRAMEWORK_CONFIG,
-  CustomStateStore,
   DatabaseClient,
   DeepAgentRunner,
-  hashUserPrompt,
   validateConfig,
 } from "freetier-deepagent-framework";
 import { CONFIG, validateProjectConfig } from "./config.js";
@@ -30,7 +28,7 @@ import { buildSystemPromptExtension } from "./systemPrompt.js";
 import { buildAgnesSceneVideoTools } from "./tools/agnesSceneVideoTool.js";
 import { buildAgnesVideoQaTool } from "./tools/agnesVideoQaTool.js";
 import { buildCaptionTool } from "./tools/captionTool.js";
-import { buildEnsureSeriesCharacterSheetsTool } from "./tools/characterSheetTool.js";
+import { buildEnsureSeriesCharacterPortraitsTool } from "./tools/seriesCharacterPortraitTool.js";
 import { buildEpisodeAssemblyTool } from "./tools/episodeAssemblyTool.js";
 import {
   buildEpisodeScriptChunkTool,
@@ -44,6 +42,8 @@ import {
   buildYoutubeSeriesMetadataTool,
 } from "./tools/youtubeMetadataTool.js";
 import { buildYoutubeUploadTool } from "./tools/youtubeUploadTool.js";
+import { deleteSupabaseSeriesCharacterReferences } from "./providers/supabaseCharacterReferenceStore.js";
+import { configuredSupabaseCharacterReferenceStoreOptions } from "./services/seriesCharacterPortraitService.js";
 
 /** Runs one canonical episode-agent invocation after bootstrap cleanup. */
 export async function runAgent(args: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -71,107 +71,123 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
   const seriesState = new SeriesState();
   await runWithFinalizer({
     run: async () => {
-      const customState = new CustomStateStore(db);
-      const promptHash = hashUserPrompt(conceptPrompt);
-    const youtubeUploadTool = CONFIG.youtubeUploadEnabled ? buildYoutubeUploadTool({
-      getExistingUpload: async ({ seriesId, episodeNumber }) => {
-        const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
-        const episodeReceipt = episode?.uploadedAt && episode.youtubeVideoId && episode.youtubeUrl
-          ? { videoId: episode.youtubeVideoId, url: episode.youtubeUrl }
-          : null;
-        const recoveryReceipt = episodeReceipt
-          ? null
-          : await seriesState.getYoutubeUploadReceipt(seriesId, episodeNumber);
-        const receipt = episodeReceipt ?? (recoveryReceipt
-          ? { videoId: recoveryReceipt.videoId, url: recoveryReceipt.url }
-          : null);
-        if (!receipt) return null;
+      const cleanupCompletedSeriesPortraits = async (seriesId: number): Promise<void> => {
+        if (!(await seriesState.isSeriesFullyCompleted(seriesId))) return;
+        const roster = await seriesState.getSeriesCharacters(seriesId);
+        const deleted = await deleteSupabaseSeriesCharacterReferences(
+          { seriesId, characterNames: roster.map(({ name }) => name) },
+          configuredSupabaseCharacterReferenceStoreOptions(),
+        );
+        console.log("[SupabasePortraits] completed_series_cleanup", {
+          seriesId,
+          deletedObjectCount: deleted.deletedObjectKeys.length,
+        });
+      };
+      const finalizeUploadAndCleanup = async (params: {
+        seriesId: number;
+        episodeNumber: number;
+        videoId: string;
+        url: string;
+      }): Promise<void> => {
+        await seriesState.finalizeEpisodeUpload(params);
+        await cleanupCompletedSeriesPortraits(params.seriesId);
+      };
+      const youtubeUploadTool = CONFIG.youtubeUploadEnabled ? buildYoutubeUploadTool({
+        getExistingUpload: async ({ seriesId, episodeNumber }) => {
+          const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
+          const episodeReceipt = episode?.uploadedAt && episode.youtubeVideoId && episode.youtubeUrl
+            ? { videoId: episode.youtubeVideoId, url: episode.youtubeUrl }
+            : null;
+          const recoveryReceipt = episodeReceipt
+            ? null
+            : await seriesState.getYoutubeUploadReceipt(seriesId, episodeNumber);
+          const receipt = episodeReceipt ?? (recoveryReceipt
+            ? { videoId: recoveryReceipt.videoId, url: recoveryReceipt.url }
+            : null);
+          if (!receipt) return null;
 
-        // A durable remote receipt prevents an unsafe duplicate upload even if
-        // a previous invocation stopped before local finalization completed.
-        try {
-          await seriesState.finalizeEpisodeUpload({
-            seriesId,
-            episodeNumber,
-            videoId: receipt.videoId,
-            url: receipt.url,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          throw new Error(
-            `YouTube upload receipt exists for series ${seriesId}, episode ${episodeNumber}, ` +
-            `so it will not be uploaded again; local finalization remains pending: ${message}`,
-            { cause: error },
-          );
-        }
-        return receipt;
-      },
-      beforeUpload: async ({ seriesId, episodeNumber, videoPath }) => {
-        await seriesState.assertEpisodeUploadAllowedToday(seriesId, episodeNumber);
-        const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
-        if (!episode) {
-          throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
-        }
-        const ready = await seriesState.assertEpisodeReadyForDone(episode.id);
-        if (path.resolve(videoPath) !== path.resolve(ready.outputPath)) {
-          throw new Error(
-            `YouTube upload must use the canonical assembled Agnes video: ${ready.outputPath}`,
-          );
-        }
-      },
-      onUploaded: async ({ seriesId, episodeNumber, videoId, url }) => {
-        await seriesState.finalizeEpisodeUpload({ seriesId, episodeNumber, videoId, url });
-      },
-    }) : null;
-    const systemPromptExtension = buildSystemPromptExtension(CONFIG.youtubeUploadEnabled);
+          // A durable remote receipt prevents an unsafe duplicate upload even if
+          // a previous invocation stopped before local finalization completed.
+          try {
+            await finalizeUploadAndCleanup({
+              seriesId,
+              episodeNumber,
+              videoId: receipt.videoId,
+              url: receipt.url,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(
+              `YouTube upload receipt exists for series ${seriesId}, episode ${episodeNumber}, ` +
+              `so it will not be uploaded again; local finalization remains pending: ${message}`,
+              { cause: error },
+            );
+          }
+          return receipt;
+        },
+        beforeUpload: async ({ seriesId, episodeNumber, videoPath }) => {
+          await seriesState.assertEpisodeUploadAllowedToday(seriesId, episodeNumber);
+          const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
+          if (!episode) {
+            throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
+          }
+          const ready = await seriesState.assertEpisodeReadyForDone(episode.id);
+          if (path.resolve(videoPath) !== path.resolve(ready.outputPath)) {
+            throw new Error(
+              `YouTube upload must use the canonical assembled Agnes video: ${ready.outputPath}`,
+            );
+          }
+        },
+        onUploaded: async ({ seriesId, episodeNumber, videoId, url }) => {
+          await finalizeUploadAndCleanup({ seriesId, episodeNumber, videoId, url });
+        },
+      }) : null;
+      const systemPromptExtension = buildSystemPromptExtension(CONFIG.youtubeUploadEnabled);
 
-    const runner = new DeepAgentRunner(db, {
-      extraTools: [
-        ...buildSeriesStateTools(seriesState, {
-          youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
-        }),
-        buildEnsureSeriesCharacterSheetsTool(seriesState, customState, promptHash),
-        guardTerminalEpisodeInvocationReceipts(buildEpisodeScriptChunkTool(seriesState)),
-        guardTerminalEpisodeInvocationReceipts(buildScriptRefinementTool(seriesState)),
-        buildEndEpisodeInvocationTool(),
-        buildEpisodeTtsTool({ seriesState }),
-        buildSoundLibraryTool(),
-        buildCaptionTool(seriesState),
-        ...buildAgnesSceneVideoTools(seriesState, {
-          includeKeyArt: true,
-          characterSheetCustomState: customState,
-          characterSheetPromptHash: promptHash,
-        }),
-        buildAgnesVideoQaTool(seriesState),
-        buildEpisodeAssemblyTool(seriesState, { includeKeyArt: true }),
-        ...(youtubeUploadTool
-          ? [
-              buildYoutubeEpisodeMetadataTool(seriesState),
-              buildYoutubeSeriesMetadataTool(seriesState),
-              youtubeUploadTool,
-            ]
-          : []),
-      ],
-      extraSubagents: [],
-      systemPromptExtension,
-      callbacks: [new AgentProgressCallback()],
-      recursionLimit: 120,
-    });
-    installDeepAgentBackend(
-      runner,
-      path.join(CONFIG.outputDir, "_deep_agent_state"),
-    );
+      const runner = new DeepAgentRunner(db, {
+        extraTools: [
+          ...buildSeriesStateTools(seriesState, {
+            youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
+            onSeriesComplete: cleanupCompletedSeriesPortraits,
+          }),
+          buildEnsureSeriesCharacterPortraitsTool(seriesState),
+          guardTerminalEpisodeInvocationReceipts(buildEpisodeScriptChunkTool(seriesState)),
+          guardTerminalEpisodeInvocationReceipts(buildScriptRefinementTool(seriesState)),
+          buildEndEpisodeInvocationTool(),
+          buildEpisodeTtsTool({ seriesState }),
+          buildSoundLibraryTool(),
+          buildCaptionTool(seriesState),
+          ...buildAgnesSceneVideoTools(seriesState, { includeKeyArt: true }),
+          buildAgnesVideoQaTool(seriesState),
+          buildEpisodeAssemblyTool(seriesState, { includeKeyArt: true }),
+          ...(youtubeUploadTool
+            ? [
+                buildYoutubeEpisodeMetadataTool(seriesState),
+                buildYoutubeSeriesMetadataTool(seriesState),
+                youtubeUploadTool,
+              ]
+            : []),
+        ],
+        extraSubagents: [],
+        systemPromptExtension,
+        callbacks: [new AgentProgressCallback()],
+        recursionLimit: 120,
+      });
+      installDeepAgentBackend(
+        runner,
+        path.join(CONFIG.outputDir, "_deep_agent_state"),
+      );
 
-    // A fresh Turso database has no domain tables. This also applies every
-    // additive migration required by older installations before the agent runs.
-    await seriesState.initialize();
-    console.log("[episode-agent] Starting compact production flow", {
-      conceptPromptChars: conceptPrompt.length,
-      productionContractChars: systemPromptExtension.length,
-      youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
-    });
-    const result = await runner.run(conceptPrompt);
-    await selectiveCleanupNeon({ preserveAgentRuns: true, preserveCustomState: true });
+      // A fresh Turso database has no domain tables. This also applies every
+      // additive migration required by older installations before the agent runs.
+      await seriesState.initialize();
+      console.log("[episode-agent] Starting compact production flow", {
+        conceptPromptChars: conceptPrompt.length,
+        productionContractChars: systemPromptExtension.length,
+        youtubeUploadEnabled: CONFIG.youtubeUploadEnabled,
+      });
+      const result = await runner.run(conceptPrompt);
+      await selectiveCleanupNeon({ preserveAgentRuns: true, preserveCustomState: true });
       console.log(result.finalText);
     },
     finalize: () => seriesState.close(),

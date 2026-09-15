@@ -1,19 +1,7 @@
 import { inspectEpisodeNarrationManifest } from "./narrationContract.js";
-import {
-  findGenericVisualCastAliases,
-  findMentionedUnlistedFigureNames,
-  isCollectiveSupportingIdentity,
-} from "./sceneCastCanonicalizer.js";
-const UNCOUNTED_BACKGROUND_FIGURE_PATTERN =
-  /\b(?:bystanders?|crowds?|flocks?|herds?|onlookers?|groups? of (?:animals|children|creatures|dinosaurs?|people)|grazing (?:animals|creatures|dinosaurs?|herbivores?))\b/iu;
 
-const CHARACTER_VISUAL_FORMS = new Set([
-  "real_creature",
-  "humanoid",
-  "anthropomorphic_creature",
-  "object_character",
-  "fantasy_creature",
-]);
+/** Agnes accepts at most five named portrait references in one scene request. */
+export const MAX_SCENE_MAIN_CHARACTER_COUNT = 5;
 
 export interface ProductionScriptInspection {
   pass: boolean;
@@ -140,14 +128,37 @@ function normalizedText(value: unknown): string {
   return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
 }
 
+/**
+ * Rejects only unmistakable transport/authoring stubs. This intentionally does
+ * not score prose quality: ordinary short scene text remains valid, while
+ * values such as `...` and `scene 49 action` can never reach Agnes.
+ */
+function isSyntheticSceneFieldPlaceholder(
+  text: string,
+  field: "environmentDescription" | "action",
+): boolean {
+  if (!/[\p{L}\p{N}]/u.test(text)) return true;
+  const label = field === "environmentDescription"
+    ? "(?:environment|environment description)"
+    : "action";
+  return new RegExp(
+    `^(?:scene\\s+\\d+\\s+${label}|${label}\\s+(?:for\\s+)?scene\\s+\\d+)[.!?\\u2026_-]*$`,
+    "iu",
+  ).test(text);
+}
+
 function requiredText(
   scene: Record<string, unknown>,
-  field: "environmentDescription" | "action" | "sceneDetails" | "cameraAngle" | "lighting",
+  field: "environmentDescription" | "action",
   label: string,
   issues: string[],
 ): string {
   const text = normalizedText(scene[field]);
-  if (!text) issues.push(`${label} is missing required ${field}.`);
+  if (!text) {
+    issues.push(`${label} is missing required ${field}.`);
+  } else if (isSyntheticSceneFieldPlaceholder(text, field)) {
+    issues.push(`${label} ${field} must be real filmable prose, not a placeholder.`);
+  }
   return text;
 }
 
@@ -174,22 +185,12 @@ function stringArray(
   return output;
 }
 
-function descriptorIdentity(descriptor: string): string {
-  return descriptor.split(":", 1)[0]!.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
-}
-
-function mentionedStableFigureNames(text: string, names: readonly string[]): string[] {
-  return names.filter((name) => {
-    if (!name || name.length > 500) return false;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`, "iu").test(text);
-  });
-}
-
 /**
- * Validates the complete persisted production script, including the visual
- * metadata that must survive script-level splitting. This complements the
- * narration-only limits with a fixed-cast and direct-video prompt contract.
+ * Validates only the objective production boundary required by TTS and Agnes:
+ * a 40-60 scene manifest, bounded narration, filmable action/environment text,
+ * and an exact, unique main-character roster. Rich visual metadata remains
+ * useful authoring input but is deliberately advisory because Agnes receives
+ * canonical portrait references plus these exact character names.
  */
 export function inspectProductionScript(
   value: unknown,
@@ -212,53 +213,20 @@ export function inspectProductionScript(
     issues.push("The fixed main-character roster must contain unique, non-empty names.");
   }
 
-  const visualIdentityByCharacter = new Map<string, string>();
-  const supportingDescriptorByIdentity = new Map<string, string>();
-  const sceneBeatBySignature = new Map<string, number>();
-  const knownFigureIdentities = new Set(roster.map((name) => name.toLocaleLowerCase()));
-  scenes.forEach((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
-    const raw = (entry as Record<string, unknown>).supportingEntities;
-    if (!Array.isArray(raw)) return;
-    raw.forEach((descriptor) => {
-      const text = normalizedText(descriptor);
-      if (text) knownFigureIdentities.add(descriptorIdentity(text));
-    });
-  });
-
   scenes.forEach((entry, index) => {
     const label = `Scene ${index + 1}`;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
     const scene = entry as Record<string, unknown>;
-    const environment = requiredText(scene, "environmentDescription", label, issues);
-    const action = requiredText(scene, "action", label, issues);
-    const sceneDetails = requiredText(scene, "sceneDetails", label, issues);
-    requiredText(scene, "cameraAngle", label, issues);
-    requiredText(scene, "lighting", label, issues);
-
-    // Renumbering a duplicated entry makes its sceneNumber look unique but does
-    // not make it a new filmable beat. Reject byte-insensitive clones before
-    // they can create a second TTS request, Agnes render, and assembly entry.
-    const narrationText = normalizedText(scene.narrationText);
-    const beatSignature = JSON.stringify([
-      environment.toLocaleLowerCase(),
-      action.toLocaleLowerCase(),
-      sceneDetails.toLocaleLowerCase(),
-      narrationText.toLocaleLowerCase(),
-    ]);
-    if (environment && action && sceneDetails && narrationText) {
-      const duplicateOf = sceneBeatBySignature.get(beatSignature);
-      if (duplicateOf !== undefined) {
-        issues.push(
-          `${label} duplicates the complete narration/action beat from Scene ${duplicateOf}; ` +
-          "each scene must be a distinct visible beat.",
-        );
-      } else {
-        sceneBeatBySignature.set(beatSignature, index + 1);
-      }
-    }
+    requiredText(scene, "environmentDescription", label, issues);
+    requiredText(scene, "action", label, issues);
 
     const characterNames = stringArray(scene.characterNames, "characterNames", label, issues, true);
+    if (characterNames.length > MAX_SCENE_MAIN_CHARACTER_COUNT) {
+      issues.push(
+        `${label} characterNames contains ${characterNames.length} names; at most ` +
+        `${MAX_SCENE_MAIN_CHARACTER_COUNT} exact roster names are allowed.`,
+      );
+    }
     for (const name of characterNames) {
       if (!rosterSet.has(name)) {
         issues.push(
@@ -267,150 +235,20 @@ export function inspectProductionScript(
       }
     }
 
-    const rawVisuals = scene.characterVisuals;
-    if (!Array.isArray(rawVisuals)) {
-      issues.push(`${label} characterVisuals must be an array aligned 1:1 with characterNames.`);
-    } else {
-      if (rawVisuals.length !== characterNames.length) {
-        issues.push(`${label} characterVisuals must align 1:1 with characterNames.`);
-      }
-      rawVisuals.forEach((visual, visualIndex) => {
-        if (!visual || typeof visual !== "object" || Array.isArray(visual)) {
-          issues.push(`${label} characterVisuals[${visualIndex}] must be an object.`);
-          return;
-        }
-        const item = visual as Record<string, unknown>;
-        const name = normalizedText(item.name);
-        if (!name || name !== characterNames[visualIndex]) {
-          issues.push(`${label} characterVisuals[${visualIndex}].name must exactly match characterNames order.`);
-        }
-        if (!CHARACTER_VISUAL_FORMS.has(String(item.visualForm))) {
-          issues.push(`${label} characterVisuals[${visualIndex}] has an invalid visualForm.`);
-        }
-        if (item.speciesOrType !== undefined && !normalizedText(item.speciesOrType)) {
-          issues.push(`${label} characterVisuals[${visualIndex}].speciesOrType must be non-empty when supplied.`);
-        }
-        if (item.humanoidAllowed !== undefined && typeof item.humanoidAllowed !== "boolean") {
-          issues.push(`${label} characterVisuals[${visualIndex}].humanoidAllowed must be boolean when supplied.`);
-        }
-        if (name) {
-          const identity = JSON.stringify({
-            visualForm: item.visualForm,
-            speciesOrType: normalizedText(item.speciesOrType) || null,
-            humanoidAllowed: item.humanoidAllowed ?? null,
-          });
-          const prior = visualIdentityByCharacter.get(name);
-          if (prior && prior !== identity) {
-            issues.push(`${label} changes locked characterVisuals metadata for "${name}".`);
-          } else {
-            visualIdentityByCharacter.set(name, identity);
-          }
-        }
-      });
-    }
-
-    const supportingEntities = stringArray(
+    stringArray(
       scene.supportingEntities,
       "supportingEntities",
       label,
       issues,
       false,
     );
-    const supportingIdentities = supportingEntities.map(descriptorIdentity).filter(Boolean);
-    if (new Set(supportingIdentities).size !== supportingIdentities.length) {
-      issues.push(`${label} supportingEntities contains the same stable identity more than once.`);
-    }
-    supportingEntities.forEach((descriptor) => {
-      if (!descriptor.includes(":")) {
-        issues.push(
-          `${label} supporting entity "${descriptor}" must use "Stable name: locked visual descriptor" format.`,
-        );
-      }
-      const identity = descriptorIdentity(descriptor);
-      if (isCollectiveSupportingIdentity(identity)) {
-        issues.push(
-          `${label} supporting entity "${descriptor.split(":", 1)[0]}" is a group. ` +
-          "Each supportingEntities entry must identify exactly one visible individual.",
-        );
-      }
-      if (roster.some((name) => name.toLocaleLowerCase() === identity)) {
-        issues.push(`${label} places main character "${descriptor.split(":", 1)[0]}" in supportingEntities.`);
-      }
-      const prior = supportingDescriptorByIdentity.get(identity);
-      if (prior && prior !== descriptor) {
-        issues.push(
-          `${label} changes the supportingEntities descriptor for "${descriptor.split(":", 1)[0]}"; ` +
-          "repeat recurring descriptors verbatim.",
-        );
-      } else if (identity) {
-        supportingDescriptorByIdentity.set(identity, descriptor);
-      }
-    });
-
-    const anchors = stringArray(
+    stringArray(
       scene.continuityAnchors,
       "continuityAnchors",
       label,
       issues,
       false,
     );
-    anchors.forEach((anchor) => {
-      const overlappingIdentities = mentionedStableFigureNames(anchor, [...knownFigureIdentities]);
-      if (overlappingIdentities.length > 0) {
-        issues.push(
-          `${label} continuity anchor "${anchor.split(":", 1)[0]}" redefines a character or living entity. ` +
-          "continuityAnchors are only for non-living props, layout, and environmental state; keep figure state in action or sceneDetails.",
-        );
-      }
-    });
-    const figuresInEnvironment = mentionedStableFigureNames(environment, [...knownFigureIdentities]);
-    if (figuresInEnvironment.length > 0) {
-      issues.push(
-        `${label} environmentDescription mentions visible figure ${JSON.stringify(figuresInEnvironment[0])}. ` +
-        "Keep environments figure-free and put every visible individual only in characterNames or supportingEntities.",
-      );
-    }
-    if (UNCOUNTED_BACKGROUND_FIGURE_PATTERN.test(environment)) {
-      issues.push(
-        `${label} environmentDescription introduces uncounted background figures. ` +
-        "Keep environments figure-free and list every visible individual in characterNames or supportingEntities.",
-      );
-    }
-    const exactSceneFigureNames = [
-      ...characterNames,
-      ...supportingEntities.map((descriptor) => descriptor.split(":", 1)[0]!.trim()),
-    ];
-    const declaredButUnstagedFigures = exactSceneFigureNames.filter(
-      (name) => mentionedStableFigureNames(`${action} ${sceneDetails}`, [name]).length === 0,
-    );
-    for (const unstagedName of declaredButUnstagedFigures) {
-      issues.push(
-        `${label} declares figure ${JSON.stringify(unstagedName)} but never names it in action/sceneDetails. ` +
-        "Explicitly stage every declared visible individual by its exact stable name so the cast count is unambiguous.",
-      );
-    }
-    const mentionedUnlistedFigures = findMentionedUnlistedFigureNames(
-      `${action} ${sceneDetails}`,
-      [...knownFigureIdentities],
-      exactSceneFigureNames,
-    );
-    for (const unlistedName of mentionedUnlistedFigures) {
-      issues.push(
-        `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(unlistedName)}. ` +
-        "Every visible figure must be counted exactly once in characterNames or supportingEntities for this scene.",
-      );
-    }
-    const ambiguousAliases = findGenericVisualCastAliases(
-      `${action} ${sceneDetails}`,
-      exactSceneFigureNames,
-    );
-    if (ambiguousAliases.length > 0) {
-      issues.push(
-        `${label} action/sceneDetails uses a collective or generic cast alias ` +
-        `(${ambiguousAliases.map((alias) => JSON.stringify(alias)).join(", ")}). ` +
-        "Use the exact stable name of every visible figure, including object characters, so one alias cannot become a second body.",
-      );
-    }
   });
 
   return {

@@ -117,6 +117,13 @@ describe("NVIDIA main deep-agent profile", () => {
     });
   });
 
+  it("retains enough reasoning capacity to emit complex forced script tool calls", () => {
+    expect(NVIDIA_DEEP_AGENT_REASONING_BUDGET).toBe(16_384);
+    expect(NVIDIA_DEEP_AGENT_REASONING_BUDGET).toBeLessThan(
+      NVIDIA_DEEP_AGENT_MAX_TOKENS,
+    );
+  });
+
   it("reconstructs fallback models with bounded transport while preserving provider fields", () => {
     const original = new ProviderManager("anyapi").getModel();
     const originalFields = constructionFields(original);

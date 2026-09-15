@@ -20,11 +20,7 @@ import {
   type AgnesVideoMode,
   type AgnesVideoTask,
 } from "../providers/agnes/index.js";
-import {
-  publishAgnesReferenceImage,
-  type AgnesReferenceImagePublisherOptions,
-  type PublishAgnesReferenceImageParams,
-} from "../providers/agnesReferenceImagePublisher.js";
+import { canonicalCharacterImageName } from "../providers/supabaseCharacterReferenceStore.js";
 import {
   buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtVideoPrompt,
@@ -40,10 +36,8 @@ import {
 } from "../services/agnesKeyArtService.js";
 import { canonicalizeKeyArtTitle } from "../services/keyArtTitleContract.js";
 import {
-  buildLockedCharacterIdentity,
-  ensureSeriesCharacterSheets,
-  type EnsureSeriesCharacterSheetsResult,
-} from "../services/characterSheetService.js";
+  ensureSeriesCharacterPortraits,
+} from "../services/seriesCharacterPortraitService.js";
 import {
   hasStartedAgnesSubmission,
   ProductionScriptContractError,
@@ -62,7 +56,6 @@ import {
   narrationAudioMetadataPath,
   readNarrationAudioMetadata,
 } from "./ttsTool.js";
-import type { CustomStateStore } from "freetier-deepagent-framework";
 
 const MIN_VIDEO_BYTES = 1_024;
 const OUTPUT_FPS = 30;
@@ -197,6 +190,12 @@ export interface AgnesAccountClientOption {
   keyFingerprint?: string;
 }
 
+type EnsureSeriesCharacterPortraitsOperation = (params: {
+  seriesState: SeriesState;
+  seriesId: number;
+  roster?: readonly { name: string; description: string }[];
+}) => Promise<unknown>;
+
 export interface AgnesSceneVideoToolOptions {
   client?: AgnesClientLike;
   /** Explicit account lanes. Primarily useful for tests and custom runtimes. */
@@ -215,14 +214,8 @@ export interface AgnesSceneVideoToolOptions {
   includeKeyArt?: boolean;
   /** Injectable title-audio preparation used by focused tests. */
   ensureKeyArtAudioAssets?: typeof ensureAgnesKeyArtAudioAssets;
-  /** Durable portrait checkpoint dependencies used by the roster preflight. */
-  characterSheetCustomState?: CustomStateStore;
-  characterSheetPromptHash?: string;
-  /** Injectable complete-roster operation used by focused tests. */
-  ensureSeriesCharacterSheets?: typeof ensureSeriesCharacterSheets;
-  /** Injectable/publication seam for approved character portrait references. */
-  publishReferenceImage?: typeof publishAgnesReferenceImage;
-  referencePublisherOptions?: AgnesReferenceImagePublisherOptions;
+  /** Injectable portrait-only roster operation used by focused tests. */
+  ensureSeriesCharacterPortraits?: EnsureSeriesCharacterPortraitsOperation;
 }
 
 interface WorkflowRuntime {
@@ -247,20 +240,7 @@ interface WorkflowRuntime {
   selectedSceneNumbers?: readonly number[];
   includeKeyArt: boolean;
   ensureKeyArtAudioAssets: typeof ensureAgnesKeyArtAudioAssets;
-  ensureSeriesCharacterSheets: (params: {
-    seriesState: SeriesState;
-    seriesId: number;
-    roster?: readonly { name: string; description: string }[];
-    customState?: CustomStateStore;
-    promptHash?: string;
-  }) => Promise<EnsureSeriesCharacterSheetsResult>;
-  publishReferenceImage: typeof publishAgnesReferenceImage;
-  referencePublisherOptions: AgnesReferenceImagePublisherOptions;
-  /** One content-addressed portrait upload per runtime, shared by every scene. */
-  publishedCharacterReferences: Map<string, Promise<string>>;
-  referenceFallbackDiagnostics: Set<string>;
-  characterSheetCustomState?: CustomStateStore;
-  characterSheetPromptHash?: string;
+  ensureSeriesCharacterPortraits: EnsureSeriesCharacterPortraitsOperation;
 }
 
 interface AgnesAccountRuntime {
@@ -622,6 +602,8 @@ export function createAgnesVideoRequestDigest(params: {
 }
 
 export type AgnesVideoQaIssueCode =
+  | "live_action_intrusion"
+  | "multi_shot_discontinuity"
   | "duplicate_entity"
   | "wrong_cast"
   | "identity_drift"
@@ -633,9 +615,11 @@ export type AgnesVideoQaIssueCode =
   | "title_error";
 
 const QA_RETRY_DIRECTIVES: Record<AgnesVideoQaIssueCode, string> = {
-  duplicate_entity: "Render each listed figure exactly once and never clone a person, creature, or object character.",
-  wrong_cast: "Render exactly the named visible cast, with no missing, substituted, or unlisted figure.",
-  identity_drift: "Match every locked character identity exactly in face, hair, body form, wardrobe, colors, and proportions.",
+  live_action_intrusion: "Keep one full-screen 2D painted animated world for every frame; never show or composite a live-action or photoreal presenter, host, narrator, spokesperson, talking head, studio person, foreground overlay, picture-in-picture insert, reaction shot, or cutaway.",
+  multi_shot_discontinuity: "Render one unbroken story shot with one camera and one location; never cut, cross-fade, dissolve, switch medium, insert another shot, replay the beat, or replace the cast midway.",
+  duplicate_entity: "Enforce the visible-cast ledger literally from first frame to last: each listed person, creature, companion, or living object appears exactly once on one continuous trajectory, with no clone, second copy, foreground double, background double, reflection, re-entry, split, fork, or morph-generated duplicate.",
+  wrong_cast: "Render every named ledger figure exactly once and all other figures zero times; no missing, substituted, generic, background, foreground, entering, exiting, cropped, or unlisted person, child, adult, creature, companion, or living object.",
+  identity_drift: "Treat every canonical identity and approved portrait description as immutable: preserve exact face, numeric age, hair, skin/fur/material, body or object form, wardrobe, colors, markings, accessories, silhouette, and proportions from first frame to last.",
   age_mismatch: "Preserve each named human character's exact stated age and child proportions.",
   anatomy_error: "Keep every figure anatomically clean with one head, one face, and the correct number of separate limbs.",
   style_drift: "Use only the locked 2D hand-painted storybook style, palette, line treatment, and material rendering.",
@@ -643,6 +627,11 @@ const QA_RETRY_DIRECTIVES: Record<AgnesVideoQaIssueCode, string> = {
   repeated_scene: "Create a clearly new composition and action beat, not a reuse of the neighboring shot.",
   title_error: "Show the exact requested title once, stable and readable, with no other text.",
 };
+
+const AGNES_ANIMATED_MEDIUM_GUARD =
+  "FULL-SHOT MEDIUM LOCK — one full-screen 2D painted animated story world for the entire clip. " +
+  "No live-action or photoreal presenter, host, narrator, spokesperson, talking head, studio person, " +
+  "picture-in-picture insert, foreground overlay, reaction shot, cutaway, or mixed-medium transition.";
 
 export function agnesAssetSeedDiscriminator(sceneNumber: number): string {
   if (sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE) return "series-key-art";
@@ -662,18 +651,101 @@ export function qaIssueCodesFromResult(value: unknown): AgnesVideoQaIssueCode[] 
   }))];
 }
 
+/**
+ * Heals only the narrow legacy object-character alias understood by the
+ * durable script canonicalizer (`Bobo` -> `Bobo the Backpack`, for example).
+ * Exact canonical-name spans are protected so the replacement can never
+ * produce `Bobo the Backpack the Backpack`. Conflicting aliases fail closed
+ * instead of placing two identity labels in a rerender prompt.
+ */
+export function canonicalizeLegacyAgnesPromptCast(
+  prompt: string,
+  expectedCast: readonly { name: string }[],
+): string {
+  const names = expectedCast
+    .map(({ name }) => name.replace(/\s+/gu, " ").trim())
+    .filter(Boolean);
+  const byAlias = new Map<string, { alias: string; canonicalName: string }>();
+  for (const canonicalName of names) {
+    const match = canonicalName.match(/^(.+?)\s+the\s+(backpack|bag|satchel)$/iu);
+    if (!match) continue;
+    const alias = match[1]!.trim();
+    const key = alias.toLocaleLowerCase();
+    const existing = byAlias.get(key);
+    if (existing && existing.canonicalName.toLocaleLowerCase() !== canonicalName.toLocaleLowerCase()) {
+      throw new Error(`Cannot canonicalize ambiguous Agnes cast alias ${JSON.stringify(alias)}.`);
+    }
+    if (names.some((name) => name.toLocaleLowerCase() === key)) {
+      throw new Error(`Cannot canonicalize Agnes cast alias ${JSON.stringify(alias)} because it is also an exact cast name.`);
+    }
+    byAlias.set(key, { alias, canonicalName });
+  }
+
+  const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  let output = prompt;
+  for (const { alias, canonicalName } of byAlias.values()) {
+    const canonicalSpans = [...output.matchAll(new RegExp(
+      `(?<![\\p{L}\\p{N}_])${escaped(canonicalName)}(?![\\p{L}\\p{N}_])`,
+      "giu",
+    ))].flatMap((match) => match.index === undefined
+      ? []
+      : [{ start: match.index, end: match.index + match[0].length }]);
+    output = output.replace(
+      new RegExp(`(?<![\\p{L}\\p{N}_])${escaped(alias)}(?![\\p{L}\\p{N}_])`, "giu"),
+      (matched, ...args: unknown[]) => {
+        const offset = args.at(-2);
+        if (typeof offset !== "number") return matched;
+        const end = offset + matched.length;
+        return canonicalSpans.some((span) => offset >= span.start && end <= span.end)
+          ? matched
+          : canonicalName;
+      },
+    );
+  }
+  return output;
+}
+
 /** Adds only validated category-level corrections; raw judge prose never reaches Agnes. */
 export function buildAgnesQaRetryPrompt(
   prompt: string,
   issueCodes: readonly AgnesVideoQaIssueCode[],
+  expectedCast: readonly { name: string; description: string }[] = [],
 ): string {
-  const uniqueCodes = [...new Set(issueCodes)].filter((code) => code in QA_RETRY_DIRECTIVES);
-  const directives = (uniqueCodes.length > 0 ? uniqueCodes : [
+  const mandatoryCodes: AgnesVideoQaIssueCode[] = [
+    "live_action_intrusion",
+    "multi_shot_discontinuity",
     "duplicate_entity",
+    "wrong_cast",
     "identity_drift",
-    "scene_mismatch",
-  ] as AgnesVideoQaIssueCode[]).map((code) => QA_RETRY_DIRECTIVES[code]);
-  return `${prompt.trim()} QA RERENDER CORRECTION — Previous render was rejected. ${directives.join(" ")}`;
+  ];
+  const uniqueCodes = [...new Set([...mandatoryCodes, ...issueCodes])]
+    .filter((code) => code in QA_RETRY_DIRECTIVES);
+  const directives = uniqueCodes.map((code) => QA_RETRY_DIRECTIVES[code]);
+  const exactCast = expectedCast
+    .map(({ name, description }) => ({
+      name: name.replace(/\s+/gu, " ").trim(),
+      description: description.replace(/\s+/gu, " ").trim(),
+    }))
+    .filter(({ name, description }) => name && description);
+  const canonicalPrompt = canonicalizeLegacyAgnesPromptCast(prompt, exactCast);
+  const castLedger = exactCast.length > 0
+    ? `VISIBLE CAST — EXACTLY ${exactCast.length} ${exactCast.length === 1 ? "FIGURE" : "FIGURES"}, NO OTHERS: ` +
+      exactCast.map(({ name }) => `[${name}] × 1`).join("; ") + "."
+    : canonicalPrompt.match(/VISIBLE CAST —[^\n]+/u)?.[0]?.trim();
+  const identityRepair = exactCast.length > 0
+    ? "FINAL IDENTITY LOCK — " + exactCast
+      .map(({ name, description }) => `[${name}]: ${description}`)
+      .join(" | ")
+    : "";
+  return [
+    canonicalPrompt.trim(),
+    `QA RERENDER CORRECTION — Previous render was rejected. ${directives.join(" ")}`,
+    castLedger
+      ? `FINAL CAST CHECK AT OUTPUT — ${castLedger} Keep that exact count and those exact identities in every frame; all other figures have count zero.`
+      : "",
+    identityRepair,
+    AGNES_ANIMATED_MEDIUM_GUARD,
+  ].filter(Boolean).join(" ");
 }
 
 /** Stable per-asset diversity while preserving deterministic reruns. */
@@ -730,7 +802,9 @@ function withReferenceIdentityMap(
   characters: readonly { name: string }[],
 ): string {
   const mapping = characters
-    .map(({ name }, index) => `reference image ${index + 1} is the approved portrait of ${name}`)
+    .map(({ name }, index) => (
+      `<Picture ${index + 1}> is ${canonicalCharacterImageName(name)}.png, the approved portrait of ${name}`
+    ))
     .join("; ");
   return `${prompt.trim()} REFERENCE IMAGE IDENTITY MAP — ${mapping}. Treat each portrait as the `
     + "authoritative identity and art-style reference; preserve its exact age, face, hair, body form, "
@@ -739,9 +813,11 @@ function withReferenceIdentityMap(
 
 function withCharacterIntegrityGuard(canonicalPrompt: string): string {
   const prompt = canonicalPrompt.trim();
-  return prompt.includes(CHARACTER_INTEGRITY_NEGATIVE_BIBLE)
-    ? prompt
-    : `${prompt} ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
+  return [
+    prompt,
+    prompt.includes(CHARACTER_INTEGRITY_NEGATIVE_BIBLE) ? "" : CHARACTER_INTEGRITY_NEGATIVE_BIBLE,
+    prompt.includes(AGNES_ANIMATED_MEDIUM_GUARD) ? "" : AGNES_ANIMATED_MEDIUM_GUARD,
+  ].filter(Boolean).join(" ");
 }
 
 export function buildAgnesVideoPrompt(params: {
@@ -1349,22 +1425,9 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     haltedSubmissions: new Set<string>(),
     includeKeyArt: options.includeKeyArt ?? true,
     ensureKeyArtAudioAssets: options.ensureKeyArtAudioAssets ?? ensureAgnesKeyArtAudioAssets,
-    ensureSeriesCharacterSheets: options.ensureSeriesCharacterSheets ?? ensureSeriesCharacterSheets,
-    publishReferenceImage: options.publishReferenceImage ?? publishAgnesReferenceImage,
-    referencePublisherOptions: options.referencePublisherOptions ?? {
-      uploadBaseUrl: CONFIG.agnesReferenceUploadBaseUrl,
-      publicBaseUrl: CONFIG.agnesReferencePublicBaseUrl,
-      bearerToken: CONFIG.agnesReferenceUploadBearerToken,
-      requestTimeoutMs: CONFIG.agnesRequestTimeoutMs,
-    },
-    publishedCharacterReferences: new Map<string, Promise<string>>(),
-    referenceFallbackDiagnostics: new Set<string>(),
-    ...(options.characterSheetCustomState
-      ? { characterSheetCustomState: options.characterSheetCustomState }
-      : {}),
-    ...(options.characterSheetPromptHash
-      ? { characterSheetPromptHash: options.characterSheetPromptHash }
-      : {}),
+    ensureSeriesCharacterPortraits:
+      options.ensureSeriesCharacterPortraits
+      ?? ensureSeriesCharacterPortraits,
     ...(options.sceneNumbers ? { selectedSceneNumbers: [...options.sceneNumbers] } : {}),
   };
 }
@@ -1380,23 +1443,6 @@ function referenceTextFallback(prompt: string): ReferenceConditioning {
   return { providerPrompt: prompt, providerMode: "text", referenceImageUrls: [] };
 }
 
-function logReferenceFallbackOnce(
-  runtime: WorkflowRuntime,
-  reason: string,
-  detail: string,
-): void {
-  if (runtime.referenceFallbackDiagnostics.has(reason)) return;
-  runtime.referenceFallbackDiagnostics.add(reason);
-  logAgnesProgress("character_reference_fallback", { reason, detail }, "warn");
-}
-
-function hasLocalReferencePublisher(runtime: WorkflowRuntime): boolean {
-  return Boolean(
-    runtime.referencePublisherOptions.uploadBaseUrl?.trim()
-    && runtime.referencePublisherOptions.publicBaseUrl?.trim(),
-  );
-}
-
 function isPublicHttpsReference(source: string): boolean {
   try {
     const parsed = new URL(source);
@@ -1408,8 +1454,9 @@ function isPublicHttpsReference(source: string): boolean {
 
 /**
  * Enables reference mode only when every visible main character has one
- * durable public portrait URL. Any incomplete/unconfigured set falls back as
- * a whole to text mode; partial reference sets would bias identities unevenly.
+ * durable public Supabase portrait URL. New work fails closed instead of
+ * silently losing identity conditioning. Accepted legacy work remains bound
+ * to its exact persisted mode, prompt, and URL set.
  */
 async function resolveReferenceConditioning(params: {
   runtime: WorkflowRuntime;
@@ -1428,12 +1475,13 @@ async function resolveReferenceConditioning(params: {
 
   if (params.requiredCharacterNames.length === 0) return referenceTextFallback(params.prompt);
   if (params.requiredCharacterNames.length > AGNES_MAX_REFERENCE_IMAGES) {
-    logReferenceFallbackOnce(
-      params.runtime,
-      "too_many_visible_characters",
-      `Agnes accepts at most ${AGNES_MAX_REFERENCE_IMAGES} reference images; using the complete text identity instead.`,
+    throw new Error(
+      `Agnes accepts at most ${AGNES_MAX_REFERENCE_IMAGES} visible main-character references; ` +
+      `this asset requests ${params.requiredCharacterNames.length}.`,
     );
-    return referenceTextFallback(params.prompt);
+  }
+  if (new Set(params.requiredCharacterNames).size !== params.requiredCharacterNames.length) {
+    throw new Error("Agnes reference character names must be unique and ordered exactly once.");
   }
 
   const existingUrls = parseAgnesReferenceImageUrls(params.existingRow?.publicReferenceUrl);
@@ -1458,55 +1506,27 @@ async function resolveReferenceConditioning(params: {
     source: sourcesByName.get(name)?.trim() ?? "",
   }));
   if (orderedSources.some(({ source }) => !source)) {
-    logReferenceFallbackOnce(
-      params.runtime,
-      "portrait_missing",
-      "At least one visible character has no approved portrait path; using complete text identities for this asset.",
+    throw new Error(
+      "At least one visible main character has no approved public Supabase portrait URL. " +
+      "Run ensure_series_character_portraits before Agnes submission.",
     );
-    return referenceTextFallback(params.prompt);
   }
-  if (!hasLocalReferencePublisher(params.runtime)
-    && orderedSources.some(({ source }) => !isPublicHttpsReference(source))) {
-    logReferenceFallbackOnce(
-      params.runtime,
-      "publisher_not_configured",
-      "Local portraits require AGNES_REFERENCE_UPLOAD_BASE_URL and AGNES_REFERENCE_PUBLIC_BASE_URL; using text mode.",
+  if (orderedSources.some(({ source }) => !isPublicHttpsReference(source))) {
+    throw new Error(
+      "Every visible main-character reference must be an anonymous credential-free HTTPS Supabase public URL.",
     );
-    return referenceTextFallback(params.prompt);
   }
-
-  try {
-    const referenceImageUrls: string[] = [];
-    for (const { name, source } of orderedSources) {
-      const cacheKey = `${params.seriesId}\u0000${name}\u0000${source}`;
-      let publication = params.runtime.publishedCharacterReferences.get(cacheKey);
-      if (!publication) {
-        const publicationParams: PublishAgnesReferenceImageParams = {
-          source,
-          seriesId: params.seriesId,
-          characterName: name,
-        };
-        publication = params.runtime.publishReferenceImage(
-          publicationParams,
-          params.runtime.referencePublisherOptions,
-        );
-        params.runtime.publishedCharacterReferences.set(cacheKey, publication);
-      }
-      referenceImageUrls.push(await publication);
-    }
-    return {
-      providerPrompt: expectedReferencePrompt,
-      providerMode: "reference",
-      referenceImageUrls,
-    };
-  } catch (error) {
-    logReferenceFallbackOnce(
-      params.runtime,
-      "portrait_publication_failed",
-      safeProgressError(error),
+  const referenceImageUrls = orderedSources.map(({ source }) => source);
+  if (new Set(referenceImageUrls).size !== referenceImageUrls.length) {
+    throw new Error(
+      "Two visible main characters resolve to the same portrait URL; each identity requires its own object.",
     );
-    return referenceTextFallback(params.prompt);
   }
+  return {
+    providerPrompt: expectedReferencePrompt,
+    providerMode: "reference",
+    referenceImageUrls,
+  };
 }
 
 async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episodeNumber: number): Promise<PreparedScene[]> {
@@ -1551,29 +1571,22 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
     // must never mutate a character identity after submission has begun.
     const lockedCharacters: Array<{
       name: string;
-      description: string;
-      portraitSource?: string;
+      portraitSource: string;
     }> = [];
     for (const character of characters) {
       const sheet = await runtime.seriesState.getCharacterSheet(seriesId, character.name);
-      if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
+      const publicUrl = sheet?.referenceImagePaths?.portrait?.publicUrl?.trim();
+      if (!sheet?.approvedAt || !publicUrl) {
         throw new Error(
-          `Approved character sheet for "${character.name}" is missing` +
+          `Approved public character portrait for "${character.name}" is missing` +
           (agnesSubmissionStarted
-            ? " after Agnes submission already started, so its locked identity cannot be regenerated."
-            : " before Agnes submission. Run the submit phase to repair the complete roster before any provider request."),
+            ? " after Agnes submission already started, so its frozen reference cannot be changed."
+            : " before Agnes submission. Run the portrait preflight before any provider request."),
         );
       }
       lockedCharacters.push({
         name: character.name,
-        description: buildLockedCharacterIdentity({
-          characterName: character.name,
-          characterDescription: character.description,
-          generationPrompt: sheet.generationPrompt,
-        }),
-        ...(sheet.referenceImagePaths?.portrait?.path
-          ? { portraitSource: sheet.referenceImagePaths.portrait.path }
-          : {}),
+        portraitSource: publicUrl,
       });
     }
 
@@ -1630,7 +1643,6 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
             || `A warm preschool adventure series starring ${lockedCharacters.map(({ name }) => name).join(", ")}.`,
           environmentDescription: script.scenes[0]?.environmentDescription,
           characterNames: [protagonist.name],
-          characterDescriptions: [protagonist.description],
         }),
       },
       {
@@ -1643,7 +1655,6 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
           episodePremise: episode.premise,
           environmentDescription: script.scenes[0]?.environmentDescription,
           mainCharacterName: protagonist.name,
-          mainCharacterDescription: protagonist.description,
         }),
       },
     ];
@@ -2453,12 +2464,10 @@ async function ensureRosterBeforeFirstAgnesClaim(
   if (roster.length === 0) {
     throw new Error(`Series ${seriesId} has no stored characters for its key-art video.`);
   }
-  await runtime.ensureSeriesCharacterSheets({
+  await runtime.ensureSeriesCharacterPortraits({
     seriesState: runtime.seriesState,
     seriesId,
     roster,
-    customState: runtime.characterSheetCustomState,
-    promptHash: runtime.characterSheetPromptHash,
   });
 }
 
@@ -3042,7 +3051,7 @@ function submitTool(runtime: WorkflowRuntime): DynamicStructuredTool {
   return new DynamicStructuredTool({
     name: "submit_agnes_scene_videos",
     description:
-      "Before the first durable provider claim, deterministically ensures and verifies the complete stored character-sheet roster; after claims begin, preserves the locked identities and fails closed if one is missing. Then submits both key-art title-card videos plus one text-to-video Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
+      "Before the first durable provider claim, verifies that the complete stored 1-5 character roster has public Supabase portraits; after claims begin, preserves frozen references and fails closed if one is missing. Then submits both key-art title-card videos plus one image-reference Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
       "Only definite account rate/quota/credit limits fail over; all intents/receipts are durable, and queue-full or ambiguous failures stay pending until another invocation. " +
       "An invalid persisted script returns repair_required before any provider call, or repair_blocked when durable submission evidence already exists. " +
       "Typed local narration drift returns audio_repair_required before any provider call.",

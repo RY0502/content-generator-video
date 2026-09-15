@@ -16,7 +16,7 @@ const productionTools = [
   { name: "get_or_create_series" },
   { name: "bulk_insert_episode_list" },
   { name: "get_next_episode" },
-  { name: "ensure_series_character_sheets" },
+  { name: "ensure_series_character_portraits" },
   { name: "write_episode_script_chunk" },
   { name: "stage_episode_script_draft" },
   { name: "refine_episode_script" },
@@ -98,7 +98,7 @@ describe("production tool protocol middleware", () => {
       extraReceipt: {
         scriptValidation: { status: "not_started" },
       },
-      expectedTool: "ensure_series_character_sheets",
+      expectedTool: "ensure_series_character_portraits",
       expectedArgs: { seriesId: 42 },
     },
     {
@@ -218,9 +218,9 @@ describe("production tool protocol middleware", () => {
             }),
             getNextCallId,
           ),
-          toolCallResponse("ensure_series_character_sheets", { seriesId: 42 }),
+          toolCallResponse("ensure_series_character_portraits", { seriesId: 42 }),
           toolResult(
-            "ensure_series_character_sheets",
+            "ensure_series_character_portraits",
             '{"status":"complete_roster_approved","seriesId":42}',
           ),
         ]),
@@ -396,6 +396,72 @@ describe("production tool protocol middleware", () => {
       targetSceneCount: 40,
       authoringPlan: durablePlan,
       scenes,
+    });
+  });
+
+  it("keeps only durable routing and word floor authoritative during an infeasible restart replan", async () => {
+    const replacementPlan = {
+      storyArc: "A longer replacement arc with enough distinct beats for the measured runtime floor.",
+      beats: [{ startScene: 1, endScene: 42 }],
+    };
+    const replacementScenes = [{
+      sceneNumber: 1,
+      narrationText: "Mia follows the lantern toward a new and clearly distinct clue.",
+    }];
+    const response = toolCallResponse("write_episode_script_chunk", {
+      episodeId: 999,
+      operation: "start",
+      expectedDraftRevision: 1,
+      minimumReplacementSpokenWords: 750,
+      targetSceneCount: 42,
+      authoringPlan: replacementPlan,
+      scenes: replacementScenes,
+    });
+    const handler = vi.fn().mockResolvedValue(response);
+    const modelRequest = request([
+      new HumanMessage("Generate the next episode."),
+      toolCallResponse("write_episode_script_chunk", {
+        episodeId: 17,
+        operation: "restart",
+        expectedDraftRevision: 4,
+        minimumReplacementSpokenWords: 825,
+        targetSceneCount: 40,
+        authoringPlan: { storyArc: "Infeasible old plan." },
+        scenes: [],
+      }),
+      toolResult("write_episode_script_chunk", JSON.stringify({
+        status: "script_chunk_replan_required",
+        persisted: false,
+        retryable: true,
+        retryThisInvocation: true,
+        noProgress: true,
+        episodeId: 17,
+        draftRevision: 4,
+        operation: "restart",
+        minimumReplacementSpokenWords: 825,
+        maximumReachableSpokenWords: 800,
+        minimumRequiredSceneCount: 42,
+      })),
+    ]);
+
+    expect(requiredProductionToolTurn(modelRequest as any)).toBe(
+      "after_write_episode_script_chunk",
+    );
+    const result = await invokeWrapModelCall(modelRequest, handler) as AIMessage;
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].toolChoice).toEqual({
+      type: "function",
+      function: { name: "write_episode_script_chunk" },
+    });
+    expect(result.tool_calls?.[0].args).toEqual({
+      episodeId: 17,
+      operation: "restart",
+      expectedDraftRevision: 4,
+      minimumReplacementSpokenWords: 825,
+      targetSceneCount: 42,
+      authoringPlan: replacementPlan,
+      scenes: replacementScenes,
     });
   });
 
@@ -577,6 +643,59 @@ describe("production tool protocol middleware", () => {
     },
   );
 
+  it("binds exact measured timing from an audio-repair receipt over hallucinated refinement arguments", async () => {
+    const authoritativeTiming = {
+      episodeId: 129,
+      durationExceededScenes: [],
+      measuredTotalNarrationSeconds: 284.952485,
+      measuredNarrationSceneCount: 45,
+    };
+    const hallucinatedTiming = {
+      episodeId: 129,
+      durationExceededScenes: [
+        { sceneNumber: 38, durationSeconds: 16.3 },
+        { sceneNumber: 42, durationSeconds: 16.3 },
+        { sceneNumber: 44, durationSeconds: 18.5 },
+      ],
+      measuredTotalNarrationSeconds: 587.6,
+      measuredNarrationSceneCount: 45,
+    };
+    const response = toolCallResponse("refine_episode_script", hallucinatedTiming);
+    const handler = vi.fn().mockResolvedValue(response);
+    const modelRequest = request([
+      new HumanMessage("Generate the next episode."),
+      toolCallResponse("synthesize_episode_narration_audio", {
+        seriesId: 13,
+        episodeNumber: 4,
+      }),
+      toolResult("synthesize_episode_narration_audio", JSON.stringify({
+        status: "repair_required",
+        readyForAgnes: false,
+        seriesId: 13,
+        episodeId: 129,
+        episodeNumber: 4,
+        sceneCount: 45,
+        measuredNarrationSceneCount: 45,
+        measuredTotalNarrationSeconds: 284.952485,
+        durationExceededScenes: [],
+        totalDurationBelowMinimum: true,
+        minimumTotalNarrationSeconds: 300,
+      })),
+    ]);
+
+    expect(requiredProductionToolTurn(modelRequest as any)).toBe(
+      "after_synthesize_episode_narration_audio",
+    );
+    const result = await invokeWrapModelCall(modelRequest, handler) as AIMessage;
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].toolChoice).toEqual({
+      type: "function",
+      function: { name: "refine_episode_script" },
+    });
+    expect(result.tool_calls?.[0].args).toEqual(authoritativeTiming);
+  });
+
   it("routes a successful legacy draft stage to refinement", async () => {
     const response = toolCallResponse("refine_episode_script", {});
     const handler = vi.fn().mockResolvedValue(response);
@@ -709,7 +828,7 @@ describe("production tool protocol middleware", () => {
       scriptValidation: { status: "not_started" },
     });
     const recovery = toolCallResponse(
-      "ensure_series_character_sheets",
+      "ensure_series_character_portraits",
       { seriesId: 42 },
     );
     const handler = vi.fn()
@@ -729,7 +848,7 @@ describe("production tool protocol middleware", () => {
     for (const [guardedRequest] of handler.mock.calls) {
       expect(guardedRequest.toolChoice).toEqual({
         type: "function",
-        function: { name: "ensure_series_character_sheets" },
+        function: { name: "ensure_series_character_portraits" },
       });
       expect(guardedRequest.modelSettings.parallel_tool_calls).toBe(false);
     }
@@ -747,20 +866,20 @@ describe("production tool protocol middleware", () => {
       tool_calls: [
         {
           id: "first-roster-call",
-          name: "ensure_series_character_sheets",
+          name: "ensure_series_character_portraits",
           args: { seriesId: 42 },
           type: "tool_call",
         },
         {
           id: "second-roster-call",
-          name: "ensure_series_character_sheets",
+          name: "ensure_series_character_portraits",
           args: { seriesId: 42 },
           type: "tool_call",
         },
       ],
     });
     const recovery = toolCallResponse(
-      "ensure_series_character_sheets",
+      "ensure_series_character_portraits",
       { seriesId: 42 },
     );
     const handler = vi.fn()
@@ -899,6 +1018,79 @@ describe("production tool protocol middleware", () => {
     expect(args.scenes).toBe(scenes);
     expect(args).not.toHaveProperty("targetSceneCount");
     expect(args).not.toHaveProperty("authoringPlan");
+  });
+
+  it("forces complete-draft reauthoring through restart while preserving model-owned content", async () => {
+    const authoringPlan = {
+      storyArc: "Mia expands the rescue into enough clear visual beats for a full episode.",
+      educationalIdea: "Careful observation helps solve problems.",
+      endingInsight: "Patient teamwork can guide everyone home.",
+      beats: [{
+        startScene: 1,
+        endScene: 48,
+        storyBeat: "The friends discover, investigate, and resolve the rescue.",
+        setting: "A sunny valley beside the clubhouse.",
+        continuityOutcome: "Everyone returns safely with the clue preserved.",
+      }],
+      supportingEntityBible: [],
+      continuityBible: [],
+    };
+    const scenes = [{
+      sceneNumber: 1,
+      narrationText: "Mia notices one bright clue beside the quiet trail.",
+      sceneDetails: { action: "Mia kneels beside the single clue." },
+    }];
+    const response = toolCallResponse("write_episode_script_chunk", {
+      episodeId: 999,
+      operation: "append",
+      expectedDraftRevision: 1,
+      targetSceneCount: 48,
+      minimumReplacementSpokenWords: 750,
+      authoringPlan,
+      scenes,
+    });
+    const handler = vi.fn().mockResolvedValue(response);
+
+    const result = await invokeWrapModelCall(
+      request([
+        new HumanMessage("Generate the next episode."),
+        toolResult("get_next_episode", JSON.stringify({
+          kind: "ready",
+          episode: { id: 77, seriesId: 42, episodeNumber: 3 },
+          resumeAction: "script_authoring",
+          scriptDraft: {
+            episodeId: 77,
+            revision: 5,
+            validation: {
+              pass: false,
+              requiredAction: "reauthor_complete_script",
+              durableTimingEvidence: {
+                durationExceededSceneCount: 0,
+                hasMeasuredTotalNarrationSeconds: true,
+                measuredNarrationSceneCount: 45,
+                minimumReplacementSpokenWords: 825,
+              },
+            },
+          },
+        })),
+      ]),
+      handler,
+    );
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].toolChoice).toEqual({
+      type: "function",
+      function: { name: "write_episode_script_chunk" },
+    });
+    expect((result as AIMessage).tool_calls?.[0].args).toEqual({
+      episodeId: 77,
+      operation: "restart",
+      expectedDraftRevision: 5,
+      targetSceneCount: 48,
+      minimumReplacementSpokenWords: 825,
+      authoringPlan,
+      scenes,
+    });
   });
 
   it("binds a fresh-run restart marker to restart with its durable plan", async () => {

@@ -20,6 +20,7 @@ import {
   type EpisodeScriptDraftValidation,
   type EpisodeScriptPendingChunkRow,
 } from "../state/seriesState.js";
+import { canonicalCharacterImageName } from "../providers/supabaseCharacterReferenceStore.js";
 
 const INVALID_STATUS_UPDATE = Symbol("invalid-status-update");
 
@@ -57,17 +58,9 @@ function publicDraftValidation(
     };
   }
   if (!repairEvidence) {
-    const onlyDiscardedLegacyTimingIssue = !validation.pass
-      && validation.omittedIssueCount === 0
-      && validation.issues.length > 0
-      && validation.issues.every((issue) =>
-        /^Measured total narration was\s+[\d.]+\s+seconds/iu.test(issue)
-      );
     return {
       ...summary,
-      requiredAction: validation.pass || onlyDiscardedLegacyTimingIssue
-        ? "refine"
-        : "reauthor_complete_script",
+      requiredAction: "refine",
     };
   }
   const durationExceededSceneCount = repairEvidence.durationExceededScenes?.length ?? 0;
@@ -77,7 +70,7 @@ function publicDraftValidation(
       ? "refine"
       : durationExceededSceneCount > 0
         ? "resume_narration_repair"
-        : "reauthor_complete_script",
+        : "refine",
     durableTimingEvidence: {
       durationExceededSceneCount,
       hasMeasuredTotalNarrationSeconds:
@@ -118,6 +111,8 @@ function pendingChunkValidationMessages(
 export interface SeriesStateToolsOptions {
   /** When false, assembled episodes remain resumable but cannot route to an upload capability. */
   youtubeUploadEnabled?: boolean;
+  /** Idempotent remote cleanup invoked only for a genuinely uploaded complete season. */
+  onSeriesComplete?: (seriesId: number) => Promise<void>;
 }
 
 export function buildSeriesStateTools(
@@ -230,9 +225,40 @@ export function buildSeriesStateTools(
       characters: z
         .preprocess(
           parseJsonArrayInput,
-          z.array(z.object({ name: z.string(), description: z.string() })).optional()
+          z.array(z.object({
+            name: z.string().trim().min(1),
+            description: z.string().trim().min(1),
+          }))
+            .min(1, "A series must have at least one main character.")
+            .max(5, "A series may have at most five main characters because Agnes accepts at most five image references.")
+            .superRefine((characters, context) => {
+              const names = new Set<string>();
+              const imageNames = new Set<string>();
+              characters.forEach((character, index) => {
+                const normalizedName = character.name.normalize("NFKC").toLowerCase();
+                if (names.has(normalizedName)) {
+                  context.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `Duplicate main-character name: ${character.name}.`,
+                    path: [index, "name"],
+                  });
+                }
+                names.add(normalizedName);
+
+                const imageName = canonicalCharacterImageName(character.name);
+                if (imageNames.has(imageName)) {
+                  context.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `Main-character name collides at public filename ${imageName}.png.`,
+                    path: [index, "name"],
+                  });
+                }
+                imageNames.add(imageName);
+              });
+            })
+            .optional()
         )
-        .describe("Complete fixed character roster for first creation only. Can be JSON string or array."),
+        .describe("Complete fixed roster of 1-5 uniquely named main characters for first creation only. Can be JSON string or array."),
       environments: z
         .preprocess(
           parseJsonArrayInput,
@@ -356,7 +382,16 @@ export function buildSeriesStateTools(
     schema: z.object({ seriesId: z.number().int().positive() }),
     func: async ({ seriesId }) => {
       const availability = await seriesState.getNextEpisodeAvailability(seriesId);
-      if (availability.kind !== "ready") return JSON.stringify(availability);
+      if (availability.kind !== "ready") {
+        if (
+          availability.kind === "series_complete"
+          && options.onSeriesComplete
+          && await seriesState.isSeriesFullyCompleted(seriesId)
+        ) {
+          await options.onSeriesComplete(seriesId);
+        }
+        return JSON.stringify(availability);
+      }
 
       const [characters, agnesRows, privateDraft, storedPendingChunk] = await Promise.all([
         seriesState.getSeriesCharacters(seriesId),
@@ -419,16 +454,19 @@ export function buildSeriesStateTools(
               }
             : baseScriptAuthoringProgress
         : null;
+      const publicScriptDraftValidation = privateDraft
+        ? publicDraftValidation(privateDraft.validation, {
+            authoringInProgress: scriptAuthoringProgress?.status === "in_progress",
+            pendingRepair: pendingChunk !== null,
+            restartRequired,
+          })
+        : null;
       const scriptDraft = privateDraft
         ? {
             episodeId: privateDraft.episodeId,
             revision: privateDraft.revision,
             contentDigest: privateDraft.contentDigest,
-            validation: publicDraftValidation(privateDraft.validation, {
-              authoringInProgress: scriptAuthoringProgress?.status === "in_progress",
-              pendingRepair: pendingChunk !== null,
-              restartRequired,
-            }),
+            validation: publicScriptDraftValidation,
             ...(scriptAuthoringProgress === null
               ? {}
               : { authoringProgress: scriptAuthoringProgress }),

@@ -7,8 +7,11 @@ const { materializeScenePromptMock } = vi.hoisted(() => ({
   materializeScenePromptMock: vi.fn(async () => ({
     prompt: "CANONICAL SCENE PROMPT WITH LOCKED CHARACTER AND CONTINUITY ANCHORS",
     characterNames: ["Pip the Ant"],
-    characterDescriptions: ["small ruby-red ant, yellow backpack"],
-    characterReferenceSources: [] as Array<{ name: string; source: string }>,
+    characterDescriptions: ["Pip the Ant"],
+    characterReferenceSources: [{
+      name: "Pip the Ant",
+      source: "https://example.supabase.co/storage/v1/object/public/refs/series_7/characters/pip_the_ant.png",
+    }] as Array<{ name: string; source: string }>,
   })),
 }));
 
@@ -66,6 +69,7 @@ import {
   AGNES_PROGRESS_LOG_PREFIX,
   buildAgnesSceneVideoTools as buildAgnesSceneVideoToolsImpl,
   buildAgnesVideoPrompt,
+  buildAgnesQaRetryPrompt,
   createAgnesVideoRequestDigest,
   deriveAgnesAssetSeed,
   AGNES_NORMALIZATION_VERSION,
@@ -689,11 +693,18 @@ describe("three-phase Agnes scene workflow", () => {
       { name: "Pip the Ant", description: "A small red ant." },
       { name: "Bobo the Backpack", description: "A friendly blue talking backpack." },
     ];
-    const approvedSheets = new Map<string, { approvedAt: string; generationPrompt: string }>([[
+    const approvedSheets = new Map<string, {
+      approvedAt: string;
+      generationPrompt: string;
+      referenceImagePaths: { portrait: { publicUrl: string } };
+    }>([[
       "Pip the Ant",
       {
         approvedAt: "2026-09-05T00:00:00.000Z",
-        generationPrompt: "tiny ruby-red ant with six legs, bright eyes, and one yellow backpack",
+        generationPrompt: "Pip the Ant",
+        referenceImagePaths: {
+          portrait: { publicUrl: "https://cdn.example.test/pip_the_ant.png" },
+        },
       },
     ]]);
     Object.assign(state, {
@@ -708,7 +719,10 @@ describe("three-phase Agnes scene workflow", () => {
     const ensureCompleteRoster = vi.fn(async ({ seriesId }: { seriesId: number }) => {
       approvedSheets.set("Bobo the Backpack", {
         approvedAt: "2026-09-06T00:00:00.000Z",
-        generationPrompt: "friendly cobalt-blue backpack, amber eyes, yellow zipper. Always same colors.",
+        generationPrompt: "Bobo the Backpack",
+        referenceImagePaths: {
+          portrait: { publicUrl: "https://cdn.example.test/bobo_the_backpack.png" },
+        },
       });
       return {
         seriesId,
@@ -764,7 +778,7 @@ describe("three-phase Agnes scene workflow", () => {
       submissionIntervalMs: 0,
       statusRequestIntervalMs: 0,
       ensureKeyArtAudioAssets,
-      ensureSeriesCharacterSheets: ensureCompleteRoster as any,
+      ensureSeriesCharacterPortraits: ensureCompleteRoster as any,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
@@ -799,7 +813,7 @@ describe("three-phase Agnes scene workflow", () => {
       AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
     ]) {
       const prompt = rows.get(sceneNumber)?.prompt ?? "";
-      expect(prompt).not.toMatch(/\b(?:poster|thumbnail|cover|image)\b/i);
+      expect(prompt).not.toMatch(/\b(?:poster|thumbnail|cover)\b/i);
       const sections = [
         "SUBJECT AND SETTING",
         "ACTION AND CHANGE",
@@ -856,7 +870,7 @@ describe("three-phase Agnes scene workflow", () => {
       client,
       submissionIntervalMs: 0,
       statusRequestIntervalMs: 0,
-      ensureSeriesCharacterSheets: ensureCompleteRoster,
+      ensureSeriesCharacterPortraits: ensureCompleteRoster,
       ensureKeyArtAudioAssets,
     });
 
@@ -904,7 +918,7 @@ describe("three-phase Agnes scene workflow", () => {
       client,
       submissionIntervalMs: 0,
       statusRequestIntervalMs: 0,
-      ensureSeriesCharacterSheets: ensureCompleteRoster,
+      ensureSeriesCharacterPortraits: ensureCompleteRoster,
     });
 
     await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
@@ -970,7 +984,7 @@ describe("three-phase Agnes scene workflow", () => {
     expect(state.getOrCreateSeriesAgnesSeed).toHaveBeenNthCalledWith(2, 7, undefined);
   });
 
-  it("submits every visible approved portrait in ordered Agnes reference mode and reuses one publication", async () => {
+  it("submits every visible approved Supabase portrait directly in ordered Agnes reference mode", async () => {
     await addAudioFiles(outputDir, 2);
     const { state, rows } = mockState(2);
     const portraitUrl = "https://cdn.example.test/series-7/pip.png";
@@ -987,7 +1001,6 @@ describe("three-phase Agnes scene workflow", () => {
         characterDescriptions: ["locked Pip identity"],
         characterReferenceSources: [{ name: "Pip the Ant", source: portraitUrl }],
       });
-    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
     const requests: AgnesSubmitVideoRequest[] = [];
     const client = {
       submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
@@ -999,14 +1012,12 @@ describe("three-phase Agnes scene workflow", () => {
     };
     const tool = buildSubmitAgnesSceneVideosTool(state as never, {
       client,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
     const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
 
     expect(result.status).toBe("submitted");
-    expect(publishReferenceImage).toHaveBeenCalledOnce();
     expect(requests).toHaveLength(2);
     for (const request of requests) {
       expect(request).toMatchObject({
@@ -1014,7 +1025,7 @@ describe("three-phase Agnes scene workflow", () => {
         images: [portraitUrl],
       });
       expect(request.prompt).toContain(
-        "reference image 1 is the approved portrait of Pip the Ant",
+        "<Picture 1> is pip_the_ant.png, the approved portrait of Pip the Ant",
       );
     }
     expect([...rows.values()].every((row) => (
@@ -1022,7 +1033,7 @@ describe("three-phase Agnes scene workflow", () => {
     ))).toBe(true);
   });
 
-  it("falls back atomically to text mode when a visible portrait has no public route", async () => {
+  it("fails closed when a visible portrait is not a public HTTPS reference", async () => {
     await addAudioFiles(outputDir, 1);
     const { state, rows } = mockState(1);
     materializeScenePromptMock.mockResolvedValueOnce({
@@ -1031,7 +1042,6 @@ describe("three-phase Agnes scene workflow", () => {
       characterDescriptions: ["locked Pip identity"],
       characterReferenceSources: [{ name: "Pip the Ant", source: "/assets/pip.png" }],
     });
-    const publishReferenceImage = vi.fn();
     const requests: AgnesSubmitVideoRequest[] = [];
     const client = {
       submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
@@ -1043,16 +1053,13 @@ describe("three-phase Agnes scene workflow", () => {
     };
     const tool = buildSubmitAgnesSceneVideosTool(state as never, {
       client,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
-    const result = JSON.parse(await (tool as any).func({ seriesId: 7, episodeNumber: 2 }));
-
-    expect(result.status).toBe("submitted");
-    expect(requests).toMatchObject([{ mode: "text" }]);
-    expect(publishReferenceImage).not.toHaveBeenCalled();
-    expect(rows.get(1)?.publicReferenceUrl).toBeNull();
+    await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
+      .rejects.toThrow("credential-free HTTPS Supabase public URL");
+    expect(requests).toEqual([]);
+    expect(rows.size).toBe(0);
   });
 
   it("does not reuse an unaccepted row's reference URL under a changed prompt or character map", async () => {
@@ -1066,7 +1073,6 @@ describe("three-phase Agnes scene workflow", () => {
       characterDescriptions: ["locked Pip identity"],
       characterReferenceSources: [{ name: "Pip the Ant", source: pipUrl }],
     });
-    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
     const firstClient = {
       submitVideo: vi.fn(async () => {
         throw new AgnesError("queue full", { kind: "provider_capacity" });
@@ -1076,7 +1082,6 @@ describe("three-phase Agnes scene workflow", () => {
     };
     await (buildSubmitAgnesSceneVideosTool(state as never, {
       client: firstClient,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     }) as any).func({ seriesId: 7, episodeNumber: 2 });
 
@@ -1097,7 +1102,6 @@ describe("three-phase Agnes scene workflow", () => {
     };
     const result = JSON.parse(await (buildSubmitAgnesSceneVideosTool(state as never, {
       client: secondClient,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     }) as any).func({ seriesId: 7, episodeNumber: 2 }));
 
@@ -1105,7 +1109,6 @@ describe("three-phase Agnes scene workflow", () => {
     expect(submitted).toMatchObject([{ mode: "reference", images: [miaUrl] }]);
     expect(submitted[0]?.prompt).toContain("approved portrait of Mia");
     expect(submitted[0]?.prompt).not.toContain("approved portrait of Pip the Ant");
-    expect(publishReferenceImage).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an accepted task resumable when a later deployment strengthens prompt wording", async () => {
@@ -1114,8 +1117,11 @@ describe("three-phase Agnes scene workflow", () => {
     materializeScenePromptMock.mockResolvedValueOnce({
       prompt: "OLD CANONICAL PROMPT",
       characterNames: ["Pip the Ant"],
-      characterDescriptions: ["tiny red ant"],
-      characterReferenceSources: [],
+      characterDescriptions: ["Pip the Ant"],
+      characterReferenceSources: [{
+        name: "Pip the Ant",
+        source: "https://cdn.example.test/original-pip.png",
+      }],
     });
     const client = {
       submitVideo: vi.fn(async () => task("accepted-before-prompt-change", "queued")),
@@ -1139,10 +1145,8 @@ describe("three-phase Agnes scene workflow", () => {
         source: "https://cdn.example.test/newly-configured-pip.png",
       }],
     });
-    const publishReferenceImage = vi.fn(async ({ source }: { source: string }) => source);
     const later = buildSubmitAgnesSceneVideosTool(state as never, {
       client,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
     const result = JSON.parse(await (later as any).func({ seriesId: 7, episodeNumber: 2 }));
@@ -1152,8 +1156,9 @@ describe("three-phase Agnes scene workflow", () => {
     expect(client.submitVideo).toHaveBeenCalledOnce();
     expect(rows.get(1)?.prompt).toBe(acceptedPrompt);
     expect(rows.get(1)?.requestDigest).toBe(acceptedDigest);
-    expect(rows.get(1)?.publicReferenceUrl).toBeNull();
-    expect(publishReferenceImage).not.toHaveBeenCalled();
+    expect(parseAgnesReferenceImageUrls(rows.get(1)?.publicReferenceUrl)).toEqual([
+      "https://cdn.example.test/original-pip.png",
+    ]);
   });
 
   it("freezes an unsubmitted revision-one QA retry including its reference mode and seed", async () => {
@@ -1203,9 +1208,6 @@ describe("three-phase Agnes scene workflow", () => {
         source: "https://cdn.example.test/new-pip.png",
       }],
     });
-    const publishReferenceImage = vi.fn(async () => {
-      throw new Error("publisher is unavailable on this rerun");
-    });
     const requests: AgnesSubmitVideoRequest[] = [];
     const client = {
       submitVideo: vi.fn(async (request: AgnesSubmitVideoRequest) => {
@@ -1217,7 +1219,6 @@ describe("three-phase Agnes scene workflow", () => {
     };
     const result = JSON.parse(await (buildSubmitAgnesSceneVideosTool(state as never, {
       client,
-      publishReferenceImage: publishReferenceImage as never,
       probeMediaDuration: vi.fn(async () => 5.2),
     }) as any).func({ seriesId: 7, episodeNumber: 2 }));
 
@@ -1229,7 +1230,6 @@ describe("three-phase Agnes scene workflow", () => {
       seed: persistedSeed,
       images: [persistedReferenceUrl],
     }]);
-    expect(publishReferenceImage).not.toHaveBeenCalled();
     expect(state.resetAgnesSceneGenerationForRequest).not.toHaveBeenCalled();
     expect(rows.get(1)).toMatchObject({
       requestDigest: persistedDigest,
@@ -1305,7 +1305,10 @@ describe("three-phase Agnes scene workflow", () => {
       getSeriesCharacters: vi.fn(async () => [{ name: "Pip the Ant", description: "A small red ant." }]),
       getCharacterSheet: vi.fn(async () => ({
         approvedAt: "2026-09-05T00:00:00.000Z",
-        generationPrompt: "tiny ruby-red ant with six legs, bright eyes, and one yellow backpack",
+        generationPrompt: "Pip the Ant",
+        referenceImagePaths: {
+          portrait: { publicUrl: "https://cdn.example.test/pip_the_ant.png" },
+        },
       })),
     });
     (state.getEpisodeByNumber as any).mockResolvedValue({
@@ -1387,7 +1390,7 @@ describe("three-phase Agnes scene workflow", () => {
       statusRequestIntervalMs: 0,
       includeKeyArt: true,
       ensureKeyArtAudioAssets,
-      ensureSeriesCharacterSheets: vi.fn(async ({ seriesId, roster }) => ({
+      ensureSeriesCharacterPortraits: vi.fn(async ({ seriesId, roster }) => ({
         seriesId,
         rosterCount: roster?.length ?? 0,
         generatedCount: 0,
@@ -1671,7 +1674,11 @@ describe("three-phase Agnes scene workflow", () => {
     expect(requests).toHaveLength(6);
     expect(maximumActive).toBe(2);
     expect(submitted.batchSize).toBe(2);
-    expect(requests.every((request) => request.mode === "text" && request.seconds === 6)).toBe(true);
+    expect(requests.every((request) => (
+      request.mode === "reference"
+      && request.images?.length === 1
+      && request.seconds === 6
+    ))).toBe(true);
     expect(requests.every((request) => request.prompt.includes("CANONICAL SCENE PROMPT"))).toBe(true);
     expect(materializeScenePromptMock).toHaveBeenCalledTimes(6);
     expect(state.assertEpisodeAudioReady).toHaveBeenCalledWith(72);
@@ -2226,5 +2233,40 @@ describe("three-phase Agnes scene workflow", () => {
     expect(planAgnesVideoSegments(3.1)).toEqual([4]);
     expect(planAgnesVideoSegments(12)).toEqual([12]);
     expect(() => planAgnesVideoSegments(12.001)).toThrow("at most 12s");
+  });
+
+  it("turns severe QA faults into a final exact-cast and animated-medium repair contract", () => {
+    const prompt = buildAgnesQaRetryPrompt(
+      "VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS: [Mia] × 1; [Bobo the Backpack] × 1.\nACTION AND CHANGE — Mia opens Bobo.",
+      ["live_action_intrusion", "wrong_cast", "duplicate_entity", "identity_drift"],
+      [
+        { name: "Mia", description: "Exactly six-year-old girl with black pigtails and a yellow coat." },
+        { name: "Bobo the Backpack", description: "One teal backpack with a single friendly flap-face." },
+      ],
+    );
+
+    expect(prompt).toContain("live-action or photoreal presenter");
+    expect(prompt).toContain("all other figures zero times");
+    expect(prompt).toContain("[Mia] × 1; [Bobo the Backpack] × 1");
+    expect(prompt).toContain("FINAL IDENTITY LOCK");
+    expect(prompt).toContain("one full-screen 2D painted animated story world");
+  });
+
+  it("canonicalizes a legacy object-character alias before appending the QA repair ledger", () => {
+    const prompt = buildAgnesQaRetryPrompt(
+      "VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS: [Mia] × 1; [Bobo] × 1. " +
+      "SUPPORTING IDENTITY REFERENCES — [Bobo]: one teal living backpack. " +
+      "ACTION AND CHANGE — Mia opens Bobo while Bobo the Backpack smiles.",
+      ["duplicate_entity", "wrong_cast"],
+      [
+        { name: "Mia", description: "Exactly six-year-old girl with black pigtails and a yellow coat." },
+        { name: "Bobo the Backpack", description: "One teal backpack with a single friendly flap-face." },
+      ],
+    );
+
+    expect(prompt).not.toMatch(/\[Bobo\](?!\s+the Backpack)/u);
+    expect(prompt).not.toMatch(/\bBobo the Backpack the Backpack\b/u);
+    expect(prompt.match(/\[Bobo the Backpack\]/gu)?.length).toBeGreaterThanOrEqual(3);
+    expect(prompt).toContain("Mia opens Bobo the Backpack while Bobo the Backpack smiles");
   });
 });

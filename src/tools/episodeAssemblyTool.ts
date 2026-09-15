@@ -40,9 +40,8 @@ export function buildEpisodeAssemblyTool(
         throw new Error(`Episode ${episodeNumber} was not found for series ${seriesId}.`);
       }
       // The registered facade is the irreversible boundary between generated
-      // clips and final assembly. A model cannot bypass contact-sheet QA by
-      // calling assembly early; every exact on-disk render must have a current
-      // hash-bound Gemini pass first.
+      // clips and final assembly. Every exact on-disk render must have a
+      // current hash-bound deterministic media-integrity pass first.
       await seriesState.assertAgnesVideoQaReady(seriesId, episodeNumber);
 
       // The durable output receipt is written before the coarse episode stage.

@@ -327,7 +327,7 @@ describe("ttsTool one-scene narration contract", () => {
     expect(seriesState.beginEpisodeNarrationAudioMutation).toHaveBeenCalledTimes(3);
   });
 
-  it("rejects text over the character or spoken-word limit before a paid request", async () => {
+  it("rejects text without spoken content or over a provider limit before a paid request", async () => {
     const outputDir = await makeTemporaryOutputDir();
     const audioGenerator = fakeGenerator();
     const tool = buildTtsTool({
@@ -349,6 +349,18 @@ describe("ttsTool one-scene narration contract", () => {
       sceneNumber: 2,
       text: Array.from({ length: 21 }, (_, index) => `word${index}`).join(" "),
     })).rejects.toThrow("20");
+    await expect((tool as any).func({
+      seriesId: 1,
+      episodeNumber: 1,
+      sceneNumber: 3,
+      text: "...",
+    })).rejects.toThrow("at least one Unicode letter or digit");
+    await expect((tool as any).func({
+      seriesId: 1,
+      episodeNumber: 1,
+      sceneNumber: 4,
+      text: "[pause]",
+    })).rejects.toThrow("at least one Unicode letter or digit");
 
     expect(audioGenerator.invoke).not.toHaveBeenCalled();
   });
@@ -372,6 +384,53 @@ describe("ttsTool one-scene narration contract", () => {
 
     expect(generated).toMatchObject({ status: "generated", readyForAgnes: true, spokenWordCount: 2 });
     expect(audioGenerator.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a deterministic Groq 400 response", async () => {
+    const outputDir = await makeTemporaryOutputDir();
+    const invoke = vi.fn().mockResolvedValue(
+      'Error generating audio: Groq TTS API error (400): {"error":{"message":"invalid input"}}',
+    );
+    const tool = buildTtsTool({
+      audioGenerator: { invoke },
+      outputDir,
+      probeDurationSeconds: async () => 7,
+      retryDelayMs: () => 0,
+    });
+
+    await expect((tool as any).func({
+      seriesId: 1,
+      episodeNumber: 1,
+      sceneNumber: 5,
+      text: "Mia waves.",
+    })).rejects.toThrow("after 1 attempt(s)");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains retries for transient Groq responses", async () => {
+    const outputDir = await makeTemporaryOutputDir();
+    const invoke = vi.fn()
+      .mockResolvedValueOnce("Error generating audio: Groq TTS API error (503): unavailable")
+      .mockImplementationOnce(async ({ outputPath }: { outputPath: string }) => {
+        await writeFile(outputPath, Buffer.from("fake-wave-data"));
+        return outputPath;
+      });
+    const tool = buildTtsTool({
+      audioGenerator: { invoke },
+      outputDir,
+      probeDurationSeconds: async () => 7,
+      retryDelayMs: () => 0,
+    });
+
+    const receipt = JSON.parse(await (tool as any).func({
+      seriesId: 1,
+      episodeNumber: 1,
+      sceneNumber: 6,
+      text: "Mia waves.",
+    }));
+
+    expect(receipt.status).toBe("generated_after_retry");
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 
   it("returns a hard duration_exceeded result and reuses the measured rejected artifact without another request", async () => {
@@ -402,7 +461,7 @@ describe("ttsTool one-scene narration contract", () => {
     expect(audioGenerator.invoke).toHaveBeenCalledTimes(1);
   });
 
-  it("honors a persisted duration_exceeded status when a boundary re-probe falls just below 12 seconds", async () => {
+  it("regenerates when persisted duration_exceeded audio probes below 12 seconds", async () => {
     const outputDir = await makeTemporaryOutputDir();
     const audioGenerator = fakeGenerator();
     let measuredDuration = 12.01;
@@ -420,10 +479,47 @@ describe("ttsTool one-scene narration contract", () => {
 
     expect(generated).toMatchObject({ status: "duration_exceeded", readyForAgnes: false });
     expect(reused).toMatchObject({
+      status: "generated",
+      readyForAgnes: true,
+      reused: false,
+      durationSeconds: 11.99,
+    });
+    expect(audioGenerator.invoke).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(await readFile(reused.metadataPath, "utf8"))).toMatchObject({
+      durationSeconds: 11.99,
+      durationStatus: "ready",
+    });
+  });
+
+  it("uses a fresh boundary probe to reject reused audio that crossed above 12 seconds", async () => {
+    const outputDir = await makeTemporaryOutputDir();
+    const audioGenerator = fakeGenerator();
+    let measuredDuration = 11.98;
+    const tool = buildTtsTool({
+      audioGenerator,
+      outputDir,
+      probeDurationSeconds: async () => measuredDuration,
+      retryDelayMs: () => 0,
+    });
+    const input = { seriesId: 6, episodeNumber: 2, sceneNumber: 9, text: validNarration };
+
+    const generated = JSON.parse(await (tool as any).func(input));
+    measuredDuration = 12.02;
+    const reused = JSON.parse(await (tool as any).func(input));
+
+    expect(generated).toMatchObject({
+      status: "generated",
+      readyForAgnes: true,
+      reused: false,
+      durationSeconds: 11.98,
+    });
+    expect(reused).toMatchObject({
       status: "duration_exceeded",
       readyForAgnes: false,
       reused: true,
-      durationSeconds: 11.99,
+      durationSeconds: 12.02,
+      maxDurationSeconds: 12,
+      needsScriptSplit: true,
     });
     expect(audioGenerator.invoke).toHaveBeenCalledTimes(1);
   });
@@ -498,7 +594,6 @@ describe("ttsTool production episode batch", () => {
       measuredNarrationSceneCount: 40,
       measuredTotalNarrationSeconds: 300,
       durationExceededScenes: [],
-      totalDurationBelowMinimum: false,
       generatedSceneCount: 40,
       reusedSceneCount: 0,
     }));
@@ -551,14 +646,13 @@ describe("ttsTool production episode batch", () => {
       measuredNarrationSceneCount: 40,
       measuredTotalNarrationSeconds: 304.9,
       durationExceededScenes: [{ sceneNumber: 7, durationSeconds: 12.4 }],
-      totalDurationBelowMinimum: false,
       generatedSceneCount: 40,
     }));
     expect(result.nextAction).toContain("refine_episode_script");
     expect(audioGenerator.invoke).toHaveBeenCalledTimes(40);
   });
 
-  it("returns complete evidence for deterministic repair when total narration is below five minutes", async () => {
+  it("accepts a complete episode when every scene is within 12 seconds regardless of aggregate runtime", async () => {
     const outputDir = await makeTemporaryOutputDir();
     const seriesState = fakeMutationState({
       getEpisodeByNumber: vi.fn().mockResolvedValue({
@@ -578,14 +672,14 @@ describe("ttsTool production episode batch", () => {
     const result = JSON.parse(await (tool as any).func({ seriesId: 1, episodeNumber: 4 }));
 
     expect(result).toEqual(expect.objectContaining({
-      status: "repair_required",
-      readyForAgnes: false,
+      status: "ready",
+      readyForAgnes: true,
       measuredNarrationSceneCount: 40,
       measuredTotalNarrationSeconds: 280,
       durationExceededScenes: [],
-      totalDurationBelowMinimum: true,
-      minimumTotalNarrationSeconds: 300,
     }));
+    expect(result).not.toHaveProperty("totalDurationBelowMinimum");
+    expect(result).not.toHaveProperty("minimumTotalNarrationSeconds");
   });
 
   it.each([
@@ -652,6 +746,31 @@ describe("ttsTool production episode batch", () => {
 
     await expect((tool as any).func({ seriesId: 1, episodeNumber: 6 })).rejects.toThrow(
       "Persisted episode narration is invalid",
+    );
+    expect(audioGenerator.invoke).not.toHaveBeenCalled();
+    expect(seriesState.beginEpisodeNarrationAudioMutation).not.toHaveBeenCalled();
+  });
+
+  it("makes no provider or lease calls when a later persisted scene has no spoken content", async () => {
+    const outputDir = await makeTemporaryOutputDir();
+    const audioGenerator = fakeGenerator();
+    const script = persistedNarrationScript(42);
+    script.scenes[40]!.narrationText = "...";
+    script.scenes[41]!.narrationText = "[pause]";
+    const seriesState = fakeMutationState({
+      getEpisodeByNumber: vi.fn().mockResolvedValue({ id: 16, scriptJson: script }),
+    });
+    const tool = buildEpisodeTtsTool({
+      audioGenerator,
+      outputDir,
+      probeDurationSeconds: async () => 7,
+      retryDelayMs: () => 0,
+      seriesState: seriesState as any,
+      progressLogger: vi.fn(),
+    });
+
+    await expect((tool as any).func({ seriesId: 14, episodeNumber: 1 })).rejects.toThrow(
+      "Scene 41: Narration text must contain at least one Unicode letter or digit",
     );
     expect(audioGenerator.invoke).not.toHaveBeenCalled();
     expect(seriesState.beginEpisodeNarrationAudioMutation).not.toHaveBeenCalled();

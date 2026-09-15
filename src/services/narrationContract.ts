@@ -5,7 +5,8 @@
  */
 export const NARRATION_MAX_RAW_CHARACTERS = 200;
 export const NARRATION_AUTHORING_TARGET_MAX_RAW_CHARACTERS = 180;
-export const NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS = 12;
+export const NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS = 10;
+export const NARRATION_AUTHORING_TARGET_MAX_SPOKEN_WORDS = 16;
 export const NARRATION_MAX_SPOKEN_WORDS = 20;
 export const NARRATION_MAX_AUDIO_SECONDS = 12;
 export const NARRATION_TARGET_MAX_AUDIO_SECONDS = 10;
@@ -15,6 +16,8 @@ export const DEFAULT_PRODUCTION_MAX_SCENES = 60;
 
 export type NarrationTextIssueCode =
   | "empty"
+  | "no_spoken_content"
+  | "synthetic_placeholder"
   | "too_many_raw_characters"
   // Kept in the public union for compatibility with older consumers. The
   // current contract no longer emits or enforces a per-scene minimum.
@@ -49,6 +52,12 @@ export function countNarrationSpokenWords(text: string): number {
   return spokenText.match(/[\p{L}\p{N}]+(?:[\u2019'\-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
 }
 
+/** Detects only an anchored scene-label stub, never ordinary narration containing those words. */
+export function isSyntheticNarrationPlaceholder(text: string): boolean {
+  const spokenText = stripNarrationVocalDirections(text).replace(/\s+/gu, " ").trim();
+  return /^scene [0-9]+ narration[.!?\u2026]*$/iu.test(spokenText);
+}
+
 /** Returns the deterministic text-only contract result used before any paid TTS call. */
 export function inspectNarrationText(
   text: string,
@@ -60,6 +69,17 @@ export function inspectNarrationText(
 
   if (!text.trim()) {
     issues.push({ code: "empty", message: "Narration text must not be empty." });
+  } else if (spokenWordCount === 0) {
+    issues.push({
+      code: "no_spoken_content",
+      message:
+        "Narration text must contain at least one Unicode letter or digit outside vocal directions.",
+    });
+  } else if (isSyntheticNarrationPlaceholder(text)) {
+    issues.push({
+      code: "synthetic_placeholder",
+      message: "Narration text must not be a synthetic scene-number placeholder.",
+    });
   }
   if (rawCharacterCount > NARRATION_MAX_RAW_CHARACTERS) {
     issues.push({
@@ -149,7 +169,6 @@ export function inspectEpisodeNarrationManifest(
 
   const minScenes = options.minScenes ?? DEFAULT_PRODUCTION_MIN_SCENES;
   const maxScenes = options.maxScenes ?? DEFAULT_PRODUCTION_MAX_SCENES;
-  const targetRuntimeMinutes = options.targetRuntimeMinutes ?? 5;
   const issues: string[] = [];
   if (!root || typeof root !== "object" || Array.isArray(root)) {
     return {
@@ -202,14 +221,6 @@ export function inspectEpisodeNarrationManifest(
       issues.push(`${label}: ${issue.message}`);
     }
   });
-
-  const minimumWords = minimumNarrationWords(targetRuntimeMinutes);
-  if (totalSpokenWords < minimumWords) {
-    issues.push(
-      `Episode narration has ${totalSpokenWords} spoken words; at least ${minimumWords} are required ` +
-      `for the ${targetRuntimeMinutes}-minute production target.`,
-    );
-  }
 
   return {
     pass: issues.length === 0,

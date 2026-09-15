@@ -8,23 +8,23 @@ import {
   DEFAULT_PRODUCTION_MAX_SCENES,
   DEFAULT_PRODUCTION_MIN_SCENES,
   NARRATION_AUTHORING_TARGET_MAX_RAW_CHARACTERS,
+  NARRATION_AUTHORING_TARGET_MAX_SPOKEN_WORDS,
   NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS,
   NARRATION_MAX_AUDIO_SECONDS,
   NARRATION_MAX_RAW_CHARACTERS,
   NARRATION_MAX_SPOKEN_WORDS,
   NARRATION_TARGET_MAX_AUDIO_SECONDS,
-  NARRATION_WORDS_PER_MINUTE,
   countNarrationSpokenWords,
   inspectNarrationText,
   minimumNarrationWords,
 } from "../services/narrationContract.js";
 import {
+  MAX_SCENE_MAIN_CHARACTER_COUNT,
   ProductionScriptContractError,
   inspectProductionScript,
 } from "../services/productionScriptContract.js";
 import {
   buildCompletedSceneBeatLedger,
-  inspectSceneContinuity,
   normalizeUnstagedLightingContinuity,
 } from "../services/sceneContinuityContract.js";
 import {
@@ -35,9 +35,6 @@ import {
 } from "../services/episodeScriptValidationIssues.js";
 import {
   canonicalizeSceneCast,
-  findGenericVisualCastAliases,
-  findMentionedUnlistedFigureNames,
-  isCollectiveSupportingIdentity,
   type SceneCastCanonicalizationAudit,
 } from "../services/sceneCastCanonicalizer.js";
 
@@ -156,6 +153,17 @@ type PromoteEpisodeScriptDraftResult =
 type ScriptDraftPersistence = {
   getEpisodeById(episodeId: number): Promise<EpisodeContext | null>;
   getEpisodeScriptDraft(episodeId: number): Promise<EpisodeScriptDraftRow | null>;
+  auditEpisodeNarrationAudioTiming?(
+    episodeId: number,
+    scriptJson: unknown,
+  ): Promise<{
+    complete: boolean;
+    sceneCount: number;
+    verifiedSceneCount: number;
+    totalDurationSeconds?: number;
+    durationExceededScenes: DurationExceededScene[];
+    invalidSceneNumbers: number[];
+  }>;
   stageEpisodeScriptDraft(
     episodeId: number,
     scriptJson: unknown,
@@ -419,6 +427,9 @@ export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES = 3;
 export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_INPUT_CORRECTIONS = 2;
 export const EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES = 2;
 export const EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION = 12;
+const DEFAULT_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS = 0;
+const MAX_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS =
+  DEFAULT_PRODUCTION_MAX_SCENES * NARRATION_MAX_SPOKEN_WORDS;
 
 const boundedRequiredText = (label: string, maximum: number) => z.string()
   .max(maximum, `${label} must be at most ${maximum} characters.`)
@@ -442,33 +453,40 @@ const chunkCharacterVisualSchema = z.object({
 }).strict();
 
 /**
- * Unlike the permissive legacy draft schema, a chunk never silently drops a
- * scene-generation field. Empty arrays are explicit and valid when no cast,
- * supporting entity, or continuity anchor is visible in that scene.
+ * Objective chunk boundary. Narration, environment, action, and the exact
+ * visible main-character roster are required; richer visual metadata remains
+ * optional authoring guidance and can be defaulted safely.
  */
 const completeChunkSceneSchema = z.object({
   sceneNumber: z.number().int().positive(),
   narrationText: boundedRequiredText("narrationText", NARRATION_MAX_RAW_CHARACTERS).describe(
-    "TARGET: 15-20 spoken words and at most 170 characters; hard maximum 200 characters. Keep vocal directions only when useful.",
+    "TARGET: 10-16 spoken words and at most 170 characters; hard maximum 20 spoken words and 200 characters. " +
+    "Write actual narration with at least one spoken letter or digit outside vocal directions; never use ellipses, field labels, TODOs, or scene-number placeholders. Keep vocal directions only when useful.",
   ),
   environmentDescription: boundedRequiredText("environmentDescription", 1_500).describe(
-    "TARGET: 120-260 characters of concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500.",
+    "TARGET: 120-260 characters of concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500. Never submit ellipses or a scene-number/field-label placeholder.",
   ),
   action: boundedRequiredText("action", 1_500).describe(
-    "TARGET: 70-180 characters for one continuous visible action/emotion progression with a clear start, one movement/change, and a readable end state that fits within 12 seconds; hard maximum 1500. No cuts or montage. Do not repeat environment or camera prose.",
+    "TARGET: 70-180 characters for one continuous visible action/emotion progression with a clear start, one movement/change, and a readable end state that fits within 12 seconds; hard maximum 1500. No cuts or montage. Do not repeat environment or camera prose. Never submit ellipses or a scene-number/field-label placeholder.",
   ),
-  characterNames: z.array(boundedRequiredText("characterNames entry", 200)).max(12).describe(
+  characterNames: z.array(boundedRequiredText("characterNames entry", 200))
+    .max(MAX_SCENE_MAIN_CHARACTER_COUNT)
+    .refine(
+      (names) => new Set(names).size === names.length,
+      "characterNames must contain unique exact roster names.",
+    )
+    .describe(
     "Only main characters actually visible in this shot, using exact stored names and no descriptors. " +
     "Together with supportingEntities, this is the complete exact on-screen cast: count every visible individual once and omit every off-screen individual.",
   ),
-  characterVisuals: z.array(chunkCharacterVisualSchema).max(12).describe(
+  characterVisuals: z.array(chunkCharacterVisualSchema).max(MAX_SCENE_MAIN_CHARACTER_COUNT).optional().describe(
     "One compact identity record per characterName in the same order; do not duplicate wardrobe or scene prose here.",
   ),
   supportingEntities: z.array(
     boundedRequiredText("supportingEntities entry", 1_000).describe(
       "TARGET: at most 220 characters per stable name + locked visual descriptor; include only visible entities and reuse unchanged text verbatim.",
     ),
-  ).max(12).describe(
+  ).max(12).default([]).describe(
     "Each entry is exactly one named visible individual, never a group/herd/flock/cluster. " +
     "Together with characterNames, this is the complete exact on-screen cast; do not leave any visible figure uncounted.",
   ),
@@ -476,59 +494,60 @@ const completeChunkSceneSchema = z.object({
     boundedRequiredText("continuityAnchors entry", 1_000).describe(
       "TARGET: at most 220 characters per concrete continuing prop/layout/state anchor; reuse unchanged text verbatim.",
     ),
-  ).max(16).describe(
+  ).max(16).default([]).describe(
     "Usually 0-3 anchors needed for this shot; non-living props/layout/environment state only. " +
     "Never put a character, animal, living object, pose, or action here; use action/sceneDetails instead.",
   ),
-  sceneDetails: boundedRequiredText("sceneDetails", 2_500).describe(
+  sceneDetails: boundedRequiredText("sceneDetails", 2_500).optional().describe(
     "TARGET: 180-360 characters for exact blocking, poses, expressions, prop state, and the new visible beat; hard maximum 2500. " +
     "For scenes with a complex cast or important visual setup, write at least 60 characters and either " +
     "two sentence-like parts or three comma/colon/semicolon-separated visual clauses. Do not repeat the full environment, camera, or lighting text.",
   ),
-  cameraAngle: boundedRequiredText("cameraAngle", 500).describe(
+  cameraAngle: boundedRequiredText("cameraAngle", 500).optional().describe(
     "TARGET: 25-100 characters naming framing, viewpoint, and exactly one deliberate push/pull/pan/tilt/tracking move or fixed camera; hard maximum 500.",
   ),
-  lighting: boundedRequiredText("lighting", 500).describe(
+  lighting: boundedRequiredText("lighting", 500).optional().describe(
     "TARGET: 30-120 characters naming source, color/quality, and mood; hard maximum 500.",
   ),
 }).strict();
 
 const authoringPlanBeatSchema = z.object({
-  startScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES),
-  endScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES),
-  storyBeat: boundedRequiredText("authoringPlan beat storyBeat", 900).describe(
+  startScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES).default(1),
+  endScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES)
+    .default(DEFAULT_PRODUCTION_MAX_SCENES),
+  storyBeat: z.string().max(900).default("").describe(
     "TARGET: at most 220 characters describing the range's new causal story movement; each range must advance rather than replay an earlier clue/action.",
   ),
-  setting: boundedRequiredText("authoringPlan beat setting", 600).describe(
+  setting: z.string().max(600).default("").describe(
     "TARGET: at most 140 characters naming the range's location/setup.",
   ),
-  continuityOutcome: boundedRequiredText("authoringPlan beat continuityOutcome", 900).describe(
+  continuityOutcome: z.string().max(900).default("").describe(
     "TARGET: at most 220 characters stating the concrete irreversible story/prop state carried into the next range.",
   ),
-}).strict();
+});
 
 export const episodeScriptChunkAuthoringPlanSchema = z.object({
-  storyArc: boundedRequiredText("authoringPlan.storyArc", 2_000).describe(
+  storyArc: z.string().max(2_000).default("").describe(
     "TARGET: 500-900 characters covering the complete causal arc without scene-by-scene repetition.",
   ),
-  educationalIdea: boundedRequiredText("authoringPlan.educationalIdea", 600).describe(
+  educationalIdea: z.string().max(600).default("").describe(
     "TARGET: at most 240 characters for the one integrated learning idea.",
   ),
-  endingInsight: boundedRequiredText("authoringPlan.endingInsight", 600).describe(
+  endingInsight: z.string().max(600).default("").describe(
     "TARGET: at most 240 characters for the final preschool takeaway.",
   ),
-  beats: z.array(authoringPlanBeatSchema).min(3).max(12),
+  beats: z.array(authoringPlanBeatSchema).max(12).default([]),
   supportingEntityBible: z.array(
-    boundedRequiredText("authoringPlan.supportingEntityBible entry", 1_000).describe(
+    z.string().max(1_000).describe(
       "TARGET: at most 220 characters for one reusable stable name + locked visual descriptor.",
     ),
-  ).max(12).describe("Only recurring single-individual supporting entities; never groups, herds, flocks, families, or clusters."),
+  ).max(12).default([]).describe("Optional advisory identities for recurring supporting entities."),
   continuityBible: z.array(
-    boundedRequiredText("authoringPlan.continuityBible entry", 1_000).describe(
+    z.string().max(1_000).describe(
       "TARGET: at most 220 characters for one episode-wide prop/layout/state rule.",
     ),
-  ).max(16).describe("Only non-living prop/layout/environment rules reused across ranges; never character or creature state."),
-}).strict();
+  ).max(16).default([]).describe("Optional advisory prop/layout/environment continuity notes."),
+});
 
 export type EpisodeScriptChunkAuthoringPlan = z.infer<
   typeof episodeScriptChunkAuthoringPlanSchema
@@ -539,6 +558,10 @@ const episodeScriptChunkAuthoringMarkerSchema = z.object({
   targetSceneCount: z.number().int()
     .min(DEFAULT_PRODUCTION_MIN_SCENES)
     .max(DEFAULT_PRODUCTION_MAX_SCENES),
+  minimumReplacementSpokenWords: z.number().int()
+    .min(0)
+    .max(MAX_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS)
+    .default(DEFAULT_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS),
   plan: episodeScriptChunkAuthoringPlanSchema,
 }).strict();
 
@@ -577,6 +600,13 @@ const episodeScriptChunkInputSchema = z.object({
   authoringPlan: episodeScriptChunkAuthoringPlanSchema.optional().describe(
     "Required for start/restart and omitted for append; it is persisted and returned as bounded continuation context.",
   ),
+  minimumReplacementSpokenWords: z.number().int()
+    .min(0)
+    .max(MAX_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS)
+    .optional()
+    .describe(
+      "Legacy compatibility field; aggregate narration word floors are ignored. Omit for new writes.",
+    ),
   scenes: z.array(completeChunkSceneSchema)
     .min(1)
     .max(EPISODE_SCRIPT_SCENES_PER_CHUNK)
@@ -586,7 +616,7 @@ const episodeScriptChunkInputSchema = z.object({
       "a shorter complete leading prefix is accepted safely, but never skip or reorder a scene. " +
       "For a pending repair, copy only the complete candidateScenes named by requiredSceneNumbers, which may be non-contiguous. " +
       `TARGET at most 2000 serialized characters per scene and ${EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS} ` +
-      "for a complete append call. Every scene-generation field is required; be concise without omitting visual or continuity detail.",
+      "for a complete append call. Include useful visual and continuity detail, but omit optional fields rather than inventing filler.",
     ),
 }).strict();
 
@@ -752,88 +782,12 @@ export interface EpisodeScriptChunkAuthoringProgress {
   validationIssues: string[];
 }
 
-function validateAuthoringPlanCoverage(
-  plan: EpisodeScriptChunkAuthoringPlan,
-  targetSceneCount: number,
-  options: { strictSupportingIdentities?: boolean } = {},
-): string[] {
-  const issues: string[] = [];
-  let expectedStart = 1;
-  plan.beats.forEach((beat, index) => {
-    if (beat.endScene < beat.startScene) {
-      issues.push(`authoringPlan.beats[${index}] endScene must be at least startScene.`);
-    }
-    if (beat.startScene !== expectedStart) {
-      issues.push(
-        `authoringPlan.beats[${index}] must start at scene ${expectedStart} so beat ranges are contiguous.`,
-      );
-    }
-    expectedStart = beat.endScene + 1;
-  });
-  if (plan.beats.at(-1)?.endScene !== targetSceneCount) {
-    issues.push(`authoringPlan beats must cover scene 1 through ${targetSceneCount} exactly.`);
-  }
-  const supportingIdentities: string[] = [];
-  const seenSupportingIdentities = new Set<string>();
-  plan.supportingEntityBible.forEach((descriptor, index) => {
-    const separatorIndex = descriptor.indexOf(":");
-    const identity = supportingIdentity(descriptor);
-    const lockedDescription = separatorIndex >= 0
-      ? descriptor.slice(separatorIndex + 1).trim()
-      : "";
-    supportingIdentities.push(identity);
-    if (
-      options.strictSupportingIdentities
-      && (separatorIndex <= 0 || !identity || !lockedDescription)
-    ) {
-      issues.push(
-        `authoringPlan.supportingEntityBible[${index}] must use ` +
-        '"Stable name: locked visual descriptor" format with both parts non-empty.',
-      );
-    }
-    if (
-      options.strictSupportingIdentities
-      && identity
-      && seenSupportingIdentities.has(identity)
-    ) {
-      issues.push(
-        `authoringPlan.supportingEntityBible[${index}] repeats stable identity ` +
-        `${JSON.stringify(descriptor.split(":", 1)[0]!.trim())}; each identity must appear once.`,
-      );
-    }
-    if (identity) seenSupportingIdentities.add(identity);
-    const violatesCollectiveRule = options.strictSupportingIdentities
-      ? isCollectiveSupportingIdentity(identity)
-      : /\b(?:cluster|crowd|duo|family|flock|group|herd|pair|trio)\b/iu.test(identity);
-    if (violatesCollectiveRule) {
-      issues.push(
-        `authoringPlan.supportingEntityBible[${index}] must name one individual, not a group/herd/flock/cluster.`,
-      );
-    }
-  });
-  plan.continuityBible.forEach((anchor, index) => {
-    const prefix = supportingIdentity(anchor);
-    if (supportingIdentities.some((identity) => (
-      identity && (prefix === identity || prefix.startsWith(`${identity} `))
-    ))) {
-      issues.push(
-        `authoringPlan.continuityBible[${index}] redefines a supporting figure; continuity rules are non-living only.`,
-      );
-    }
-  });
-  return issues;
-}
-
 function parseEpisodeScriptChunkDraftEnvelope(
   value: unknown,
 ): EpisodeScriptChunkDraftEnvelope | null {
   const parsed = episodeScriptChunkDraftEnvelopeSchema.safeParse(decodeJsonInput(value));
   if (!parsed.success) return null;
   const envelope = parsed.data;
-  if (validateAuthoringPlanCoverage(
-    envelope.authoring.plan,
-    envelope.authoring.targetSceneCount,
-  ).length > 0) return null;
   if (envelope.scenes.length > envelope.authoring.targetSceneCount) return null;
   if (!envelope.scenes.every((scene, index) => scene.sceneNumber === index + 1)) return null;
   return envelope;
@@ -849,11 +803,11 @@ function boundedDraftValidationIssues(value: unknown): string[] {
 
 /** Recognizes the durable migration state used for a legacy invalid prefix. */
 export function episodeScriptChunkDraftRequiresRestart(value: unknown): boolean {
-  if (!isRecord(value) || value.pass !== false || !Array.isArray(value.issues)) return false;
-  return value.issues.some((issue) => (
-    typeof issue === "string"
-    && issue.startsWith(EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER)
-  ));
+  void value;
+  // Prefixes rejected by the retired subjective contract are now revalidated
+  // under the objective scene/provider limits and continue from their durable
+  // range. No automatic full-script restart is required.
+  return false;
 }
 
 /**
@@ -878,8 +832,8 @@ export function getEpisodeScriptChunkAuthoringProgress(
     (total, scene) => total + countNarrationSpokenWords(scene.narrationText),
     0,
   );
-  const minimumSpokenWords = minimumNarrationWords(5);
-  const remainingMinimumSpokenWords = Math.max(0, minimumSpokenWords - totalSpokenWords);
+  const minimumSpokenWords = 0;
+  const remainingMinimumSpokenWords = 0;
   const activePlanBeat = nextSceneNumber === null
     ? null
     : envelope.authoring.plan.beats.find((beat) =>
@@ -941,65 +895,22 @@ function normalizeSceneNumbers(script: EpisodeScript): EpisodeScript {
   };
 }
 
-function countNarrativeBeats(text: string): number {
-  return (text.match(/\b(?:then|next|after|suddenly|but|meanwhile|finally|when)\b/gi) ?? []).length;
-}
-
 function normalizeText(value: string | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function supportingIdentity(descriptor: string): string {
-  return descriptor.split(":", 1)[0]!.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-const UNCOUNTED_BACKGROUND_FIGURE_PATTERN =
-  /\b(?:bystanders?|crowds?|flocks?|herds?|onlookers?|groups? of (?:animals|children|creatures|dinosaurs?|people)|grazing (?:animals|creatures|dinosaurs?|herbivores?))\b/iu;
-
-function mentionedStableFigureNames(text: string, names: readonly string[]): string[] {
-  return names.filter((name) => {
-    if (!name || name.length > 500) return false;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`, "iu").test(text);
-  });
-}
-
-function hasMeaningfulSupportingEntities(scene: EpisodeScene): boolean {
-  return Array.isArray(scene.supportingEntities) && scene.supportingEntities.some((entity) => entity.trim().length > 0);
-}
-
-function hasWeakSceneDetails(scene: EpisodeScene): boolean {
-  const details = scene.sceneDetails?.trim() ?? "";
-  if (!details) return true;
-  if (details.length < 60) return true;
-  const sentenceLikeParts = details.split(/[.!?]+/).map((part) => part.trim()).filter(Boolean);
-  if (sentenceLikeParts.length >= 2) return false;
-  const clauseCount = (details.match(/[,:;]/g) ?? []).length;
-  return clauseCount < 3;
-}
-
-function hasConsistentCharacterVisuals(scene: EpisodeScene): boolean {
-  if (!scene.characterVisuals || scene.characterVisuals.length === 0) return false;
-  if (scene.characterVisuals.length !== scene.characterNames.length) return false;
-  return scene.characterVisuals.every((item, index) => {
-    const expectedName = scene.characterNames[index]?.trim();
-    return item.name.trim() === expectedName;
-  });
-}
-
-function sceneMentionsVisualSetup(scene: EpisodeScene): boolean {
-  const combined = `${scene.narrationText} ${scene.action} ${scene.sceneDetails ?? ""}`.toLowerCase();
-  return /(lantern|blanket|table|window|door|wagon|basket|prototype|wind-?mill|tool|rope|cup|cookies|apple|leaf|rain|storm|light|glow)/.test(combined);
+  return (value ?? "").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
 }
 
 function extractSceneNumbersForTargetedRepair(issues: string[]): number[] {
   const sceneNumbers = new Set<number>();
   for (const issue of issues) {
-    if (!issue.includes("continuityAnchors") && !issue.includes("sceneDetails") && !issue.includes("supportingEntities")) continue;
-    const match = issue.match(/^Scene\s+(\d+)/i);
+    if (
+      !issue.includes("continuityAnchors")
+      && !issue.includes("sceneDetails")
+      && !issue.includes("supportingEntities")
+    ) continue;
+    const match = issue.match(/^Scene\s+(\d+)/iu);
     if (match) sceneNumbers.add(Number(match[1]));
   }
-  return [...sceneNumbers].sort((a, b) => a - b);
+  return [...sceneNumbers].sort((left, right) => left - right);
 }
 
 function parseSceneRepairResponse(raw: string): SceneRepairResult {
@@ -1011,7 +922,9 @@ function parseSceneRepairResponse(raw: string): SceneRepairResult {
     supportingEntities: Array.isArray(parsed.supportingEntities)
       ? parsed.supportingEntities.map(String).map((item) => item.trim()).filter(Boolean)
       : undefined,
-    sceneDetails: typeof parsed.sceneDetails === "string" ? parsed.sceneDetails.trim() : undefined,
+    sceneDetails: typeof parsed.sceneDetails === "string"
+      ? parsed.sceneDetails.trim()
+      : undefined,
   };
 }
 
@@ -1101,18 +1014,20 @@ async function repairTargetedScenes(script: EpisodeScript, issues: string[]): Pr
   };
 }
 
+/**
+ * Objective production validation used by durable authoring and refinement.
+ * Visual-detail fields remain in the authoring schema for prompt quality, but
+ * only provider limits and structurally safe scene data may reject a draft.
+ */
 export function validateEpisodeScript(
   script: EpisodeScript,
   minScenes: number,
   maxScenes: number,
-  targetRuntimeMinutes = 5,
+  _targetRuntimeMinutes = 5,
   mainCharacterNames?: readonly string[],
   options: {
-    /** Enforce every production scene rule even while a prefix has fewer scenes. */
     productionSceneContract?: boolean;
-    /** Used only for bounded chunk assembly; final validation never sets this. */
     deferAggregateMinimums?: boolean;
-    /** Exact supporting identities reserved by the immutable chunk plan. */
     knownSupportingEntityNames?: readonly string[];
   } = {},
 ): ScriptValidationResult {
@@ -1124,229 +1039,80 @@ export function validateEpisodeScript(
     issues.push(`Scene count too high: ${script.scenes.length}. Maximum allowed is ${maxScenes}.`);
   }
 
-  // Runtime and word count checks apply only to full production episodes so
-  // small fixtures/manual previews can still validate a deliberately tiny set.
-  const isFullProduction = options.productionSceneContract ?? minScenes >= 15;
-  const canonicalCast = mainCharacterNames
-    ? new Set(mainCharacterNames.map((name) => name.trim()).filter(Boolean))
-    : null;
-  if (isFullProduction && (!canonicalCast || canonicalCast.size === 0)) {
-    issues.push(
-      "Production refinement requires mainCharacterNames from the fixed Turso roster so guests cannot leak into characterNames."
-    );
-  }
-  const minRequiredWords = isFullProduction ? minimumNarrationWords(targetRuntimeMinutes) : 0;
-  const totalWords = script.scenes.reduce((sum, sc) => {
-    return sum + countNarrationSpokenWords(sc.narrationText ?? "");
-  }, 0);
-
-  if (isFullProduction && maxScenes * NARRATION_MAX_SPOKEN_WORDS < minRequiredWords) {
-    issues.push(
-      `Configured scene range cannot satisfy the narration runtime contract: at most ${maxScenes} scenes ` +
-      `with ${NARRATION_MAX_SPOKEN_WORDS} spoken words each cannot reach the required ${minRequiredWords} words.`
-    );
-  }
-  if (isFullProduction && !options.deferAggregateMinimums && totalWords < minRequiredWords) {
-    const estRuntime = (totalWords / NARRATION_WORDS_PER_MINUTE).toFixed(1);
-    issues.push(
-      `Total episode narration word count too low: ${totalWords} spoken words (~${estRuntime} minutes). ` +
-      `Minimum required for a ${targetRuntimeMinutes}-minute episode is ${minRequiredWords} words. ` +
-      `Add meaningful visual beats instead of making any scene exceed ${NARRATION_MAX_SPOKEN_WORDS} spoken words.`
-    );
-  }
-
-  const sceneBeatBySignature = new Map<string, number>();
-  const knownFigureIdentities = new Set(
-    [
-      ...(canonicalCast ?? []),
-      ...(options.knownSupportingEntityNames ?? []),
-    ].map((name) => name.trim().toLowerCase()).filter(Boolean),
+  const production = options.productionSceneContract ?? minScenes >= 15;
+  const roster = (mainCharacterNames ?? []).filter(
+    (name): name is string => typeof name === "string" && name.trim().length > 0,
   );
-  script.scenes.forEach((scene) => {
-    if (!Array.isArray(scene.supportingEntities)) return;
-    scene.supportingEntities.forEach((descriptor) => {
-      if (typeof descriptor === "string" && descriptor.trim()) {
-        knownFigureIdentities.add(supportingIdentity(descriptor));
-      }
-    });
-  });
+  const rosterSet = new Set(roster);
+  if (production && (roster.length === 0 || rosterSet.size !== roster.length)) {
+    issues.push("Production refinement requires a unique, non-empty fixed main-character roster.");
+  }
+
+  const validateOptionalStringArray = (
+    value: unknown,
+    field: "supportingEntities" | "continuityAnchors",
+    label: string,
+  ): void => {
+    if (value === undefined) return;
+    if (!Array.isArray(value)) {
+      issues.push(`${label} ${field} must be an array of non-empty strings when supplied.`);
+      return;
+    }
+    const strings = value.filter((entry): entry is string => typeof entry === "string");
+    if (strings.length !== value.length || strings.some((entry) => !entry.trim())) {
+      issues.push(`${label} ${field} must contain only non-empty strings.`);
+    }
+    if (new Set(strings).size !== strings.length) {
+      issues.push(`${label} ${field} contains duplicate entries.`);
+    }
+  };
+
   script.scenes.forEach((scene, index) => {
     const label = `Scene ${index + 1}`;
-    if (!scene.environmentDescription.trim()) {
+    if (scene.sceneNumber !== index + 1) {
+      issues.push(`${label} must have sequential sceneNumber ${index + 1}.`);
+    }
+    if (typeof scene.environmentDescription !== "string" || !scene.environmentDescription.trim()) {
       issues.push(`${label} is missing environmentDescription.`);
     }
-    if (!scene.action.trim()) {
+    if (typeof scene.action !== "string" || !scene.action.trim()) {
       issues.push(`${label} is missing action.`);
     }
-    const beatSignature = JSON.stringify([
-      normalizeText(scene.environmentDescription),
-      normalizeText(scene.action),
-      normalizeText(scene.sceneDetails),
-      normalizeText(scene.narrationText),
-    ]);
-    if (
-      scene.environmentDescription.trim()
-      && scene.action.trim()
-      && scene.sceneDetails?.trim()
-      && scene.narrationText.trim()
-    ) {
-      const duplicateOf = sceneBeatBySignature.get(beatSignature);
-      if (duplicateOf !== undefined) {
-        issues.push(
-          `${label} duplicates the complete narration/action beat from Scene ${duplicateOf}; ` +
-          "write a genuinely distinct visible beat instead of renumbering repeated content."
-        );
-      } else {
-        sceneBeatBySignature.set(beatSignature, index + 1);
-      }
-    }
-    if (isFullProduction && !scene.sceneDetails?.trim()) {
-      issues.push(`${label} is missing sceneDetails required for direct video generation.`);
-    }
-    if (isFullProduction && !scene.cameraAngle?.trim()) {
-      issues.push(`${label} is missing cameraAngle required for direct video generation.`);
-    }
-    if (isFullProduction && !scene.lighting?.trim()) {
-      issues.push(`${label} is missing lighting required for direct video generation.`);
-    }
-    const narrationInspection = inspectNarrationText(scene.narrationText, { production: isFullProduction });
-    if (!scene.narrationText.trim()) {
-      issues.push(`${label} is missing narrationText.`);
-    } else {
-      if (narrationInspection.issues.some((issue) => issue.code === "too_many_raw_characters")) {
-        issues.push(
-          `${label} narrationText has ${narrationInspection.rawCharacterCount} raw characters and exceeds ` +
-          `the ${NARRATION_MAX_RAW_CHARACTERS}-character one-request Groq limit; split it into consecutive scenes.`
-        );
-      }
-      if (narrationInspection.issues.some((issue) => issue.code === "too_many_spoken_words")) {
-        issues.push(
-          `${label} narrationText has ${narrationInspection.spokenWordCount} spoken words; the production ` +
-          `maximum is ${NARRATION_MAX_SPOKEN_WORDS} so one Groq narration can fit one ` +
-          `${NARRATION_MAX_AUDIO_SECONDS}-second Agnes scene. Split it into consecutive scenes.`
-        );
-      }
-    }
+
+    const narrationText = typeof scene.narrationText === "string" ? scene.narrationText : "";
+    inspectNarrationText(narrationText, { production: true }).issues.forEach((issue) => {
+      issues.push(`${label}: ${issue.message}`);
+    });
+
     if (!Array.isArray(scene.characterNames)) {
       issues.push(`${label} is missing characterNames.`);
-    } else if (isFullProduction && !Array.isArray(scene.characterVisuals)) {
-      issues.push(`${label} must include characterVisuals aligned 1:1 with characterNames (use [] when empty).`);
-    } else if (scene.characterNames.length > 0 && !hasConsistentCharacterVisuals(scene)) {
-      issues.push(`${label} must include characterVisuals entries matching characterNames in order, with explicit visualForm metadata for each character.`);
-    } else if (Array.isArray(scene.characterVisuals) && scene.characterVisuals.length !== scene.characterNames.length) {
-      issues.push(`${label} characterVisuals must align 1:1 with characterNames.`);
-    }
-    if (canonicalCast) {
-      const unknownNames = scene.characterNames.filter((name) => !canonicalCast.has(name.trim()));
+    } else {
+      const names = scene.characterNames;
+      if (names.length > MAX_SCENE_MAIN_CHARACTER_COUNT) {
+        issues.push(
+          `${label} characterNames contains ${names.length} names; the maximum is ` +
+          `${MAX_SCENE_MAIN_CHARACTER_COUNT}.`,
+        );
+      }
+      if (names.some((name) => typeof name !== "string" || !name.trim())) {
+        issues.push(`${label} characterNames must contain only non-empty exact roster names.`);
+      }
+      if (new Set(names).size !== names.length) {
+        issues.push(`${label} characterNames contains duplicate entries.`);
+      }
+      const unknownNames = mainCharacterNames === undefined
+        ? []
+        : names.filter((name) => !rosterSet.has(name));
       if (unknownNames.length > 0) {
         issues.push(
           `${label} characterNames contains non-roster names: ${unknownNames.join(", ")}. ` +
-          "Put guests and secondary creatures in supportingEntities."
+          "Put guests and secondary creatures in supportingEntities.",
         );
-      }
-    }
-    if (isFullProduction) {
-      const supportingEntities = Array.isArray(scene.supportingEntities)
-        ? scene.supportingEntities.filter((entity) => typeof entity === "string" && entity.trim())
-        : [];
-      const supportingIdentities = supportingEntities.map(supportingIdentity);
-      if (new Set(supportingIdentities).size !== supportingIdentities.length) {
-        issues.push(`${label} supportingEntities contains the same stable identity more than once.`);
-      }
-      supportingEntities.forEach((descriptor) => {
-        const identity = supportingIdentity(descriptor);
-        if (isCollectiveSupportingIdentity(identity)) {
-          issues.push(
-            `${label} supporting entity "${descriptor.split(":", 1)[0]}" is a group. ` +
-            "Each supportingEntities entry must identify exactly one visible individual.",
-          );
-        }
-      });
-      (scene.continuityAnchors ?? []).forEach((anchor) => {
-        const overlappingFigures = mentionedStableFigureNames(anchor, [...knownFigureIdentities]);
-        if (overlappingFigures.length > 0) {
-          issues.push(
-            `${label} continuity anchor "${anchor.split(":", 1)[0]}" redefines a character or living entity. ` +
-            "continuityAnchors are only for non-living props, layout, and environmental state; keep figure state in action or sceneDetails.",
-          );
-        }
-      });
-      const figuresInEnvironment = mentionedStableFigureNames(
-        scene.environmentDescription,
-        [...knownFigureIdentities],
-      );
-      if (figuresInEnvironment.length > 0) {
-        issues.push(
-          `${label} environmentDescription mentions visible figure ${JSON.stringify(figuresInEnvironment[0])}. ` +
-          "Keep environments figure-free and put every visible individual only in characterNames or supportingEntities.",
-        );
-      }
-      if (UNCOUNTED_BACKGROUND_FIGURE_PATTERN.test(scene.environmentDescription)) {
-        issues.push(
-          `${label} environmentDescription introduces uncounted background figures. ` +
-          "Keep environments figure-free and list every visible individual in characterNames or supportingEntities.",
-        );
-      }
-      const exactSceneFigureNames = [
-        ...scene.characterNames,
-        ...supportingEntities.map((descriptor) => descriptor.split(":", 1)[0]!.trim()),
-      ];
-      const declaredButUnstagedFigures = exactSceneFigureNames.filter(
-        (name) => mentionedStableFigureNames(
-          `${scene.action} ${scene.sceneDetails ?? ""}`,
-          [name],
-        ).length === 0,
-      );
-      for (const unstagedName of declaredButUnstagedFigures) {
-        issues.push(
-          `${label} declares figure ${JSON.stringify(unstagedName)} but never names it in action/sceneDetails. ` +
-          "Explicitly stage every declared visible individual by its exact stable name so the cast count is unambiguous.",
-        );
-      }
-      const mentionedUnlistedFigures = findMentionedUnlistedFigureNames(
-        `${scene.action} ${scene.sceneDetails ?? ""}`,
-        [...knownFigureIdentities],
-        exactSceneFigureNames,
-      );
-      for (const unlistedName of mentionedUnlistedFigures) {
-        issues.push(
-          `${label} action/sceneDetails mentions unlisted figure ${JSON.stringify(unlistedName)}. ` +
-          "Every visible figure must be counted exactly once in characterNames or supportingEntities for this scene.",
-        );
-      }
-      const ambiguousAliases = findGenericVisualCastAliases(
-        `${scene.action} ${scene.sceneDetails ?? ""}`,
-        exactSceneFigureNames,
-      );
-      if (ambiguousAliases.length > 0) {
-        issues.push(
-          `${label} action/sceneDetails uses a collective or generic cast alias ` +
-          `(${ambiguousAliases.map((alias) => JSON.stringify(alias)).join(", ")}). ` +
-          "Use the exact stable name of every visible figure, including object characters, so one alias cannot become a second body.",
-        );
-      }
-    }
-    if (countNarrativeBeats(scene.narrationText) >= 2) {
-      issues.push(`${label} narration appears overloaded with multiple beats and should be split.`);
-    }
-    const previousScene = index > 0 ? script.scenes[index - 1] : null;
-    if (previousScene && hasMeaningfulSupportingEntities(previousScene) && !hasMeaningfulSupportingEntities(scene)) {
-      const combined = `${scene.narrationText} ${scene.action} ${scene.sceneDetails ?? ""}`.toLowerCase();
-      if (previousScene.supportingEntities!.some((e) => {
-        const namePart = e.split(":")[0]?.toLowerCase().trim();
-        return namePart && namePart.length > 2 && combined.includes(namePart);
-      })) {
-        issues.push(`${label} continues interacting with supporting entities from the previous scene but is missing supportingEntities.`);
       }
     }
 
-    const requiresRicherSceneDetails = scene.characterNames.length >= 3 || (scene.characterNames.length > 0 && sceneMentionsVisualSetup(scene));
-    if (requiresRicherSceneDetails && hasWeakSceneDetails(scene)) {
-      issues.push(
-        `${label} needs richer sceneDetails for reliable video generation because it has a complex cast or important visual setup. ` +
-        "Use at least 60 characters and either two sentence-like parts or at least three comma/colon/semicolon-separated visual clauses.",
-      );
-    }
+    validateOptionalStringArray(scene.supportingEntities, "supportingEntities", label);
+    validateOptionalStringArray(scene.continuityAnchors, "continuityAnchors", label);
   });
 
   return { pass: issues.length === 0, issues };
@@ -1387,7 +1153,7 @@ async function rewriteScript(params: {
   const baseSystemPrompt =
     "You refine children's episodic scene scripts for one-scene/one-video generation. " +
     "Return ONLY valid JSON matching this shape: {\"title\": string, \"premise\": string?, \"scenes\": [{\"sceneNumber\": number, \"narrationText\": string, \"environmentDescription\": string, \"action\": string, \"characterNames\": string[], \"characterVisuals\": [{\"name\": string, \"visualForm\": \"real_creature\"|\"humanoid\"|\"anthropomorphic_creature\"|\"object_character\"|\"fantasy_creature\", \"speciesOrType\": string?, \"humanoidAllowed\": boolean?}], \"supportingEntities\": string[]?, \"continuityAnchors\": string[]?, \"sceneDetails\": string, \"cameraAngle\": string, \"lighting\": string}]}. " +
-    `ONE SCENE = ONE AUDIO = ONE VIDEO (CRITICAL): Keep exactly one visible beat per scene. Each narrationText must be one or two concise sentences, no more than ${NARRATION_MAX_RAW_CHARACTERS} raw characters including vocal directions, and no more than ${NARRATION_MAX_SPOKEN_WORDS} spoken words. Aim for ${NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS}-${NARRATION_MAX_SPOKEN_WORDS} spoken words and no more than ${NARRATION_AUTHORING_TARGET_MAX_RAW_CHARACTERS} raw characters so the measured Groq narration normally lands around 7-${NARRATION_TARGET_MAX_AUDIO_SECONDS} seconds and never requires two Agnes clips. ` +
+    `ONE SCENE = ONE AUDIO = ONE VIDEO (CRITICAL): Keep exactly one visible beat per scene. Each narrationText must be one or two concise sentences, no more than ${NARRATION_MAX_RAW_CHARACTERS} raw characters including vocal directions, and no more than ${NARRATION_MAX_SPOKEN_WORDS} spoken words. Aim for ${NARRATION_AUTHORING_TARGET_MIN_SPOKEN_WORDS}-${NARRATION_AUTHORING_TARGET_MAX_SPOKEN_WORDS} spoken words and no more than ${NARRATION_AUTHORING_TARGET_MAX_RAW_CHARACTERS} raw characters so the measured Groq narration normally lands around 7-${NARRATION_TARGET_MAX_AUDIO_SECONDS} seconds and never requires two Agnes clips. Every narration must contain real spoken words outside bracketed vocal directions. Every required text field must contain finished prose: never output ellipses, TODO/TBD, a field label, or text like \"scene 49 narration/action/environment\". ` +
     "Split scenes when a narration paragraph contains multiple visible moments, action changes, emotional turns, time jumps, or too much speech for one clip. Never duplicate or lightly renumber the same narration/action beat to reach the scene or runtime target. " +
     `TOTAL RUNTIME & WORD COUNT DISCIPLINE (CRITICAL): The episode must reach at least ${params.targetRuntimeMinutes} minutes and ${requiredWords} total spoken words across ${params.minScenes}-${params.maxScenes} concise scenes. Add meaningful consecutive visual beats; never lengthen an individual narration beyond the per-scene limits. ` +
     "SPLIT-METADATA PRESERVATION (CRITICAL): When splitting one source scene into consecutive child scenes, preserve its environmentDescription verbatim while the location is unchanged. Preserve each visible character's exact characterVisuals entry and keep it aligned with characterNames. Copy a supportingEntities descriptor only into children where that one individual remains visible. Copy only non-living continuityAnchors through children while that prop/layout/environment state remains visible; never use an anchor for a character, creature, living object, pose, or action. Divide action and sceneDetails into one clear visible sub-action and emotion per child. Preserve cameraAngle and lighting unless the new visible beat deliberately requires a change. " +
@@ -1568,19 +1334,18 @@ function validateProductionRefinementCandidate(params: {
   durationExceededScenes?: readonly DurationExceededScene[];
   knownSupportingEntityNames?: readonly string[];
 }): ScriptValidationResult {
-  const local = validateRefinementCandidate({
-    ...params,
-    minScenes: DEFAULT_PRODUCTION_MIN_SCENES,
-    maxScenes: DEFAULT_PRODUCTION_MAX_SCENES,
-    targetRuntimeMinutes: 5,
-  });
   const authoritative = inspectProductionScript(
     params.candidate,
     params.mainCharacterNames,
   );
+  const measuredDurationIssues = durationRepairIssues(
+    params.sourceScript,
+    params.candidate,
+    params.durationExceededScenes ?? [],
+  );
   const issues = dedupeEpisodeScriptValidationIssues([
-    ...local.issues,
     ...authoritative.issues,
+    ...measuredDurationIssues,
   ]).map((issue) => issue.message);
   return { pass: issues.length === 0, issues };
 }
@@ -2108,6 +1873,7 @@ function canonicalizeChunkScenes(params: {
   acceptedScenes: readonly EpisodeScene[];
   submittedScenes: readonly EpisodeScene[];
   authoringPlan: EpisodeScriptChunkAuthoringPlan;
+  mainCharacterNames: readonly string[];
 }): { scenes: EpisodeScene[]; audits: SceneCastCanonicalizationAudit[] } {
   const durableContext: EpisodeScene[] = [...params.acceptedScenes];
   const scenes: EpisodeScene[] = [];
@@ -2116,6 +1882,7 @@ function canonicalizeChunkScenes(params: {
     const normalized = canonicalizeSceneCast(scene, {
       durableAcceptedScenes: durableContext,
       supportingEntityBible: params.authoringPlan.supportingEntityBible,
+      mainCharacterNames: params.mainCharacterNames,
       maximumSceneDetailsLength: 2_500,
     });
     const canonicalScene = normalized.scene as EpisodeScene;
@@ -2234,6 +2001,18 @@ function mergeDurationExceededScenes(
   return [...merged.values()].slice(0, 60);
 }
 
+function sameDurationEvidence(
+  left: readonly DurationExceededScene[],
+  right: readonly DurationExceededScene[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const rightByScene = new Map(right.map((item) => [item.sceneNumber, item.durationSeconds]));
+  return left.every((item) => {
+    const otherDuration = rightByScene.get(item.sceneNumber);
+    return otherDuration !== undefined && Math.abs(item.durationSeconds - otherDuration) <= 0.05;
+  });
+}
+
 function filterApplicableDurationEvidence(
   script: EpisodeScript,
   evidence: readonly DurationExceededScene[],
@@ -2261,7 +2040,7 @@ function filterApplicableDurationEvidence(
   };
 }
 
-const MAX_NARRATION_REPAIRS_PER_INVOCATION = 4;
+const MAX_NARRATION_REPAIRS_PER_INVOCATION = DEFAULT_PRODUCTION_MAX_SCENES;
 
 const measuredNarrationReplacementSchema = z.object({
   sceneNumber: z.number().int().positive(),
@@ -2285,66 +2064,6 @@ function measuredNarrationTargetWords(
   ));
 }
 
-const NARRATION_SEMANTIC_STOP_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-  "had", "has", "he", "her", "his", "in", "is", "it", "of", "on", "or",
-  "she", "that", "the", "their", "then", "they", "this", "to", "was",
-  "were", "while", "with",
-]);
-
-function narrationSemanticTokens(text: string): Set<string> {
-  return new Set(
-    text
-      .replace(/\[[^\]]*\]/gu, " ")
-      .toLocaleLowerCase()
-      .split(/[^\p{L}\p{N}]+/gu)
-      .filter((token) => token.length >= 2 && !NARRATION_SEMANTIC_STOP_WORDS.has(token)),
-  );
-}
-
-function narrationHasQuotedSpeech(text: string): boolean {
-  return /["“][^"”]+["”]/u.test(text);
-}
-
-function assertNarrationMeaningPreserved(
-  sourceScene: EpisodeScene,
-  replacementText: string,
-  targetWords: number,
-): void {
-  const sourceTokens = narrationSemanticTokens(sourceScene.narrationText);
-  const replacementTokens = narrationSemanticTokens(replacementText);
-  const overlapCount = [...replacementTokens]
-    .filter((token) => sourceTokens.has(token)).length;
-  const requiredOverlap = Math.min(3, sourceTokens.size);
-  const overlapRatio = replacementTokens.size === 0
-    ? 0
-    : overlapCount / replacementTokens.size;
-  if (overlapCount < requiredOverlap || overlapRatio < 0.6) {
-    throw new Error("Narration repair changed too much of the original story meaning.");
-  }
-
-  const lockedIdentityTokens = [
-    ...sourceScene.characterNames,
-    ...(sourceScene.supportingEntities ?? []).map((descriptor) => descriptor.split(":", 1)[0]!),
-  ]
-    .flatMap((name) => [...narrationSemanticTokens(name)])
-    .filter((token) => sourceTokens.has(token));
-  if (lockedIdentityTokens.some((token) => !replacementTokens.has(token))) {
-    throw new Error("Narration repair removed a named character or supporting entity.");
-  }
-  if (
-    narrationHasQuotedSpeech(sourceScene.narrationText)
-    && !narrationHasQuotedSpeech(replacementText)
-  ) {
-    throw new Error("Narration repair removed quoted dialogue.");
-  }
-
-  const minimumReplacementWords = Math.max(1, Math.floor(targetWords * 0.65));
-  if (countNarrationSpokenWords(replacementText) < minimumReplacementWords) {
-    throw new Error("Narration repair removed too much story detail.");
-  }
-}
-
 function parseMeasuredNarrationReplacement(params: {
   raw: string;
   sourceScene: EpisodeScene;
@@ -2357,7 +2076,7 @@ function parseMeasuredNarrationReplacement(params: {
     throw new Error("Narration repair returned a different scene number.");
   }
   const inspection = inspectNarrationText(replacement.narrationText, { production: true });
-  if (inspection.issues.length > 0 || countNarrativeBeats(replacement.narrationText) >= 2) {
+  if (inspection.issues.length > 0) {
     throw new Error("Narration repair violated the one-scene narration contract.");
   }
   const sourceWords = countNarrationSpokenWords(params.sourceScene.narrationText);
@@ -2372,11 +2091,6 @@ function parseMeasuredNarrationReplacement(params: {
   if (!isShorter || replacementWords > targetWords) {
     throw new Error("Narration repair did not meet the conservative shortening target.");
   }
-  assertNarrationMeaningPreserved(
-    params.sourceScene,
-    replacement.narrationText,
-    targetWords,
-  );
   return replacement;
 }
 
@@ -2813,22 +2527,15 @@ function chunkRangeIssues(params: {
   return issues;
 }
 
-function isDeferredPartialAuthoritativeIssue(issue: string): boolean {
-  return /^Scene count \d+ is below the production minimum of \d+\.$/u.test(issue)
-    || /^Episode narration has \d+ spoken words; at least \d+ are required /u.test(issue);
-}
-
-/**
- * Applies every production scene and cross-scene rule to the accumulated
- * prefix. Only the not-yet-possible minimum scene/word totals are deferred.
- */
+/** Applies objective scene/provider limits to the accumulated durable prefix. */
 function validateEpisodeScriptChunkPrefix(params: {
   script: EpisodeScript;
   targetSceneCount: number;
   mainCharacterNames: readonly string[];
   authoringPlan: EpisodeScriptChunkAuthoringPlan;
+  minimumReplacementSpokenWords?: number;
 }): ScriptValidationResult {
-  const local = validateEpisodeScript(
+  return validateEpisodeScript(
     params.script,
     0,
     params.targetSceneCount,
@@ -2837,39 +2544,8 @@ function validateEpisodeScriptChunkPrefix(params: {
     {
       productionSceneContract: true,
       deferAggregateMinimums: true,
-      knownSupportingEntityNames: params.authoringPlan.supportingEntityBible
-        .map(supportingIdentity),
     },
   );
-  const authoritative = inspectProductionScript(
-    params.script,
-    params.mainCharacterNames,
-  );
-  const issues = [
-    ...local.issues,
-    ...authoritative.issues.filter((issue) => !isDeferredPartialAuthoritativeIssue(issue)),
-    ...inspectSceneContinuity(params.script.scenes, {
-      mainCharacterNames: params.mainCharacterNames,
-      plannedBeats: params.authoringPlan.beats,
-    }),
-  ];
-  const totalWords = params.script.scenes.reduce(
-    (total, scene) => total + countNarrationSpokenWords(scene.narrationText),
-    0,
-  );
-  const remainingScenes = params.targetSceneCount - params.script.scenes.length;
-  const minimumWords = minimumNarrationWords(5);
-  const maximumReachableWords = totalWords + remainingScenes * NARRATION_MAX_SPOKEN_WORDS;
-  if (maximumReachableWords < minimumWords) {
-    issues.push(
-      `The accepted prefix plus ${remainingScenes} remaining scenes can reach at most ` +
-      `${maximumReachableWords} spoken words; at least ${minimumWords} are required. ` +
-      "Rewrite this chunk with more meaningful narration while keeping every scene within its cap.",
-    );
-  }
-  const uniqueIssues = dedupeEpisodeScriptValidationIssues(issues)
-    .map((issue) => issue.message);
-  return { pass: uniqueIssues.length === 0, issues: uniqueIssues };
 }
 
 function normalCompletedChunkScript(value: unknown): EpisodeScript | null {
@@ -3109,6 +2785,7 @@ export function buildEpisodeScriptChunkTool(
   const semanticCorrectionStateByRange = new Map<string, InRunSemanticCorrectionState>();
   const oversizeCorrectionRetriesByRange = new Map<string, number>();
   const inputCorrectionRetriesByRoute = new Map<string, number>();
+  const restartReplanRetriesByEpisode = new Map<number, number>();
 
   const recoverableInputFailure = (
     params: CompactChunkInputFailureParams,
@@ -3163,17 +2840,6 @@ export function buildEpisodeScriptChunkTool(
       const input = rawInput as EpisodeScriptChunkInput;
       const rawTransportSerializedCharacters = JSON.stringify(input).length;
       const operationIssues = scriptChunkOperationIssues(input);
-      if (
-        input.operation !== "append"
-        && input.authoringPlan
-        && input.targetSceneCount !== undefined
-      ) {
-        operationIssues.push(...validateAuthoringPlanCoverage(
-          input.authoringPlan,
-          input.targetSceneCount,
-          { strictSupportingIdentities: true },
-        ));
-      }
       if (rawTransportSerializedCharacters > EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS) {
         operationIssues.push(
           `One raw chunk transport must be at most ${EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS} ` +
@@ -3323,6 +2989,8 @@ export function buildEpisodeScriptChunkTool(
             authoring: {
               protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
               targetSceneCount: input.targetSceneCount!,
+              minimumReplacementSpokenWords:
+                DEFAULT_EPISODE_SCRIPT_MINIMUM_SPOKEN_WORDS,
               plan: input.authoringPlan!,
             },
           };
@@ -3365,6 +3033,8 @@ export function buildEpisodeScriptChunkTool(
           targetSceneCount: currentEnvelope.authoring.targetSceneCount,
           mainCharacterNames,
           authoringPlan: currentEnvelope.authoring.plan,
+          minimumReplacementSpokenWords:
+            currentEnvelope.authoring.minimumReplacementSpokenWords,
         });
         if (!existingPrefixValidation.pass) {
           const restartValidation = {
@@ -3419,6 +3089,8 @@ export function buildEpisodeScriptChunkTool(
             ),
             restartPlan: {
               targetSceneCount: currentEnvelope.authoring.targetSceneCount,
+              minimumReplacementSpokenWords:
+                currentEnvelope.authoring.minimumReplacementSpokenWords,
               authoringPlan: currentEnvelope.authoring.plan,
               nextSceneNumber: 1,
               nextSceneEnd: Math.min(
@@ -3456,6 +3128,8 @@ export function buildEpisodeScriptChunkTool(
             targetSceneCount: currentEnvelope.authoring.targetSceneCount,
             mainCharacterNames,
             authoringPlan: currentEnvelope.authoring.plan,
+            minimumReplacementSpokenWords:
+              currentEnvelope.authoring.minimumReplacementSpokenWords,
           });
           if (currentPrefixValidation.pass) {
             return JSON.stringify({
@@ -3491,6 +3165,8 @@ export function buildEpisodeScriptChunkTool(
               "Restart is allowed only for a deterministically rejected complete draft without pending narration-only timing repair.",
           });
         }
+        const durableMinimumReplacementSpokenWords = 0;
+        restartReplanRetriesByEpisode.delete(input.episodeId);
         writeKind = "revise";
         writeExpectedRevision = currentDraft.revision;
         baseEnvelope = {
@@ -3500,6 +3176,10 @@ export function buildEpisodeScriptChunkTool(
           authoring: {
             protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
             targetSceneCount: input.targetSceneCount!,
+            // Aggregate runtime floors are advisory; only per-scene provider
+            // limits can require narration repair.
+            minimumReplacementSpokenWords:
+              durableMinimumReplacementSpokenWords,
             plan: input.authoringPlan!,
           },
         };
@@ -3572,6 +3252,7 @@ export function buildEpisodeScriptChunkTool(
         acceptedScenes: baseEnvelope.scenes as EpisodeScene[],
         submittedScenes: correctionCandidateScenes,
         authoringPlan: baseEnvelope.authoring.plan,
+        mainCharacterNames,
       });
       const canonicalSceneShape = z.array(recoverableNarrationChunkSceneSchema)
         .min(1)
@@ -3639,30 +3320,19 @@ export function buildEpisodeScriptChunkTool(
       };
       const isComplete = candidate.scenes.length === targetSceneCount;
       const validation = isComplete
-        ? (() => {
-            const production = validateProductionRefinementCandidate({
-              sourceScript: candidate,
-              candidate,
-              mainCharacterNames,
-              durationExceededScenes: [],
-              knownSupportingEntityNames: baseEnvelope.authoring.plan.supportingEntityBible
-                .map(supportingIdentity),
-            });
-            const continuityIssues = inspectSceneContinuity(candidate.scenes, {
-              mainCharacterNames,
-              plannedBeats: baseEnvelope.authoring.plan.beats,
-            });
-            const issues = dedupeEpisodeScriptValidationIssues([
-              ...production.issues,
-              ...continuityIssues,
-            ]).map((issue) => issue.message);
-            return { pass: issues.length === 0, issues };
-          })()
+        ? validateProductionRefinementCandidate({
+            sourceScript: candidate,
+            candidate,
+            mainCharacterNames,
+            durationExceededScenes: [],
+          })
         : validateEpisodeScriptChunkPrefix({
             script: candidate,
             targetSceneCount,
             mainCharacterNames,
             authoringPlan: baseEnvelope.authoring.plan,
+            minimumReplacementSpokenWords:
+              baseEnvelope.authoring.minimumReplacementSpokenWords,
           });
 
       if (!validation.pass) {
@@ -3877,6 +3547,8 @@ export function buildEpisodeScriptChunkTool(
                   contentDigest: currentDraft.contentDigest,
                   restartPlan: {
                     targetSceneCount,
+                    minimumReplacementSpokenWords:
+                      baseEnvelope.authoring.minimumReplacementSpokenWords,
                     authoringPlan: input.authoringPlan,
                     nextSceneNumber: expectedRangeStart,
                     nextSceneEnd: expectedRangeEnd,
@@ -4191,6 +3863,7 @@ function buildDeterministicProductionScriptRefinementTool(
     description:
       "Loads and deterministically validates a durable episode draft. It never accepts or returns scriptJson. " +
       `Only a measured Groq narration above ${NARRATION_MAX_AUDIO_SECONDS} seconds may invoke a model, and that model may return only a shorter narrationText. ` +
+      "Timing is independently re-probed from canonical WAVs with exact-text sidecars; copied model values are not authoritative. " +
       "All visual, character, environment, action, continuity, camera, and lighting fields remain unchanged.",
     schema: z.object({
       episodeId: z.number().int().positive().describe("The episode id in the draft-staging receipt."),
@@ -4201,10 +3874,10 @@ function buildDeterministicProductionScriptRefinementTool(
         sceneNumber: z.number().int().positive(),
         durationSeconds: z.number().positive().max(300),
       })).max(DEFAULT_PRODUCTION_MAX_SCENES).default([]).describe(
-        `Compact authoritative Groq measurements only for scene WAVs above ${NARRATION_MAX_AUDIO_SECONDS} seconds.`,
+        `Groq receipt measurements for scene WAVs above ${NARRATION_MAX_AUDIO_SECONDS} seconds. Production re-probes canonical WAVs and verifies exact-text sidecars before trusting them.`,
       ),
       measuredTotalNarrationSeconds: z.number().nonnegative().max(3_600).optional().describe(
-        "The positive sum of every successfully measured scene WAV. Never send zero or a partial sum.",
+        "The positive sum from the episode-audio receipt. Never calculate, rewrite, or send a partial sum.",
       ),
       measuredNarrationSceneCount: z.number().int().nonnegative()
         .max(DEFAULT_PRODUCTION_MAX_SCENES).optional().describe(
@@ -4358,27 +4031,107 @@ function buildDeterministicProductionScriptRefinementTool(
         && !suppliedCompleteAggregateTiming;
       if (invalidAggregateTiming) ignoredTimingEvidenceCount += 1;
 
+      const persistedDurations = durationExceededScenesFromValidation(draft.validation);
       const persistedMeasuredTotal = measuredTotalNarrationSecondsFromValidation(draft.validation);
       const persistedMeasuredSceneCount = measuredNarrationSceneCountFromValidation(draft.validation);
-      const persistedAggregateIsComplete = persistedMeasuredTotal !== undefined
-        && persistedMeasuredSceneCount === canonicalSourceScript.scenes.length;
-      const effectiveMeasuredTotal = suppliedCompleteAggregateTiming
-        ? measuredTotalNarrationSeconds
-        : persistedAggregateIsComplete
-          ? persistedMeasuredTotal
-          : undefined;
-      const effectiveMeasuredSceneCount = effectiveMeasuredTotal === undefined
-        ? undefined
-        : canonicalSourceScript.scenes.length;
+      const hasSuppliedTimingEvidence = durationExceededScenes.length > 0
+        || suppliedAnyAggregateTiming;
+      const hasPersistedTimingEvidence = persistedDurations.length > 0
+        || persistedMeasuredTotal !== undefined
+        || persistedMeasuredSceneCount !== undefined;
 
-      const persistedDurations = durationExceededScenesFromValidation(draft.validation);
-      const mergedDurations = mergeDurationExceededScenes(
-        persistedDurations,
-        durationExceededScenes,
-      );
+      let effectiveMeasuredTotal: number | undefined;
+      let effectiveMeasuredSceneCount: number | undefined;
+      let effectiveDurations: DurationExceededScene[];
+      let authoritativeAudioTimingUsed = false;
+      let audioTimingRevalidationRequired = false;
+
+      if (
+        (hasSuppliedTimingEvidence || hasPersistedTimingEvidence)
+        && seriesState.auditEpisodeNarrationAudioTiming
+      ) {
+        const timingAudit = await seriesState.auditEpisodeNarrationAudioTiming(
+          episodeId,
+          canonicalSourceScript,
+        );
+        if (
+          timingAudit.complete
+          && timingAudit.sceneCount === canonicalSourceScript.scenes.length
+          && timingAudit.verifiedSceneCount === canonicalSourceScript.scenes.length
+          && typeof timingAudit.totalDurationSeconds === "number"
+          && Number.isFinite(timingAudit.totalDurationSeconds)
+          && timingAudit.totalDurationSeconds > 0
+        ) {
+          authoritativeAudioTimingUsed = true;
+          effectiveMeasuredTotal = timingAudit.totalDurationSeconds;
+          effectiveMeasuredSceneCount = timingAudit.sceneCount;
+          effectiveDurations = timingAudit.durationExceededScenes;
+          const rawDurations = mergeDurationExceededScenes(
+            persistedDurations,
+            durationExceededScenes,
+          );
+          const rawMeasuredTotal = suppliedCompleteAggregateTiming
+            ? measuredTotalNarrationSeconds
+            : persistedMeasuredTotal;
+          const rawMeasuredCount = suppliedCompleteAggregateTiming
+            ? measuredNarrationSceneCount
+            : persistedMeasuredSceneCount;
+          const rawTimingMatches = sameDurationEvidence(
+            rawDurations,
+            timingAudit.durationExceededScenes,
+          ) && rawMeasuredTotal !== undefined
+            && Math.abs(rawMeasuredTotal - timingAudit.totalDurationSeconds) <= 0.05
+            && rawMeasuredCount === timingAudit.sceneCount;
+          if (!rawTimingMatches) {
+            ignoredTimingEvidenceCount += rawDurations.length
+              + (rawMeasuredTotal === undefined ? 0 : 1);
+          }
+          console.log("[NarrationTimingAudit] canonical_audio_verified", {
+            episodeId,
+            sceneCount: timingAudit.sceneCount,
+            measuredTotalNarrationSeconds: Number(
+              timingAudit.totalDurationSeconds.toFixed(3),
+            ),
+            durationExceededSceneCount: timingAudit.durationExceededScenes.length,
+            copiedTimingMatched: rawTimingMatches,
+          });
+        } else {
+          // A partial/missing local manifest cannot authenticate duration
+          // values that traversed the model boundary. Clear the stale repair
+          // path; promotion below forces exact-text episode TTS to run again.
+          audioTimingRevalidationRequired = true;
+          effectiveDurations = [];
+          ignoredTimingEvidenceCount += persistedDurations.length
+            + durationExceededScenes.length
+            + (persistedMeasuredTotal === undefined ? 0 : 1)
+            + (measuredTotalNarrationSeconds === undefined ? 0 : 1);
+          console.warn("[NarrationTimingAudit] canonical_audio_incomplete", {
+            episodeId,
+            expectedSceneCount: canonicalSourceScript.scenes.length,
+            verifiedSceneCount: timingAudit.verifiedSceneCount,
+            invalidSceneNumbers: timingAudit.invalidSceneNumbers,
+          });
+        }
+      } else {
+        const persistedAggregateIsComplete = persistedMeasuredTotal !== undefined
+          && persistedMeasuredSceneCount === canonicalSourceScript.scenes.length;
+        effectiveMeasuredTotal = suppliedCompleteAggregateTiming
+          ? measuredTotalNarrationSeconds
+          : persistedAggregateIsComplete
+            ? persistedMeasuredTotal
+            : undefined;
+        effectiveMeasuredSceneCount = effectiveMeasuredTotal === undefined
+          ? undefined
+          : canonicalSourceScript.scenes.length;
+        effectiveDurations = mergeDurationExceededScenes(
+          persistedDurations,
+          durationExceededScenes,
+        );
+      }
+
       const filteredDurations = filterApplicableDurationEvidence(
         canonicalSourceScript,
-        mergedDurations,
+        effectiveDurations,
       );
       ignoredTimingEvidenceCount += filteredDurations.ignoredCount;
 
@@ -4422,78 +4175,10 @@ function buildDeterministicProductionScriptRefinementTool(
         });
       }
 
-      if (invalidAggregateTiming) {
-        return JSON.stringify({
-          status: "invalid_timing_evidence",
-          reason: measuredTotalNarrationSeconds === 0
-            ? "zero_total_duration"
-            : "incomplete_total_duration",
-          persisted: false,
-          retryable: true,
-          retryThisInvocation: false,
-          episodeId,
-          draftRevision: activeDraftRevision,
-          ignoredTimingEvidenceCount,
-          narrationRepairCallCount: 0,
-          nextAction:
-            `Generate or verify all ${canonicalSourceScript.scenes.length} exact-text scene WAVs first. Then call refine_episode_script with a positive measuredTotalNarrationSeconds and measuredNarrationSceneCount=${canonicalSourceScript.scenes.length}; never send zero or a partial sum.`,
-        });
-      }
-
-      if (effectiveMeasuredTotal !== undefined && effectiveMeasuredTotal < 300) {
-        const currentWords = totalNarrationWords(canonicalSourceScript);
-        const suggestedWords = Math.min(
-          DEFAULT_PRODUCTION_MAX_SCENES * NARRATION_MAX_SPOKEN_WORDS,
-          Math.max(800, Math.ceil((currentWords * 300 * 1.05) / effectiveMeasuredTotal)),
-        );
-        const runtimeValidation: ScriptValidationResult = {
-          pass: false,
-          issues: [
-            `Complete measured narration is ${effectiveMeasuredTotal.toFixed(3)} seconds across ${effectiveMeasuredSceneCount} scenes, below the required 300 seconds. Author a new complete script with at least ${suggestedWords} meaningful spoken words distributed across distinct visual beats.`,
-          ],
-        };
-        const durableValidation = compactProductionValidationEnvelope(
-          canonicalSourceScript,
-          runtimeValidation,
-          {
-            durationExceededScenes: [],
-            measuredTotalNarrationSeconds: effectiveMeasuredTotal,
-            measuredNarrationSceneCount: effectiveMeasuredSceneCount,
-          },
-        );
-        const revised = await reviseDurableDraft({
-          seriesState,
-          episodeId,
-          expectedRevision: activeDraftRevision,
-          script: canonicalSourceScript,
-          validation: durableValidation,
-        });
-        if (typeof revised === "string") return revised;
-        return JSON.stringify({
-          status: "needs_reauthor",
-          reason: "measured_runtime_too_short",
-          persisted: false,
-          draftPersisted: true,
-          retryable: true,
-          retryThisInvocation: false,
-          episodeId,
-          draftRevision: revised.revision,
-          replacementExpectedDraftRevision: revised.revision,
-          measuredTotalNarrationSeconds: effectiveMeasuredTotal,
-          measuredNarrationSceneCount: effectiveMeasuredSceneCount,
-          minimumReplacementSpokenWords: suggestedWords,
-          narrationRepairCallCount: 0,
-          validation: publicValidationReceipt(durableValidation),
-          nextAction:
-            `Stop this invocation. On the next fresh run call write_episode_script_chunk with operation=restart, episodeId=${episodeId}, expectedDraftRevision=${revised.revision}, a plan targeting at least ${suggestedWords} meaningful spoken words, and corrected scenes 1-8 with every visual field.`,
-        });
-      }
-
       let candidate = canonicalSourceScript;
       let remainingDurations = filteredDurations.durationExceededScenes;
       const warnings: string[] = [];
       let narrationRepairCallCount = 0;
-      let shorteningWouldBreakContract = false;
 
       if (remainingDurations.length > 0) {
         const timingValidation = validateProductionRefinementCandidate({
@@ -4545,9 +4230,8 @@ function buildDeterministicProductionScriptRefinementTool(
               durationExceededScenes: [],
             });
             if (!proposedValidation.pass) {
-              shorteningWouldBreakContract = true;
               warnings.push(
-                "The measured narration could not be shortened without violating the complete production contract; the provider output was discarded.",
+                "The narration-only replacement failed the objective production contract and was discarded.",
               );
               break;
             }
@@ -4563,42 +4247,6 @@ function buildDeterministicProductionScriptRefinementTool(
             break;
           }
         }
-      }
-
-      if (shorteningWouldBreakContract) {
-        const reauthorValidation = compactProductionValidationEnvelope(
-          candidate,
-          {
-            pass: false,
-            issues: [
-              "A measured-overlong narration cannot be shortened safely without making the complete episode violate its word-count or story contract.",
-            ],
-          },
-        );
-        const revised = await reviseDurableDraft({
-          seriesState,
-          episodeId,
-          expectedRevision: activeDraftRevision,
-          script: candidate,
-          validation: reauthorValidation,
-        });
-        if (typeof revised === "string") return revised;
-        return JSON.stringify({
-          status: "needs_reauthor",
-          reason: "narration_shortening_breaks_contract",
-          persisted: false,
-          draftPersisted: true,
-          retryable: true,
-          retryThisInvocation: false,
-          episodeId,
-          draftRevision: revised.revision,
-          replacementExpectedDraftRevision: revised.revision,
-          narrationRepairCallCount,
-          validation: publicValidationReceipt(reauthorValidation),
-          warnings: compactWarnings(warnings),
-          nextAction:
-            `Stop this invocation. On the next fresh run call write_episode_script_chunk with operation=restart, episodeId=${episodeId}, expectedDraftRevision=${revised.revision}, a new bounded plan with more timing headroom, and corrected scenes 1-8.`,
-        });
       }
 
       const finalValidation = validateProductionRefinementCandidate({
@@ -4644,6 +4292,7 @@ function buildDeterministicProductionScriptRefinementTool(
           narrationRepairCallCount,
           remainingOverlongSceneCount: remainingDurations.length,
           ...(ignoredTimingEvidenceCount > 0 ? { ignoredTimingEvidenceCount } : {}),
+          ...(authoritativeAudioTimingUsed ? { timingEvidenceSource: "canonical_audio" } : {}),
           durableTimingEvidenceCount: durableTimingEvidenceCount(durableValidation),
           validation: publicValidationReceipt(durableValidation),
           warnings: compactWarnings(warnings),
@@ -4758,6 +4407,8 @@ function buildDeterministicProductionScriptRefinementTool(
         narrationRepairCallCount,
         scriptReloadRequired,
         ...(ignoredTimingEvidenceCount > 0 ? { ignoredTimingEvidenceCount } : {}),
+        ...(authoritativeAudioTimingUsed ? { timingEvidenceSource: "canonical_audio" } : {}),
+        ...(audioTimingRevalidationRequired ? { audioTimingRevalidationRequired: true } : {}),
         validation: { pass: true, issues: [] },
         warnings: compactWarnings(warnings),
         nextAction: scriptReloadRequired
@@ -4784,7 +4435,7 @@ export function buildLegacyStandaloneScriptRefinementFixtureTool(): DynamicStruc
     description:
       "Refines an initially drafted episode into one-scene/one-audio/one-video units. It splits overloaded " +
       `narration into <=${NARRATION_MAX_RAW_CHARACTERS} raw characters and <=${NARRATION_MAX_SPOKEN_WORDS} spoken words per production scene, ` +
-      "locks characterNames to the supplied fixed roster, preserves scene continuity metadata, and validates total runtime. " +
+      "locks characterNames to the supplied fixed roster and preserves scene continuity metadata. " +
       "Standalone mode returns scriptJson only when the requested validation contract passes.",
     schema: z.object({
       episodeId: z.number().int().positive().optional(),

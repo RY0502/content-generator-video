@@ -100,6 +100,7 @@ describe("SeriesState episode script drafts", () => {
         })),
         measuredTotalNarrationSeconds: 281.375,
         measuredNarrationSceneCount: 1,
+        minimumReplacementSpokenWords: 825,
         measuredNarrationRecoveryWordTarget: 825,
       },
       ignoredLargeField: "not persisted",
@@ -131,6 +132,9 @@ describe("SeriesState episode script drafts", () => {
       measuredTotalNarrationSeconds: 281.375,
       measuredNarrationSceneCount: 1,
     });
+    expect(first.draft.validation?.repairEvidence).not.toHaveProperty(
+      "minimumReplacementSpokenWords",
+    );
     expect(first.draft.validation?.repairEvidence).not.toHaveProperty(
       "measuredNarrationRecoveryWordTarget",
     );

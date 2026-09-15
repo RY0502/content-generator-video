@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCharacterPortraitPrompt,
   buildEpisodeKeyArtPrompt,
   buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtPrompt,
@@ -11,6 +12,18 @@ import {
 } from "../promptBuilder.js";
 
 describe("promptBuilder", () => {
+  it("keeps the character portrait prompt within AnyAPI's 1000-character contract", () => {
+    const prompt = buildCharacterPortraitPrompt({
+      characterDescription: `Bobo the Backpack: ${"highly specific visual identity detail ".repeat(40)}`,
+    });
+
+    expect(prompt.length).toBeLessThanOrEqual(1_000);
+    expect(prompt).toContain("Bobo the Backpack");
+    expect(prompt).toContain("exactly one complete figure and one pose");
+    expect(prompt).toContain("no duplicate or clone");
+    expect(prompt).toContain("2D only");
+  });
+
   it("includes recurring supporting entities and single-moment guidance in scene prompts", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Pip the Ant"],
@@ -31,7 +44,8 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("[Ant leader]: tiny black ant with a shiny chestnut head");
     expect(prompt).toContain("INANIMATE CONTINUITY");
     expect(prompt).toContain("Picnic setup: red-and-white checkered blanket spread on grass with sandwiches and leaf cups.");
-    expect(prompt).toContain("[Pip the Ant]: small red ant");
+    expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Pip the Ant]");
+    expect(prompt).not.toContain("small red ant, yellow backpack");
     expect(prompt).toContain("VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS");
     expect(prompt).toContain("[Pip the Ant] × 1; [Ant leader] × 1");
     expect(prompt).toContain("ACTION AND CHANGE — ONE CONTINUOUS BEAT");
@@ -39,7 +53,7 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("No duplicate characters");
   });
 
-  it("keeps real creatures in their natural body form", () => {
+  it("uses portrait references rather than textual creature appearance sheets", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Sunny the Sparrow", "Butterfly"],
       characterVisuals: [
@@ -58,14 +72,14 @@ describe("promptBuilder", () => {
       sceneDetails: "Sunny glances back over her shoulder while the small butterfly lifts into the air with torn orange wings visible.",
     });
 
-    expect(prompt).toContain("BODY-FORM LOCK");
-    expect(prompt).toContain("Butterfly (butterfly)");
-    expect(prompt).toContain("use natural species body plans, stance, and locomotion");
-    expect(prompt).toContain("never humanoid arms or hands");
-    expect(prompt).not.toContain("Anthropomorphic styling (walking upright, expressive faces) is acceptable");
+    expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Sunny the Sparrow]; [Butterfly]");
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS");
+    expect(prompt).not.toContain("small sparrow, sunflower-yellow chest");
+    expect(prompt).not.toContain("tiny orange butterfly");
+    expect(prompt).not.toContain("BODY-FORM LOCK");
   });
 
-  it("allows an explicitly anthropomorphic creature to use an upright body form", () => {
+  it("does not restate an anthropomorphic character's appearance in text", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Felix the Fox"],
       characterVisuals: [
@@ -86,9 +100,9 @@ describe("promptBuilder", () => {
       lighting: "warm lamplight",
     });
 
-    expect(prompt).toContain("BODY-FORM LOCK");
-    expect(prompt).toContain("Felix the Fox (red fox) may pose upright");
-    expect(prompt).not.toContain("Felix the Fox (red fox) must keep natural species anatomy, body plan, stance, and locomotion");
+    expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Felix the Fox]");
+    expect(prompt).not.toContain("small russet-red fox");
+    expect(prompt).not.toContain("BODY-FORM LOCK");
   });
 
   it("falls back to legacy emotion and prop fields when sceneDetails is absent", () => {
@@ -167,7 +181,6 @@ describe("promptBuilder", () => {
     });
 
     expect(prompt).toContain("species-correct anatomy");
-    expect(prompt).toContain("use natural species body plans, stance, and locomotion");
     expect(prompt).toContain("duplicated appendages beyond the locked species/body form");
     expect(prompt).not.toContain("exactly two arms/forelegs and two legs/hindlegs");
     expect(prompt).not.toContain("exactly two hands/paws");
@@ -247,8 +260,9 @@ describe("promptBuilder", () => {
     expect(prompt).toContain(TEMPORAL_STABILITY_NEGATIVE_BIBLE);
     expect(prompt).toContain("VISIBLE CAST — EXACTLY 3 FIGURES, NO OTHERS");
     expect(prompt).toContain("[Mia] × 1; [Leo] × 1; [Bobo] × 1");
-    expect(prompt).toContain("OBJECT-CHARACTER LOCK");
-    expect(prompt).toContain("carried/worn OR freestanding, never both");
+    expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Mia]; [Leo]; [Bobo]");
+    expect(prompt).not.toContain("young girl, yellow shirt");
+    expect(prompt).not.toContain("OBJECT-CHARACTER LOCK");
     expect(prompt).not.toContain("The friends spotted the nest and moved closer");
   });
 
@@ -335,7 +349,7 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("unlisted wardrobe/accessories/markings");
   });
 
-  it("preserves exact age and portrait identity text without summarizing it", () => {
+  it("keeps portrait identity prose out of the video prompt", () => {
     const identity = "EXACT AGE 5-year-old young girl; chestnut bob; amber eyes; yellow shirt. Portrait lock: round cheeks, red shoes.";
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Mia"],
@@ -347,7 +361,8 @@ describe("promptBuilder", () => {
       lighting: "bright morning sunlight",
     });
 
-    expect(prompt).toContain(`[Mia]: ${identity}`);
+    expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Mia]");
+    expect(prompt).not.toContain(identity);
     expect(prompt).toContain("same exact age");
   });
 
@@ -377,7 +392,7 @@ describe("promptBuilder", () => {
     expect(prompt).not.toContain("pan left then");
   });
 
-  it("rejects duplicate cast declarations but never imposes an arbitrary cast ceiling", () => {
+  it("rejects duplicate cast declarations and more than five main-character references", () => {
     expect(() => buildStylizedScenePrompt({
       characterNames: ["Mia", "Mia"],
       characterDescriptions: ["five-year-old girl", "five-year-old girl"],
@@ -388,8 +403,8 @@ describe("promptBuilder", () => {
       lighting: "daylight",
     })).toThrow("each main character exactly once");
 
-    const names = Array.from({ length: 7 }, (_, index) => `Character ${index + 1}`);
-    const prompt = buildStylizedScenePrompt({
+    const names = Array.from({ length: 6 }, (_, index) => `Character ${index + 1}`);
+    expect(() => buildStylizedScenePrompt({
       characterNames: names,
       characterDescriptions: names.map((name) => `${name}, one distinct child`),
       environmentDescription: "A broad school stage.",
@@ -397,18 +412,17 @@ describe("promptBuilder", () => {
       narrationText: "Everyone held their place.",
       cameraAngle: "wide fixed camera",
       lighting: "soft daylight",
-    });
-    expect(prompt).toContain("VISIBLE CAST — EXACTLY 7 FIGURES, NO OTHERS");
+    })).toThrow("at most five");
   });
 
-  it("keeps provider boilerplate bounded while retaining all authored visual payload", () => {
+  it("keeps provider boilerplate bounded while omitting legacy appearance payload", () => {
     const identities = ["Mia", "Leo", "Tara", "Bobo"].map(
       (name) => `${name}: ${name[0]!.repeat(394)}`,
     );
     const environment = `Ancient courtyard: ${"e".repeat(240)}`;
     const action = `Mia points once while Leo, Tara, and Bobo hold their places: ${"a".repeat(115)}`;
     const details = `Exact blocking: ${"d".repeat(340)}`;
-    const authoredPayloadLength = identities.join("").length + environment.length + action.length + details.length;
+    const authoredPayloadLength = environment.length + action.length + details.length;
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Mia", "Leo", "Tara", "Bobo"],
       characterDescriptions: identities,
@@ -420,7 +434,8 @@ describe("promptBuilder", () => {
       lighting: "warm daylight",
     });
 
-    for (const value of [...identities, environment, action, details]) expect(prompt).toContain(value);
-    expect(prompt.length - authoredPayloadLength).toBeLessThan(3_300);
+    for (const value of [environment, action, details]) expect(prompt).toContain(value);
+    for (const value of identities) expect(prompt).not.toContain(value);
+    expect(prompt.length - authoredPayloadLength).toBeLessThan(3_600);
   });
 });

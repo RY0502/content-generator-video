@@ -20,7 +20,7 @@ ffmpeg.setFfprobePath(CONFIG.ffprobePath);
 export const NARRATION_METADATA_SCHEMA_VERSION = 1 as const;
 export const NARRATION_METADATA_KIND = "narration-audio" as const;
 const NARRATION_RESPONSE_FORMAT = "wav" as const;
-const AUDIO_DURATION_METADATA_TOLERANCE_SECONDS = 0.05;
+export const AUDIO_DURATION_METADATA_TOLERANCE_SECONDS = 0.05;
 const NARRATION_AUDIO_MUTATION_LEASE_MS = 15 * 60_000;
 
 export interface NarrationAudioGenerator {
@@ -125,8 +125,6 @@ interface SingleSceneTtsReceipt {
   reason?: string;
 }
 
-const MIN_PRODUCTION_NARRATION_SECONDS = 5 * 60;
-
 /** Stable sidecar path used to prove that a WAV belongs to the current narration request. */
 export function narrationAudioMetadataPath(audioPath: string): string {
   const extension = path.extname(audioPath);
@@ -177,6 +175,23 @@ async function validateAudioOutput(
     throw new Error(`Audio output has invalid duration: ${filePath}`);
   }
   return durationSeconds;
+}
+
+/** Avoid spending the outer retry budget on deterministic provider rejections. */
+function isRetryableAudioGenerationError(error: unknown): boolean {
+  const record = error && typeof error === "object"
+    ? error as { status?: unknown; statusCode?: unknown }
+    : null;
+  const explicitStatus = Number(record?.status ?? record?.statusCode);
+  const message = error instanceof Error ? error.message : String(error);
+  const messageStatus = message.match(/Groq TTS API error\s*\((\d{3})\)/iu)?.[1];
+  const status = Number.isInteger(explicitStatus) && explicitStatus >= 100
+    ? explicitStatus
+    : messageStatus
+      ? Number(messageStatus)
+      : null;
+  if (status === null) return true;
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
 function isNarrationAudioMetadata(value: unknown): value is NarrationAudioMetadata {
@@ -448,12 +463,24 @@ export function buildTtsTool(options: TtsToolOptions = {}): DynamicStructuredToo
           try {
             const durationSeconds = await validateAudioOutput(finalPath, probeDurationSeconds);
             if (Math.abs(durationSeconds - metadata.durationSeconds) <= AUDIO_DURATION_METADATA_TOLERANCE_SECONDS) {
-              return resultForAudio({
-                audioPath: finalPath,
-                metadataPath,
-                metadata: { ...metadata, durationSeconds },
-                reused: true,
-              });
+              const durationStatus = inspectNarrationDuration(durationSeconds).pass
+                ? "ready" as const
+                : "duration_exceeded" as const;
+              if (
+                metadata.durationStatus !== "duration_exceeded"
+                || durationStatus !== "ready"
+              ) {
+                return resultForAudio({
+                  audioPath: finalPath,
+                  metadataPath,
+                  // A fresh over-limit probe is authoritative and routes to
+                  // script repair. If an old rejected sidecar probes ready,
+                  // however, fall through to guarded regeneration so every
+                  // downstream reader sees one consistent canonical pair.
+                  metadata: { ...metadata, durationSeconds, durationStatus },
+                  reused: true,
+                });
+              }
             }
           } catch {
             // Invalid/missing media falls through to safe regeneration below.
@@ -500,10 +527,12 @@ export function buildTtsTool(options: TtsToolOptions = {}): DynamicStructuredToo
       const candidateMetadataPath = narrationAudioMetadataPath(candidatePath);
 
       let lastError: unknown;
+      let attemptsMade = 0;
       let generated:
         | { attempt: number; metadata: NarrationAudioMetadata }
         | undefined;
       for (let attempt = 1; attempt <= 3; attempt++) {
+        attemptsMade = attempt;
         try {
           await Promise.all([
             rm(candidatePath, { force: true }),
@@ -555,16 +584,20 @@ export function buildTtsTool(options: TtsToolOptions = {}): DynamicStructuredToo
             rm(candidatePath, { force: true }),
             rm(candidateMetadataPath, { force: true }),
           ]);
-          if (attempt < 3) {
+          if (attempt < 3 && isRetryableAudioGenerationError(error)) {
             const delayMs = retryDelayMs(attempt);
             if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          } else {
+            break;
           }
         }
       }
 
       if (!generated) {
         await abortLease();
-        throw new Error(`Audio generation failed after 3 attempts for scene ${sceneNumber}: ${String(lastError)}`);
+        throw new Error(
+          `Audio generation failed after ${attemptsMade} attempt(s) for scene ${sceneNumber}: ${String(lastError)}`,
+        );
       }
 
       if (!(await renewLease())) {
@@ -847,8 +880,7 @@ export function buildEpisodeTtsTool(
       // Rounding at the five-minute boundary could make refinement accept a
       // value that the durable audio preflight correctly rejects.
       const measuredTotal = measuredTotalNarrationSeconds;
-      const totalDurationBelowMinimum = measuredTotalNarrationSeconds < MIN_PRODUCTION_NARRATION_SECONDS;
-      const repairRequired = durationExceededScenes.length > 0 || totalDurationBelowMinimum;
+      const repairRequired = durationExceededScenes.length > 0;
       progressLogger(
         `[NarrationAudio] Episode ${episodeNumber}: complete; ${scenes.length} scene(s), ` +
         `${measuredTotal.toFixed(3)}s total, ${durationExceededScenes.length} over 12s.`,
@@ -864,12 +896,10 @@ export function buildEpisodeTtsTool(
         measuredNarrationSceneCount: scenes.length,
         measuredTotalNarrationSeconds: measuredTotal,
         durationExceededScenes,
-        totalDurationBelowMinimum,
-        minimumTotalNarrationSeconds: MIN_PRODUCTION_NARRATION_SECONDS,
         generatedSceneCount,
         reusedSceneCount,
         nextAction: repairRequired
-          ? "Call refine_episode_script once with episodeId and this receipt's complete durationExceededScenes, measuredTotalNarrationSeconds, and measuredNarrationSceneCount. Never resend scriptJson."
+          ? "Call refine_episode_script once with episodeId and this receipt's durationExceededScenes. Never resend scriptJson."
           : "Generate or reuse episode captions, mark the audio stage ready, and continue to Agnes submission.",
       });
     },

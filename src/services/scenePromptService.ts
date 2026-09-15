@@ -4,10 +4,9 @@ import {
   type SceneCharacterVisual,
 } from "../promptBuilder.js";
 import type { SeriesState } from "../state/seriesState.js";
-import {
-  buildLockedCharacterIdentity,
-  ensureCharacterBibleEntry,
-} from "./characterSheetService.js";
+import { canonicalizeSceneCast } from "./sceneCastCanonicalizer.js";
+
+export const MAX_AGNES_CHARACTER_REFERENCES = 5;
 
 export interface ScenePromptInput {
   seriesId: number;
@@ -28,14 +27,14 @@ export interface MaterializedScenePrompt {
   prompt: string;
   characterNames: string[];
   characterDescriptions: string[];
-  /** Approved portraits in the same order as characterNames when available. */
+  /** Approved public portraits in the exact same order as characterNames. */
   characterReferenceSources: Array<{ name: string; source: string }>;
 }
 
 /**
- * Materializes the canonical prompt used by Agnes text-to-video. Character
- * bible entries still come from the approved portrait-generation stage, while
- * no scene image is created or required.
+ * Materializes the canonical prompt used by Agnes image-reference video.
+ * Main-character appearance is never serialized into the text prompt: exact
+ * names map 1:1 to durable public portrait URLs supplied to Agnes.
  */
 export async function materializeScenePrompt(params: {
   seriesState: SeriesState;
@@ -43,78 +42,73 @@ export async function materializeScenePrompt(params: {
   customState?: CustomStateStore;
   promptHash?: string;
   requestedBy?: string;
-  /** Legacy-only escape hatch. Production Agnes prompting never creates images. */
+  /** Deprecated compatibility flag. Prompt materialization never creates images. */
   allowCharacterSheetGeneration?: boolean;
 }): Promise<MaterializedScenePrompt> {
-  const { seriesState, input, customState, promptHash } = params;
+  const { seriesState } = params;
   const characterNames: string[] = [];
   const characterDescriptions: string[] = [];
   const characterReferenceSources: Array<{ name: string; source: string }> = [];
-  const roster = await seriesState.getSeriesCharacters(input.seriesId);
-  const canonicalDescriptions = new Map(
-    roster.map((character) => [character.name.trim(), character.description.trim()] as const),
+  const roster = await seriesState.getSeriesCharacters(params.input.seriesId);
+  const castCanonicalization = canonicalizeSceneCast(params.input, {
+    mainCharacterNames: roster.map(({ name }) => name),
+  });
+  const ambiguousAlias = castCanonicalization.audit.unresolved.find(
+    ({ kind }) => kind === "ambiguous_main_character_alias",
   );
-  const canonicalNames = params.allowCharacterSheetGeneration
-    ? null
-    : new Set(canonicalDescriptions.keys());
+  if (ambiguousAlias?.kind === "ambiguous_main_character_alias") {
+    throw new Error(
+      `Scene ${params.input.sceneNumber} contains ambiguous main-character alias ` +
+      `${JSON.stringify(ambiguousAlias.alias)}; use one exact roster name.`,
+    );
+  }
+  const input = castCanonicalization.scene as ScenePromptInput;
+  const canonicalNames = new Set(roster.map((character) => character.name.trim()));
+
+  if (canonicalNames.size < 1 || canonicalNames.size > MAX_AGNES_CHARACTER_REFERENCES) {
+    throw new Error(
+      `Series ${params.input.seriesId} must contain 1-${MAX_AGNES_CHARACTER_REFERENCES} unique main characters for Agnes references.`,
+    );
+  }
 
   for (const rawCharacterName of input.characterNames) {
-    // Preserve the scene tool's historical sanitization so old/refined scripts
-    // produce byte-for-byte equivalent prompts in every media branch.
-    const characterName = rawCharacterName
-      .split("\n")[0]
-      .split("?")[0]
-      .split(",")[0]
-      .trim();
+    const characterName = rawCharacterName.replace(/\s+/gu, " ").trim();
     if (!characterName) continue;
-    if (canonicalNames && !canonicalNames.has(characterName)) {
+    if (!canonicalNames.has(characterName)) {
       throw new Error(
         `Scene ${input.sceneNumber} contains "${characterName}" in characterNames, but that name is not in ` +
         "the fixed series roster. Put guests and secondary creatures in supportingEntities instead.",
       );
     }
 
-    const characterVisual = input.characterVisuals?.find(
-      (item) => item.name.trim() === characterName,
-    );
-    let generationPrompt: string;
-    let portraitSource: string | undefined;
-    if (params.allowCharacterSheetGeneration) {
-      generationPrompt = await ensureCharacterBibleEntry({
-        seriesState,
-        seriesId: input.seriesId,
-        characterName,
-        characterVisual,
-        customState,
-        promptHash,
-        requestedBy: params.requestedBy ?? `scene ${input.sceneNumber}`,
-      });
-      portraitSource = (
-        await seriesState.getCharacterSheet(input.seriesId, characterName)
-      )?.referenceImagePaths?.portrait?.path;
-    } else {
-      const sheet = await seriesState.getCharacterSheet(input.seriesId, characterName);
-      if (!sheet?.approvedAt || !sheet.generationPrompt?.trim()) {
-        throw new Error(
-          `Approved character sheet for "${characterName}" is missing. Call ensure_series_character_sheets ` +
-          "before the first Agnes submission; scene-video prompting never generates images.",
-        );
-      }
-      generationPrompt = sheet.generationPrompt.trim();
-      portraitSource = sheet.referenceImagePaths?.portrait?.path;
+    const sheet = await seriesState.getCharacterSheet(input.seriesId, characterName);
+    const portrait = sheet?.referenceImagePaths?.portrait;
+    const portraitSource = portrait?.publicUrl?.trim();
+    if (!sheet?.approvedAt || !portraitSource) {
+      throw new Error(
+        `Approved public portrait for "${characterName}" is missing. Call ensure_series_character_portraits ` +
+        "before authoring or Agnes submission; scene prompting never generates or analyzes portraits.",
+      );
     }
-    const sourceDescription = canonicalDescriptions.get(characterName)
-      ?? (await seriesState.getCharacterSheet(input.seriesId, characterName))?.description?.trim()
-      ?? characterName;
+    let publicUrl: URL;
+    try {
+      publicUrl = new URL(portraitSource);
+    } catch {
+      throw new Error(`Stored public portrait URL for "${characterName}" is invalid.`);
+    }
+    if (publicUrl.protocol !== "https:" || publicUrl.username || publicUrl.password) {
+      throw new Error(`Stored public portrait URL for "${characterName}" must be credential-free HTTPS.`);
+    }
     characterNames.push(characterName);
-    characterDescriptions.push(buildLockedCharacterIdentity({
-      characterName,
-      characterDescription: sourceDescription,
-      generationPrompt,
-    }));
-    if (portraitSource?.trim()) {
-      characterReferenceSources.push({ name: characterName, source: portraitSource.trim() });
-    }
+    characterDescriptions.push(characterName);
+    characterReferenceSources.push({ name: characterName, source: portraitSource });
+  }
+
+  if (characterNames.length > MAX_AGNES_CHARACTER_REFERENCES) {
+    throw new Error(
+      `Scene ${input.sceneNumber} uses ${characterNames.length} main characters; Agnes supports at most ` +
+      `${MAX_AGNES_CHARACTER_REFERENCES} ordered character references.`,
+    );
   }
 
   return {

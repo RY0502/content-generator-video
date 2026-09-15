@@ -34,16 +34,6 @@ function nonNegativeInteger(name: string, fallback: number): number {
   return value;
 }
 
-function unitInterval(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error(`${name} must be a number from 0 through 1`);
-  }
-  return value;
-}
-
 function optionalInteger(name: string): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;
@@ -62,51 +52,24 @@ function booleanFlag(name: string, fallback: boolean): boolean {
   throw new Error(`${name} must be true or false`);
 }
 
-/**
- * Image-generation models may accept multimodal prompts but do not return the
- * text-only contract required by contact-sheet QA. Keep model qualification
- * and capability normalization at the configuration boundary so request
- * digests and persisted QA metadata always name the same model that is
- * actually called.
- */
-export const DEFAULT_ANYAPI_IMAGE_MODEL = "google/gemini-3.1-flash-image";
-export const DEFAULT_ANYAPI_VIDEO_QA_MODEL = "google/gemini-3.1-pro-preview";
-const INCOMPATIBLE_ANYAPI_VIDEO_QA_MODELS = new Set([
-  "gpt-5-image",
-  "openai/gpt-5-image",
-  "gemini-3.1-flash-image",
-  "google/gemini-3.1-flash-image",
-  "gemini-3.1-flash-image-preview",
-  "google/gemini-3.1-flash-image-preview",
-]);
-const ANYAPI_VIDEO_QA_MODEL_ALIASES = new Map([
-  ["gemini-2.5-pro", "google/gemini-2.5-pro"],
-  ["gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview"],
+/** The sole AnyAPI model setting is for reusable character portrait images. */
+export const DEFAULT_ANYAPI_IMAGE_MODEL = "google/gemini-3.1-flash-image-preview";
+
+const ANYAPI_IMAGE_MODEL_ALIASES = new Map([
+  ["gemini-3.1-flash-image", DEFAULT_ANYAPI_IMAGE_MODEL],
+  ["google/gemini-3.1-flash-image", DEFAULT_ANYAPI_IMAGE_MODEL],
+  ["gemini-3.1-flash-image-preview", DEFAULT_ANYAPI_IMAGE_MODEL],
 ]);
 
-export function isIncompatibleAnyApiVideoQaModel(model: string): boolean {
-  return INCOMPATIBLE_ANYAPI_VIDEO_QA_MODELS.has(model.trim().toLowerCase());
-}
-
-export function resolveAnyApiVideoQaModel(rawValue: string | undefined): string {
-  const configured = rawValue?.trim();
-  if (!configured) return DEFAULT_ANYAPI_VIDEO_QA_MODEL;
-  const qualifiedAlias = ANYAPI_VIDEO_QA_MODEL_ALIASES.get(configured.toLowerCase());
-  if (qualifiedAlias) {
-    console.warn("[AgnesVideoQA] analysis_model_alias_normalized", {
-      configuredModel: configured,
-      effectiveModel: qualifiedAlias,
-      reason: "provider_qualified_anyapi_model_id_required",
-    });
-    return qualifiedAlias;
-  }
-  if (!isIncompatibleAnyApiVideoQaModel(configured)) return configured;
-  console.warn("[AgnesVideoQA] incompatible_analysis_model_fallback", {
+function normalizeAnyApiImageModel(value: string): string {
+  const configured = value.trim();
+  const normalized = ANYAPI_IMAGE_MODEL_ALIASES.get(configured.toLowerCase());
+  if (!normalized || normalized === configured) return configured;
+  console.warn("[AnyAPI] image_model_alias_normalized", {
     configuredModel: configured,
-    effectiveModel: DEFAULT_ANYAPI_VIDEO_QA_MODEL,
-    reason: "model_not_supported_by_the_documented_vision_qa_chat_contract",
+    effectiveModel: normalized,
   });
-  return DEFAULT_ANYAPI_VIDEO_QA_MODEL;
+  return normalized;
 }
 
 export function resolveAnyApiImageModel(
@@ -114,14 +77,14 @@ export function resolveAnyApiImageModel(
   legacyRawValue: string | undefined,
 ): string {
   const configured = rawValue?.trim();
-  if (configured) return configured;
+  if (configured) return normalizeAnyApiImageModel(configured);
   const legacy = legacyRawValue?.trim();
   if (legacy) {
     console.warn("[AnyAPI] deprecated_image_model_env", {
       deprecated: "ANYAPI_MODEL",
       replacement: "ANYAPI_IMAGE_MODEL",
     });
-    return legacy;
+    return normalizeAnyApiImageModel(legacy);
   }
   return DEFAULT_ANYAPI_IMAGE_MODEL;
 }
@@ -163,9 +126,8 @@ export const CONFIG = {
   groqTtsModel: process.env.GROQ_TTS_MODEL ?? "canopylabs/orpheus-v1-english",
   groqTtsVoice: process.env.GROQ_TTS_VOICE ?? "hannah",
 
-  // AnyAPI creates the one-time main-character portraits and performs the
-  // post-download Gemini contact-sheet review. Image generation and QA use
-  // separate model settings so changing the judge cannot alter portrait art.
+  // AnyAPI creates only the reusable main-character portraits. Video QA is a
+  // deterministic local media-integrity audit and has no model/API setting.
   anyApiKeys: [
     process.env.ANYAPI_KEY ?? "",
     process.env.ANYAPI_KEY_2 ?? "",
@@ -181,17 +143,19 @@ export const CONFIG = {
     process.env.ANYAPI_IMAGE_MODEL,
     process.env.ANYAPI_MODEL,
   ),
-  anyApiVideoQaModel: resolveAnyApiVideoQaModel(process.env.ANYAPI_VIDEO_QA_MODEL),
-  videoQaMaxVisionCalls: positiveInteger("VIDEO_QA_MAX_VISION_CALLS", 20),
-  videoQaScenesPerSheet: positiveInteger("VIDEO_QA_SCENES_PER_SHEET", 3),
-  videoQaRequestTimeoutMs: positiveInteger("VIDEO_QA_REQUEST_TIMEOUT_MS", 120_000),
-  // Stay just under AnyAPI's documented free vision boundary rather than
-  // depending on exact window timing at ten starts per minute.
-  videoQaAnyApiRpmPerKey: positiveInteger("VIDEO_QA_ANYAPI_RPM_PER_KEY", 9),
-  videoQaMinConfidence: unitInterval("VIDEO_QA_MIN_CONFIDENCE", 0.8),
-  // The production contract deliberately permits only one provider rerender.
-  // More would make a permanently bad scene loop forever across fresh runs.
-  videoQaMaxRegenerations: Math.min(1, nonNegativeInteger("VIDEO_QA_MAX_REGENERATIONS", 1)),
+  // Public character-reference storage. The bucket must already exist and be
+  // public: Agnes reads the anonymous URL, while this server alone receives
+  // the service-role key used to upload and clean up deterministic objects.
+  supabaseUrl: process.env.SUPABASE_URL?.trim() || undefined,
+  supabaseStorageBucket:
+    process.env.SUPABASE_STORAGE_BUCKET?.trim() || "agnes-character-references",
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || undefined,
+  supabaseCharacterReferencePrefix:
+    process.env.SUPABASE_CHARACTER_REFERENCE_PREFIX?.trim() || "series-characters",
+  supabaseStorageRequestTimeoutMs: positiveInteger(
+    "SUPABASE_STORAGE_REQUEST_TIMEOUT_MS",
+    60_000,
+  ),
   sceneQaAnyApiRegenAttempts: Math.max(0, Number.parseInt(process.env.SCENE_QA_ANYAPI_REGEN_ATTEMPTS ?? "0", 10) || 0),
 
   // Agnes Video 2.5 Flash direct key-art/scene text-to-video. Submission,
@@ -214,15 +178,6 @@ export const CONFIG = {
   // delay; it does not disable durable per-account rate limiting.
   agnesSubmissionIntervalMs: nonNegativeInteger("AGNES_SUBMISSION_INTERVAL_MS", 0),
   agnesSeed: optionalInteger("AGNES_SEED"),
-  // Optional character-portrait publication. When both URLs are configured,
-  // new (not yet accepted) Agnes assets use image-reference mode. Existing
-  // HTTPS portrait paths also work without an uploader. Otherwise production
-  // cleanly retains text-only requests.
-  agnesReferenceUploadBaseUrl: process.env.AGNES_REFERENCE_UPLOAD_BASE_URL?.trim() || undefined,
-  agnesReferencePublicBaseUrl: process.env.AGNES_REFERENCE_PUBLIC_BASE_URL?.trim() || undefined,
-  agnesReferenceUploadBearerToken:
-    process.env.AGNES_REFERENCE_UPLOAD_BEARER_TOKEN?.trim() || undefined,
-
   // Cloudflare Workers AI model used for episode scene frames (fallback provider)
   cloudflareSceneModel: process.env.CLOUDFLARE_SCENE_MODEL ?? "@cf/black-forest-labs/flux-1-schnell",
   cloudflareImg2ImgModel: process.env.CLOUDFLARE_IMG2IMG_MODEL ?? "@cf/runwayml/stable-diffusion-v1-5-img2img",

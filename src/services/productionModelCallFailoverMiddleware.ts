@@ -1,5 +1,6 @@
 import type { ModelRequest } from "langchain";
 import { createMiddleware } from "langchain";
+import { isAIMessage } from "@langchain/core/messages";
 import {
   ProviderManager,
   type ProviderName,
@@ -20,6 +21,8 @@ export const PRODUCTION_MODEL_CALL_TIMEOUT_MS = DEEP_AGENT_PROVIDER_TIMEOUT_MS;
 
 export const PRODUCTION_MODEL_PROVIDER_POOL_EXHAUSTED_CODE =
   "PRODUCTION_MODEL_PROVIDER_POOL_EXHAUSTED";
+export const PRODUCTION_FORCED_TOOL_TRUNCATION_CODE =
+  "PRODUCTION_FORCED_TOOL_CALL_TRUNCATED";
 
 type Model = ModelRequest["model"];
 
@@ -92,9 +95,61 @@ function candidateFailureKind(
   error: unknown,
   classifyError: (error: unknown) => ErrorKind,
 ): CandidateFailureKind {
+  if (error instanceof ProductionForcedToolCallTruncationError) {
+    return "retryable";
+  }
   return isProviderAccessFailure(error)
     ? "access_denied"
     : classifyError(error);
+}
+
+/**
+ * A provider can spend its entire reasoning allowance and return a nominally
+ * successful `finish_reason=length` response before emitting a forced tool
+ * call. No domain tool has executed, so this is a model-candidate failure and
+ * is safe to rotate in-place rather than retrying the same candidate.
+ */
+export class ProductionForcedToolCallTruncationError extends Error {
+  readonly code = PRODUCTION_FORCED_TOOL_TRUNCATION_CODE;
+
+  constructor() {
+    super("A forced production tool call was truncated before emission.");
+    this.name = "ProductionForcedToolCallTruncationError";
+  }
+}
+
+function requiresToolCall(toolChoice: unknown): boolean {
+  return toolChoice === "required"
+    || (
+      isRecord(toolChoice)
+      && toolChoice.type === "function"
+      && isRecord(toolChoice.function)
+      && typeof toolChoice.function.name === "string"
+    );
+}
+
+function forcedToolCallWasTruncated(
+  request: { toolChoice?: unknown },
+  response: any,
+): boolean {
+  if (!requiresToolCall(request.toolChoice) || !isAIMessage(response)) return false;
+  if (Array.isArray(response.tool_calls) && response.tool_calls.length > 0) return false;
+  const metadata = isRecord(response.response_metadata)
+    ? response.response_metadata
+    : null;
+  return metadata?.finish_reason === "length"
+    || metadata?.finishReason === "length";
+}
+
+async function invokeModelCandidate<TRequest extends { toolChoice?: unknown }, TResponse>(
+  handler: (request: TRequest) => Promise<TResponse> | TResponse,
+  request: TRequest,
+): Promise<TResponse> {
+  const response = await handler(request);
+  if (forcedToolCallWasTruncated(request, response)) {
+    throw new ProductionForcedToolCallTruncationError();
+  }
+  return response;
 }
 
 /**
@@ -194,7 +249,7 @@ export function createProductionModelCallFailoverMiddleware(
       };
 
       try {
-        return await handler(firstRequest);
+        return await invokeModelCandidate(handler, firstRequest);
       } catch (error) {
         const kind = candidateFailureKind(error, classifyError);
         if (kind === "fatal") throw error;
@@ -234,7 +289,7 @@ export function createProductionModelCallFailoverMiddleware(
           const fallbackModel = manager.getModel();
           attempts += 1;
           try {
-            const response = await handler({
+            const response = await invokeModelCandidate(handler, {
               ...request,
               model: fallbackModel,
               modelSettings: boundedSettings,

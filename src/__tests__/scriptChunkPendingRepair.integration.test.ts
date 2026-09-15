@@ -320,7 +320,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     expect(accepted[0]!.sceneDetails!.match(/Mother Mammoth/gu)).toHaveLength(1);
   });
 
-  it("rejects an undeclared planned figure in rendered fields but allows narration-only mention", async () => {
+  it("treats planned-figure declarations as advisory in rendered fields and narration", async () => {
     const descriptor =
       "Luma: one tiny amber firefly with two clear wings and a steady gold glow";
 
@@ -338,13 +338,14 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       authoringPlan: authoringPlan([descriptor]),
       scenes: visibleScenes,
     });
-    expect(visibleResult).toMatchObject({ status: "invalid_script_chunk" });
-    expect(visibleResult.validation.structuredIssues).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        code: "cast.unlisted_figure",
-        sceneNumber: 1,
-      }),
-    ]));
+    expect(visibleResult).toMatchObject({
+      status: "script_chunk_staged",
+      persisted: true,
+      authoringProgress: { completedSceneCount: 8, nextSceneNumber: 9 },
+    });
+    expect(await visibleFixture.state.getEpisodeScriptPendingChunk(
+      visibleFixture.episodeId,
+    )).toBeNull();
 
     const narrationFixture = await createFixture();
     const narrationScenes = openingScenes();
@@ -360,7 +361,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     expect(narrationResult).toMatchObject({ status: "script_chunk_staged" });
   });
 
-  it("keeps planned-figure count enforcement active on the final complete chunk", async () => {
+  it("completes the final chunk without subjective planned-figure count rejection", async () => {
     const { state, episodeId } = await createFixture();
     const descriptor =
       "Luma: one tiny amber firefly with two clear wings and a steady gold glow";
@@ -397,10 +398,16 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       scenes: finalScenes,
     });
 
-    expect(result).toMatchObject({ status: "invalid_script_chunk", persisted: true });
-    expect(result.validation.structuredIssues).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "cast.unlisted_figure", sceneNumber: 40 }),
-    ]));
+    expect(result).toMatchObject({
+      status: "script_draft_complete",
+      persisted: true,
+      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      validation: { pass: true, issues: [] },
+    });
+    expect(await state.getEpisodeScriptPendingChunk(episodeId)).toBeNull();
+    expect(draftScenes(await state.getEpisodeScriptDraft(episodeId))).toHaveLength(
+      DEFAULT_PRODUCTION_MIN_SCENES,
+    );
   });
 
   it("uses an accepted legacy supporting descriptor instead of entering permanent plan drift", async () => {
@@ -678,7 +685,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     });
   });
 
-  it("durably routes a legacy invalid prefix through one fresh-run restart", async () => {
+  it("appends to a legacy prefix whose former semantic defect is now advisory", async () => {
     const { state, seriesId, episodeId } = await createFixture();
     const plan = authoringPlan();
     const legacyOpening = openingScenes().map((scene) => ({
@@ -703,46 +710,41 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       { length: EPISODE_SCRIPT_SCENES_PER_CHUNK },
       (_unused, index) => sceneAt(index + 9),
     );
-    const restartRequired = await callChunk(buildEpisodeScriptChunkTool(state), {
+    const appended = await callChunk(buildEpisodeScriptChunkTool(state), {
       operation: "append",
       episodeId,
       expectedDraftRevision: legacyDraft.draft.revision,
       scenes: proposedAppend,
     });
 
-    expect(restartRequired).toMatchObject({
-      status: "script_chunk_restart_required",
+    expect(appended).toMatchObject({
+      status: "script_chunk_appended",
       persisted: true,
-      scenePrefixPreserved: true,
       retryable: true,
       retryThisInvocation: true,
       episodeId,
       draftRevision: 2,
-      restartPlan: {
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
-        authoringPlan: plan,
-        nextSceneNumber: 1,
-        nextSceneEnd: EPISODE_SCRIPT_SCENES_PER_CHUNK,
+      authoringProgress: {
+        completedSceneCount: EPISODE_SCRIPT_SCENES_PER_CHUNK * 2,
+        nextSceneNumber: EPISODE_SCRIPT_SCENES_PER_CHUNK * 2 + 1,
       },
     });
-    expect(restartRequired.validation.issues.join(" "))
-      .toContain("collective or generic cast alias");
-    expect(restartRequired.nextAction).toContain("operation=restart");
-    expect(restartRequired.nextAction).toContain("expectedDraftRevision=2");
 
-    const markedDraft = await state.getEpisodeScriptDraft(episodeId);
-    expect(markedDraft).toMatchObject({
+    const durableDraft = await state.getEpisodeScriptDraft(episodeId);
+    expect(durableDraft).toMatchObject({
       revision: 2,
       validation: {
-        pass: false,
+        pass: true,
       },
     });
-    expect(draftScenes(markedDraft)).toEqual(legacyOpening);
-    expect(markedDraft?.validation?.issues.join(" "))
-      .toContain("Accepted chunk prefix requires deterministic restart");
+    expect(draftScenes(durableDraft)).toEqual([
+      ...legacyOpening,
+      ...proposedAppend,
+    ]);
+    expect(await state.getEpisodeScriptPendingChunk(episodeId)).toBeNull();
 
-    // A new process has only durable state. Its compact resume contract must
-    // request the replacement opening, never another append to the bad prefix.
+    // A new process resumes from the durable contiguous prefix and requests
+    // only the next exact range; it does not restart for subjective prose.
     const freshGetNextEpisode = buildSeriesStateTools(state, {
       youtubeUploadEnabled: false,
     }).find((tool) => tool.name === "get_next_episode");
@@ -754,47 +756,22 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       scriptDraft: {
         revision: 2,
         validation: {
-          pass: false,
-          requiredAction: "restart_script_authoring",
+          pass: true,
         },
         authoringProgress: {
-          requiredAction: "restart_script_authoring",
-          nextSceneNumber: 1,
-          nextSceneEnd: EPISODE_SCRIPT_SCENES_PER_CHUNK,
+          status: "in_progress",
+          completedSceneCount: EPISODE_SCRIPT_SCENES_PER_CHUNK * 2,
+          nextSceneNumber: EPISODE_SCRIPT_SCENES_PER_CHUNK * 2 + 1,
+          nextSceneEnd: EPISODE_SCRIPT_SCENES_PER_CHUNK * 3,
         },
       },
       scriptValidation: {
         status: "authoring_in_progress",
       },
     });
-    expect(resumed.scriptValidation.nextAction).toContain("operation=restart");
-    expect(resumed.scriptValidation.nextAction).toContain("expectedDraftRevision=2");
-    expect(resumed.scriptValidation.nextAction).not.toContain("operation=append");
-
-    const replacementOpening = openingScenes();
-    const restarted = await callChunk(buildEpisodeScriptChunkTool(state), {
-      operation: "restart",
-      episodeId,
-      expectedDraftRevision: markedDraft?.revision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
-      authoringPlan: plan,
-      scenes: replacementOpening,
-    });
-    expect(restarted).toMatchObject({
-      status: "script_chunk_appended",
-      persisted: true,
-      retryThisInvocation: true,
-      draftRevision: 3,
-      authoringProgress: {
-        completedSceneCount: EPISODE_SCRIPT_SCENES_PER_CHUNK,
-        nextSceneNumber: EPISODE_SCRIPT_SCENES_PER_CHUNK + 1,
-      },
-    });
-    const restartedDraft = await state.getEpisodeScriptDraft(episodeId);
-    expect(restartedDraft?.revision).toBe(3);
-    expect(draftScenes(restartedDraft)).toEqual(replacementOpening);
-    expect(restartedDraft?.validation?.issues.join(" ") ?? "")
-      .not.toContain("Accepted chunk prefix requires deterministic restart");
+    expect(resumed.scriptValidation.nextAction).toContain("Append only scenes 17-24");
+    expect(resumed.scriptValidation.nextAction).toContain("draft revision 2");
+    expect(resumed.scriptValidation.nextAction).not.toContain("Restart authoring");
   });
 
   it("turns an invalid restart into one durable empty prefix that get_next_episode resumes", async () => {

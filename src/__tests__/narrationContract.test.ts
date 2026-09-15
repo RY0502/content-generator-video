@@ -7,6 +7,7 @@ import {
   inspectEpisodeNarrationManifest,
   inspectNarrationDuration,
   inspectNarrationText,
+  isSyntheticNarrationPlaceholder,
   minimumNarrationWords,
   stripNarrationVocalDirections,
 } from "../services/narrationContract.js";
@@ -35,6 +36,29 @@ describe("narrationContract", () => {
     expect(overWords.issues.map((issue) => issue.code)).toContain("too_many_spoken_words");
   });
 
+  it("rejects punctuation and vocal-direction-only input while allowing a real short beat", () => {
+    for (const text of ["...", "[pause]"]) {
+      expect(inspectNarrationText(text, { production: true })).toMatchObject({
+        pass: false,
+        spokenWordCount: 0,
+        issues: [expect.objectContaining({ code: "no_spoken_content" })],
+      });
+    }
+
+    expect(inspectNarrationText("Mia.", { production: true })).toMatchObject({
+      pass: true,
+      spokenWordCount: 1,
+    });
+  });
+
+  it("narrowly rejects an anchored synthetic scene narration label", () => {
+    expect(isSyntheticNarrationPlaceholder("scene 49 narration")).toBe(true);
+    expect(isSyntheticNarrationPlaceholder("[pause] Scene 49 narration.")).toBe(true);
+    expect(isSyntheticNarrationPlaceholder("Mia narrates scene 49 beside the lantern.")).toBe(false);
+    expect(inspectNarrationText("scene 49 narration", { production: true }).issues)
+      .toContainEqual(expect.objectContaining({ code: "synthetic_placeholder" }));
+  });
+
   it("uses measured duration as the authoritative 12-second postcondition", () => {
     expect(inspectNarrationDuration(NARRATION_MAX_AUDIO_SECONDS).pass).toBe(true);
     expect(inspectNarrationDuration(NARRATION_MAX_AUDIO_SECONDS + 0.001)).toMatchObject({
@@ -44,13 +68,12 @@ describe("narrationContract", () => {
     expect(inspectNarrationDuration(Number.NaN).pass).toBe(false);
   });
 
-  it("derives the five-minute word floor at the contract narration pace", () => {
+  it("retains the legacy runtime word estimator without using it as a manifest floor", () => {
     expect(minimumNarrationWords(5)).toBe(750);
   });
 
-  it("rejects an old long-scene manifest and accepts 40 sequential bounded scenes", () => {
-    const bounded =
-      "Pip the Ant gently carries one berry across the sunny meadow toward all his patient friends beside their cozy clubhouse.";
+  it("accepts 40 very short sequential scenes and rejects a scene over 20 words", () => {
+    const bounded = "Pip waves.";
     const valid = inspectEpisodeNarrationManifest({
       scenes: Array.from({ length: 40 }, (_unused, index) => ({
         sceneNumber: index + 1,
@@ -65,9 +88,9 @@ describe("narrationContract", () => {
     });
 
     expect(valid).toMatchObject({ pass: true, sceneCount: 40 });
-    expect(valid.totalSpokenWords).toBeGreaterThanOrEqual(750);
+    expect(valid.totalSpokenWords).toBe(80);
     expect(invalid.pass).toBe(false);
     expect(invalid.issues.join(" ")).toContain("production minimum");
-    expect(invalid.issues.join(" ")).toContain("20");
+    expect(invalid.issues.join(" ")).toContain("at most 20");
   });
 });
