@@ -383,10 +383,17 @@ async function buildQaAssets(params: {
     const reference = parseReferenceUrls(row.publicReferenceUrl);
     const promptMap = parseAgnesPromptReferenceMap(row.prompt, rosterNames);
     const scriptScene = sceneByNumber.get(sceneNumber);
-    const expectedMainCast = scriptScene?.characterNames ?? promptMap.names;
+    // A series title card is the canonical ensemble asset, so its request must
+    // name and reference the complete fixed roster. Episode title cards retain
+    // their intentionally narrower cast as declared by the persisted request.
+    const expectedMainCast = scriptScene
+      ? scriptScene.characterNames
+      : sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE
+        ? rosterNames
+        : promptMap.names;
     const expectedLedgerCast = scriptScene
       ? [...scriptScene.characterNames, ...scriptScene.supportingEntities.map(supportingEntityName)]
-      : promptMap.names;
+      : expectedMainCast;
     const asset: QaAsset = {
       sceneNumber,
       label,
@@ -711,7 +718,8 @@ export function buildAgnesVideoQaTool(
     description:
       "Runs a deterministic, resumable media-integrity audit after both title clips and every scene are downloaded. " +
       "It makes no AI/API calls and never auto-rerenders. It validates exact source bindings, public character references, " +
-      "ordered Picture/cast mappings, silent H.264 media and durations, and byte-identical duplicate clips before assembly.",
+      "the complete canonical roster in series key art, ordered Picture/cast mappings, silent H.264 media and durations, " +
+      "and byte-identical duplicate clips before assembly.",
     schema: z.object({
       seriesId: z.number().int().positive(),
       episodeNumber: z.number().int().positive(),

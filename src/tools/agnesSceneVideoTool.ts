@@ -1636,13 +1636,13 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
       {
         kind: "series",
         audio: seriesAudio,
-        characterNames: [protagonist.name],
+        characterNames: lockedCharacters.map(({ name }) => name),
         canonicalPrompt: buildSeriesKeyArtVideoPrompt({
           conceptName: seriesTitle,
           conceptSummary: seriesInfo.episodeFormula.trim()
             || `A warm preschool adventure series starring ${lockedCharacters.map(({ name }) => name).join(", ")}.`,
           environmentDescription: script.scenes[0]?.environmentDescription,
-          characterNames: [protagonist.name],
+          characterNames: lockedCharacters.map(({ name }) => name),
         }),
       },
       {
@@ -3051,7 +3051,7 @@ function submitTool(runtime: WorkflowRuntime): DynamicStructuredTool {
   return new DynamicStructuredTool({
     name: "submit_agnes_scene_videos",
     description:
-      "Before the first durable provider claim, verifies that the complete stored 1-5 character roster has public Supabase portraits; after claims begin, preserves frozen references and fails closed if one is missing. Then submits both key-art title-card videos plus one image-reference Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
+      "Before the first durable provider claim, verifies that the complete stored 1-5 character roster has public Supabase portraits; after claims begin, preserves frozen references and fails closed if one is missing. The series key-art title card uses every canonical roster portrait, while episode key art uses one story-relevant protagonist. Then submits both key-art videos plus one image-reference Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
       "Only definite account rate/quota/credit limits fail over; all intents/receipts are durable, and queue-full or ambiguous failures stay pending until another invocation. " +
       "An invalid persisted script returns repair_required before any provider call, or repair_blocked when durable submission evidence already exists. " +
       "Typed local narration drift returns audio_repair_required before any provider call.",

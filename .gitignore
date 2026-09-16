@@ -2,8 +2,7 @@ node_modules/
 dist/
 .env
 output/
-assets/characters/
-assets/environments/
+assets/
 .DS_Store
 get-youtube-token.js
 prompt.txt

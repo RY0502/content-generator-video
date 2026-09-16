@@ -18,6 +18,7 @@ afterEach(() => {
 });
 
 const portraitUrl = "https://project.supabase.co/storage/v1/object/public/characters/series_7/characters/mia.png";
+const boboPortraitUrl = "https://project.supabase.co/storage/v1/object/public/characters/series_7/characters/bobo.png";
 
 function keyPrompt(label: string): string {
   return `${label}. EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [Mia] × 1. ` +
@@ -29,6 +30,14 @@ function scenePrompt(): string {
   return "SETTING — A painted attic. VISIBLE CAST — EXACTLY 1 FIGURE, NO OTHERS: [Mia] × 1. " +
     "Each listed identity appears once; every unlisted figure appears zero times. " +
     "REFERENCE IMAGE IDENTITY MAP — <Picture 1> is mia.png, the approved portrait of Mia. " +
+    "Treat each portrait as the authoritative identity and art-style reference.";
+}
+
+function completeSeriesKeyPrompt(): string {
+  return "Series key. EXACT ON-SCREEN CAST LEDGER — 2 TOTAL CHARACTER FIGURES, AND NO OTHERS: " +
+    "[Mia] × 1; [Bobo] × 1. " +
+    "REFERENCE IMAGE IDENTITY MAP — <Picture 1> is mia.png, the approved portrait of Mia; " +
+    "<Picture 2> is bobo.png, the approved portrait of Bobo. " +
     "Treat each portrait as the authoritative identity and art-style reference.";
 }
 
@@ -257,6 +266,72 @@ describe("qa_agnes_episode_videos static audit", () => {
       expect.objectContaining({ code: "reference_identity_map_matches_visible_main_cast" }),
       expect.objectContaining({ code: "reference_urls_match_approved_portraits" }),
     ]));
+  });
+
+  it("rejects incomplete series key art against the full roster while preserving singleton episode key art", async () => {
+    const { state, probeMedia } = await fixture();
+    state.getSeriesInfo.mockResolvedValue({
+      conceptName: "Pocket Stars",
+      charactersJson: [
+        { name: "Mia", description: "A young explorer." },
+        { name: "Bobo", description: "A friendly living backpack." },
+      ],
+    });
+    state.getCharacterSheet.mockImplementation(async (_seriesId: number, name: string) => ({
+      approvedAt: "2026-09-01T00:00:00.000Z",
+      referenceImagePaths: {
+        portrait: {
+          path: `/tmp/${name.toLowerCase()}.png`,
+          publicUrl: name === "Mia" ? portraitUrl : boboPortraitUrl,
+        },
+      },
+    }));
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "failed", failed: 1 });
+    expect(result.failures).toEqual([expect.objectContaining({
+      sceneNumber: -2,
+      label: "series key art",
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "reference_count_matches_visible_main_cast" }),
+        expect.objectContaining({ code: "reference_identity_map_matches_visible_main_cast" }),
+        expect.objectContaining({ code: "exact_cast_ledger_matches_script" }),
+      ]),
+    })]);
+  });
+
+  it("accepts complete-roster series key art alongside singleton episode key art", async () => {
+    const { state, rows, probeMedia } = await fixture();
+    state.getSeriesInfo.mockResolvedValue({
+      conceptName: "Pocket Stars",
+      charactersJson: [
+        { name: "Mia", description: "A young explorer." },
+        { name: "Bobo", description: "A friendly living backpack." },
+      ],
+    });
+    state.getCharacterSheet.mockImplementation(async (_seriesId: number, name: string) => ({
+      approvedAt: "2026-09-01T00:00:00.000Z",
+      referenceImagePaths: {
+        portrait: {
+          path: `/tmp/${name.toLowerCase()}.png`,
+          publicUrl: name === "Mia" ? portraitUrl : boboPortraitUrl,
+        },
+      },
+    }));
+    const priorSeriesKeyArt = rows.get(-2)!;
+    rows.set(-2, row({
+      sceneNumber: -2,
+      videoPath: priorSeriesKeyArt.normalizedOutputPath!,
+      prompt: completeSeriesKeyPrompt(),
+      publicReferenceUrl: JSON.stringify([portraitUrl, boboPortraitUrl]),
+    }));
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "passed", passed: 3, failed: 0 });
   });
 
   it("rejects a visible cast member without an approved public portrait URL", async () => {

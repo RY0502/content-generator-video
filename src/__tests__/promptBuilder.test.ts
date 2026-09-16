@@ -322,8 +322,11 @@ describe("promptBuilder", () => {
       expect(prompt).toContain("No extra limbs");
       expect(prompt).toContain("No double heads");
     }
-    expect(seriesPrompt).toContain("EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS");
+    expect(seriesPrompt).toContain("EXACT ON-SCREEN CAST LEDGER — 2 TOTAL CHARACTER FIGURES, AND NO OTHERS");
     expect(seriesPrompt).toContain("[Pip] × 1");
+    expect(seriesPrompt).toContain("[Bobo] × 1");
+    expect(seriesPrompt).toContain("show all 2 named characters together");
+    expect(seriesPrompt).toContain("keeps the complete group in frame");
     expect(seriesPrompt).toContain("A sunny meadow beside a tiny wooden clubhouse");
     expect(seriesPrompt).not.toContain("Small friends solve gentle meadow problems together");
     expect(seriesPrompt).not.toContain("small cobalt-blue living backpack with an amber zipper");
@@ -331,6 +334,14 @@ describe("promptBuilder", () => {
     expect(episodePrompt).not.toContain("Pip carries a berry over a little stream");
     expect(episodePrompt).not.toContain("OPTIONAL NAMED CAST");
     expect(episodePrompt).not.toContain("Berry: one glossy raspberry-red berry with a green leaf");
+  });
+
+  it("refuses to silently omit a series character beyond Agnes's five-reference limit", () => {
+    expect(() => buildSeriesKeyArtVideoPrompt({
+      conceptName: "Too Many Heroes",
+      conceptSummary: "Six friends share an adventure.",
+      characterNames: ["A", "B", "C", "D", "E", "F"],
+    })).toThrow("Agnes accepts at most 5 reference portraits (received 6)");
   });
 
   it("enforces locked wardrobe and suppresses unrequested hats, dresses, and clothing in negative bible", () => {

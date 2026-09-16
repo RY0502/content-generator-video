@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
  */
 export const AGNES_STATIC_VIDEO_QA_PIPELINE = "deterministic_static_media_integrity";
 export const AGNES_STATIC_VIDEO_QA_PIPELINE_VERSION = 1;
-export const AGNES_STATIC_VIDEO_QA_POLICY_VERSION = 1;
+export const AGNES_STATIC_VIDEO_QA_POLICY_VERSION = 2;
 export const AGNES_STATIC_VIDEO_QA_MODEL = "static-code-audit-v1";
 
 export const AGNES_STATIC_VIDEO_QA_RULES = [
@@ -19,6 +19,7 @@ export const AGNES_STATIC_VIDEO_QA_RULES = [
   "at_most_five_unique_public_https_character_references",
   "ordered_picture_mapping_matches_visible_main_cast",
   "visible_cast_ledger_matches_declared_main_and_supporting_figures",
+  "series_key_art_references_identity_map_and_cast_ledger_match_complete_canonical_roster",
   "character_reference_url_matches_approved_public_portrait_when_available",
   "no_byte_identical_episode_assets",
 ] as const;

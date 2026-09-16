@@ -720,16 +720,24 @@ const TITLE_CARD_NEGATIVE_BIBLE =
   "changes, malformed anatomy, unlisted wardrobe, or unlisted accessories. " +
   CHARACTER_INTEGRITY_NEGATIVE_BIBLE;
 
-function lockedSeriesCharacterName(params: {
+function lockedSeriesCharacterNames(params: {
   characters?: CharacterDef[];
   characterDescriptions?: string[];
   characterNames?: string[];
-}): string {
-  if (params.characters && params.characters.length > 0) {
-    return params.characters[0]!.name.replace(/\s+/g, " ").trim();
+}): string[] {
+  const source = params.characters && params.characters.length > 0
+    ? params.characters.map(({ name }) => name)
+    : params.characterNames ?? [];
+  const names = source
+    .map((name) => name.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const uniqueNames = [...new Set(names)];
+  if (uniqueNames.length > 5) {
+    throw new Error(
+      `Series key art requires every canonical character, but Agnes accepts at most 5 reference portraits (received ${uniqueNames.length}).`,
+    );
   }
-  const name = params.characterNames?.[0]?.replace(/\s+/g, " ").trim();
-  return name || "Main character";
+  return uniqueNames;
 }
 
 /**
@@ -749,18 +757,23 @@ export function buildSeriesKeyArtVideoPrompt(params: {
   const title = params.conceptName.replace(/\s+/g, " ").trim();
   const environment = params.environmentDescription?.replace(/\s+/g, " ").trim()
     || "A warm, uncluttered storybook setting with cheerful colors and generous open space";
-  const characterName = lockedSeriesCharacterName(params);
+  const characterNames = lockedSeriesCharacterNames(params);
+  const requiredCharacters = characterNames.length > 0
+    ? characterNames
+    : ["Main character"];
+  const castCount = requiredCharacters.length;
+  const castLedger = requiredCharacters.map((name) => `[${name}] × 1`).join("; ");
   return [
     `SUBJECT AND SETTING — A full-bleed animated children's series title card in this figure-free location: ${environment}.`,
     `Render the exact title ${JSON.stringify(title)} once in large, playful, clearly readable lettering at the upper center.`,
-    `EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [${characterName}] × 1.`,
-    `REQUIRED FOREGROUND PROTAGONIST — show that one ${characterName}, fully visible and prominent. Its supplied portrait is the sole appearance authority.`,
+    `EXACT ON-SCREEN CAST LEDGER — ${castCount} TOTAL CHARACTER FIGURES, AND NO OTHERS: ${castLedger}.`,
+    `REQUIRED COMPLETE SERIES CAST — show all ${castCount} named characters together, simultaneously visible from the first frame through the last, each exactly once, uncropped, clearly separated, and equally recognizable. Every supplied portrait is the sole appearance authority for its matching named character.`,
     "The title words are typography only and never authorize another person, creature, living object, or depiction.",
-    "ACTION AND CHANGE — ONE CONTINUOUS BEAT: gentle breathing, one blink, and one small friendly gesture by the protagonist; subtle environmental motion only. Keep title and layout unchanged; no entrance, exit, plot beat, replay, cut, montage, or time jump.",
-    "CAMERA — medium-wide eye-level 16:9 shot; protagonist centered in the lower half; environment readable; open title space above; one slow straight push-in; no other camera move.",
+    `ACTION AND CHANGE — ONE CONTINUOUS BEAT: the same ${castCount}-character group holds one friendly ensemble pose with gentle breathing, natural blinking, and at most one small readable gesture per character; subtle environmental motion only. Keep every character, title, and layout continuously visible and unchanged; no entrance, exit, plot beat, replay, cut, montage, or time jump.`,
+    `CAMERA — wide eye-level 16:9 ensemble shot; all ${castCount} characters arranged in one balanced row or shallow arc across the lower half without overlap or cropping; environment readable; open title space above; one slow straight push-in that keeps the complete group in frame; no other camera move.`,
     `VISUAL STYLE — ${STYLE_BIBLE} LIGHTING PROFILE (DAYLIGHT) — ${LIGHTING_PROFILES.daylight}. ${RENDERING_BIBLE}`,
     "SOUND AND RHYTHM — silent visual-only title card; calm motion; no speech, music, or sound effects.",
-    `CONSISTENCY REQUIREMENTS — Preserve the exact title spelling, placement, letter shapes, and readability; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep the one protagonist on one continuous trajectory; never duplicate it in another depth plane. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
+    `CONSISTENCY REQUIREMENTS — Preserve the exact title spelling, placement, letter shapes, and readability; add no other text. ${CHARACTER_APPEARANCE_BIBLE} Keep exactly the same ${castCount} ledger characters on continuous trajectories; never omit, substitute, merge, overlap, or duplicate any identity in another depth plane. ${TEMPORAL_STABILITY_NEGATIVE_BIBLE} ${TITLE_CARD_NEGATIVE_BIBLE}`,
   ].join(" ");
 }
 

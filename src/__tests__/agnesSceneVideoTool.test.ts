@@ -808,6 +808,26 @@ describe("three-phase Agnes scene workflow", () => {
     ]);
     expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain("Tiny Heroes Club");
     expect(rows.get(AGNES_EPISODE_KEY_ART_TRACKING_SCENE)?.prompt).toContain("Pip's Berry Bridge");
+    expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain(
+      "EXACT ON-SCREEN CAST LEDGER — 2 TOTAL CHARACTER FIGURES, AND NO OTHERS",
+    );
+    expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain("[Pip the Ant] × 1");
+    expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain("[Bobo the Backpack] × 1");
+    expect(rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.prompt).toContain(
+      "show all 2 named characters together",
+    );
+    expect(parseAgnesReferenceImageUrls(
+      rows.get(AGNES_SERIES_KEY_ART_TRACKING_SCENE)?.publicReferenceUrl,
+    )).toEqual([
+      "https://cdn.example.test/pip_the_ant.png",
+      "https://cdn.example.test/bobo_the_backpack.png",
+    ]);
+    expect(parseAgnesReferenceImageUrls(
+      rows.get(AGNES_EPISODE_KEY_ART_TRACKING_SCENE)?.publicReferenceUrl,
+    )).toEqual(["https://cdn.example.test/pip_the_ant.png"]);
+    expect(rows.get(AGNES_EPISODE_KEY_ART_TRACKING_SCENE)?.prompt).toContain(
+      "EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS",
+    );
     for (const sceneNumber of [
       AGNES_SERIES_KEY_ART_TRACKING_SCENE,
       AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
