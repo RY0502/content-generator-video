@@ -57,7 +57,7 @@ function scriptScenes(script: Record<string, unknown>): Array<Record<string, unk
 function buildMetadataGenerationSystemPrompt(): string {
   return (
     "You are a YouTube SEO and metadata expert specializing in kids educational content. " +
-    "Your task is to generate engaging, SEO-optimized metadata for children's story videos (age 2-5). " +
+    "Your task is to generate engaging, SEO-optimized metadata for children's story videos (age 4-8). " +
     "Follow these guidelines:\n\n" +
     "TITLE:\n" +
     "- Keep it under 60 characters for optimal display\n" +
@@ -80,7 +80,7 @@ function buildMetadataGenerationSystemPrompt(): string {
     "KEYWORDS:\n" +
     "- Generate 5-10 keyword phrases for SEO\n" +
     "- Focus on what parents/educators would search for\n" +
-    "- Examples: 'educational stories for toddlers', 'kids teamwork videos', 'preschool learning'\n\n" +
+    "- Examples: 'educational stories for kids 4-8', 'kids teamwork videos', 'kids adventure stories'\n\n" +
     "Reply ONLY with valid JSON in this exact format:\n" +
     "{\n" +
     '  "title": "...",\n' +
@@ -132,7 +132,7 @@ export function buildYoutubeEpisodeMetadataTool(seriesState: SeriesState): Dynam
     description:
       "Generates YouTube metadata (title, description, tags, keywords) for a specific episode by analyzing " +
       "its script content, characters, and themes. Creates SEO-optimized, engaging metadata suitable for " +
-      "kids educational content (age 2-5). Saves metadata to a JSON file for later use with YouTube API.",
+      "kids educational content (age 4-8). Saves metadata to a JSON file for later use with YouTube API.",
     schema: z.object({
       seriesId: z.number().describe("The series ID"),
       episodeNumber: z.number().describe("The episode number to generate metadata for"),
@@ -285,7 +285,7 @@ export function buildYoutubeSeriesMetadataTool(seriesState: SeriesState): Dynami
         `Number of Episodes: ${episodeCount}\n` +
         `Main Characters: ${characters.length > 0 ? characters.join(", ") : "Various"}\n\n` +
         `Episode Titles:\n${episodeTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}\n\n` +
-        `Generate engaging playlist metadata. Target age: 2-5 years. Include "kids stories" and "educational" tags.`;
+        `Generate engaging playlist metadata. Target age: 4-8 years. Include "kids stories" and "educational" tags.`;
 
       // Generate metadata using LLM
       const rawResponse = await chatText({

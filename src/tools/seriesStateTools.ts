@@ -628,7 +628,7 @@ export function buildSeriesStateTools(
                     `or call refinement yet.`
                   : `Your next assistant action must be write_episode_script_chunk with no visible planning or preamble. Append only scenes ` +
                     `${scriptAuthoringProgress.nextSceneNumber}-${scriptAuthoringProgress.nextSceneEnd} ` +
-                    `to draft revision ${privateDraft!.revision}. Do not call refinement yet.`,
+                    `to draft revision ${privateDraft!.revision}. Continue the SAME single quest from scene 1 without resolving early or starting a second adventure. Do not call refinement yet.`,
               }
           : scriptValidation,
         scriptDraft,

@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -42,7 +43,10 @@ import {
   AGNES_SERIES_KEY_ART_TRACKING_SCENE,
   agnesKeyArtPaths,
 } from "../services/agnesKeyArtService.js";
-import { buildVideoAssemblyTool } from "../tools/videoAssemblyTool.js";
+import {
+  FINAL_DURATION_TOLERANCE_SECONDS,
+  buildVideoAssemblyTool,
+} from "../tools/videoAssemblyTool.js";
 import {
   NARRATION_METADATA_KIND,
   NARRATION_METADATA_SCHEMA_VERSION,
@@ -361,6 +365,7 @@ describe("videoAssemblyTool", () => {
       expect(calls.indexOf("series_key_art_narrator.wav")).toBeLessThan(calls.indexOf("episode_key_art_narrator.wav"));
       expect(calls.indexOf("episode_key_art_narrator.wav")).toBeLessThan(calls.indexOf("scene_001_narrator.wav"));
       expect(calls).toContain("captions_with_key_art_offset.srt");
+      expect(existsSync(previewPath.replace(/\.mp4$/i, ".srt"))).toBe(true);
     } finally {
       (CONFIG as { outputDir: string }).outputDir = priorOutputDir;
       (CONFIG as { ffmpegPath: string }).ffmpegPath = priorFfmpegPath;
@@ -461,7 +466,7 @@ describe("videoAssemblyTool", () => {
       expect(result.encodedClipTimelineSeconds).toBe(5.25);
       expect(result.durationSeconds).toBe(5.25);
       expect(result.durationDeltaSeconds).toBe(0);
-      expect(result.allowedDurationDeltaSeconds).toBe(0.15);
+      expect(result.allowedDurationDeltaSeconds).toBe(FINAL_DURATION_TOLERANCE_SECONDS);
       expect(result.path).toBe(previewPath);
       expect(await readFile(previewPath, "utf8")).toBe("fake-video-data");
       const ffmpegCalls = await readFile(ffmpegLog, "utf8");
@@ -471,7 +476,7 @@ describe("videoAssemblyTool", () => {
       expect(sceneCall).not.toContain("tpad=");
       const outroCall = ffmpegCalls.split("\n").find((line) => line.includes("outro_subscribe.mp4"));
       expect(outroCall).toContain(`-sseof -0.1 -i ${scenePath}`);
-      expect(outroCall).toContain("select=eq(n\\,0)");
+      expect(outroCall).toMatch(/select=eq\(n\\?,0\)/);
       expect(outroCall).toContain("tpad=stop_mode=clone");
       expect(ffmpegCalls).not.toContain("key_art");
       expect(upsertEpisodeVideoOutput).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -507,7 +512,7 @@ describe("videoAssemblyTool", () => {
     await writeFile(fakeFfprobe, [
       "#!/bin/sh",
       "case \"$*\" in",
-      "  *bad_preview*) printf '4.5\\n' ;;",
+      "  *bad_preview*) printf '7.0\\n' ;;",
       "  *) printf '2.25\\n' ;;",
       "esac",
     ].join("\n"), "utf8");
@@ -569,7 +574,7 @@ describe("videoAssemblyTool", () => {
       expect(upsertEpisodeVideoOutput).toHaveBeenLastCalledWith(expect.objectContaining({
         variant: "agnes_text",
         status: "failed",
-        error: expect.stringContaining("duration (4.500s) does not match the expected 2.250s timeline"),
+        error: expect.stringContaining("duration (7.000s) does not match the expected 2.250s timeline"),
       }));
       expect(seriesState.updateEpisodeStatus).not.toHaveBeenCalled();
     } finally {

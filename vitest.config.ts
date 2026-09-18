@@ -4,5 +4,15 @@ export default defineConfig({
   test: {
     include: ["src/__tests__/**/*.test.ts"],
     exclude: ["dist/**", "node_modules/**"],
+    server: {
+      deps: {
+        inline: [/p-retry/],
+      },
+    },
+  },
+  server: {
+    deps: {
+      inline: [/p-retry/],
+    },
   },
 });

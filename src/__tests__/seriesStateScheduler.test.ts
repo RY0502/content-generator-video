@@ -24,10 +24,21 @@ async function fileState(databasePath: string): Promise<SeriesState> {
 }
 
 afterEach(async () => {
-  await Promise.all(openStates.splice(0).map((state) => state.close()));
-  await Promise.all(temporaryDirectories.splice(0).map((directory) => (
-    rm(directory, { recursive: true, force: true })
-  )));
+  for (const state of openStates.splice(0)) {
+    try {
+      await state.close();
+    } catch {
+      // ignore
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const directory of temporaryDirectories.splice(0)) {
+    try {
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // Windows file locks on sqlite temp files can linger; temp dir will be cleared by OS
+    }
+  }
 });
 
 describe("SeriesState Agnes scheduler persistence", () => {

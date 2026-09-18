@@ -8,7 +8,7 @@ import {
   type EpisodeScriptChunkAuthoringPlan,
 } from "../tools/scriptRefinementTool.js";
 import { buildSeriesStateTools } from "../tools/seriesStateTools.js";
-import { DEFAULT_PRODUCTION_MIN_SCENES } from "../services/narrationContract.js";
+import { DEFAULT_PRODUCTION_MAX_SCENES } from "../services/narrationContract.js";
 import { SeriesState } from "../state/seriesState.js";
 
 type EpisodeScene = EpisodeScript["scenes"][number];
@@ -82,7 +82,7 @@ function authoringPlan(
       },
       {
         startScene: 31,
-        endScene: DEFAULT_PRODUCTION_MIN_SCENES,
+        endScene: DEFAULT_PRODUCTION_MAX_SCENES,
         storyBeat: "Mia restores the lantern and checks every marker on the safely lit route.",
         setting: "The restored lantern stand and completed meadow route.",
         continuityOutcome: "The lantern is secure and every numbered marker is visible again.",
@@ -172,7 +172,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const rejected = await callChunk(tool, {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: invalidScenes,
     });
@@ -233,7 +233,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const rejected = await callChunk(tool, {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: invalidScenes,
     });
@@ -299,7 +299,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const result = await callChunk(buildEpisodeScriptChunkTool(state), {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan([descriptor]),
       scenes,
     });
@@ -334,7 +334,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const visibleResult = await callChunk(buildEpisodeScriptChunkTool(visibleFixture.state), {
       operation: "start",
       episodeId: visibleFixture.episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan([descriptor]),
       scenes: visibleScenes,
     });
@@ -354,7 +354,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const narrationResult = await callChunk(buildEpisodeScriptChunkTool(narrationFixture.state), {
       operation: "start",
       episodeId: narrationFixture.episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan([descriptor]),
       scenes: narrationScenes,
     });
@@ -378,7 +378,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       scenes: acceptedPrefix,
       authoring: {
         protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
         plan,
       },
     });
@@ -401,12 +401,12 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     expect(result).toMatchObject({
       status: "script_draft_complete",
       persisted: true,
-      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      sceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       validation: { pass: true, issues: [] },
     });
     expect(await state.getEpisodeScriptPendingChunk(episodeId)).toBeNull();
     expect(draftScenes(await state.getEpisodeScriptDraft(episodeId))).toHaveLength(
-      DEFAULT_PRODUCTION_MIN_SCENES,
+      DEFAULT_PRODUCTION_MAX_SCENES,
     );
   });
 
@@ -428,7 +428,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       scenes: acceptedOpening,
       authoring: {
         protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
         plan: authoringPlan([legacyPlanDescriptor]),
       },
     });
@@ -494,7 +494,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const first = await callChunk(buildEpisodeScriptChunkTool(state), {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan([descriptor]),
       scenes: invalidScenes,
     });
@@ -532,7 +532,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const rejected = await callChunk(tool, {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: invalidScenes,
     });
@@ -591,7 +591,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const first = await callChunk(buildEpisodeScriptChunkTool(state), {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: initialScenes,
     });
@@ -645,7 +645,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     const first = await callChunk(firstTool, {
       operation: "start",
       episodeId,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: invalidScenes,
     });
@@ -700,7 +700,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       scenes: legacyOpening,
       authoring: {
         protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
         plan,
       },
     });
@@ -776,7 +776,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
 
   it("turns an invalid restart into one durable empty prefix that get_next_episode resumes", async () => {
     const { state, seriesId, episodeId } = await createFixture();
-    const rejectedCompleteScenes = numberedScenes(DEFAULT_PRODUCTION_MIN_SCENES);
+    const rejectedCompleteScenes = numberedScenes(DEFAULT_PRODUCTION_MAX_SCENES);
     rejectedCompleteScenes[0]!.narrationText = overlongNarration(24);
     const rejectedCompleteDraft = await state.stageEpisodeScriptDraft(
       episodeId,
@@ -787,7 +787,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       },
       {
         pass: false,
-        sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        sceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
         totalSpokenWords: 804,
         issueCount: 1,
         issues: [
@@ -804,7 +804,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
       operation: "restart",
       episodeId,
       expectedDraftRevision: rejectedCompleteDraft.draft.revision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
       authoringPlan: authoringPlan(),
       scenes: replacementOpening,
     });
@@ -821,7 +821,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
     expect(draftScenes(restartedPrefix)).toEqual([]);
     expect(restartedPrefix?.scriptJson).toMatchObject({
       authoring: {
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
         plan: authoringPlan(),
       },
     });
@@ -919,7 +919,7 @@ describe("write_episode_script_chunk durable pending repair integration", () => 
         scenes: acceptedPrefix,
         authoring: {
           protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-          targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+          targetSceneCount: DEFAULT_PRODUCTION_MAX_SCENES,
           plan,
         },
       },

@@ -5,7 +5,7 @@ import path from "node:path";
 import { CONFIG } from "../config.js";
 import type { SeriesState } from "../state/seriesState.js";
 
-type CaptionScene = {
+export type CaptionScene = {
   sceneNumber: number;
   text: string;
   durationSeconds: number;
@@ -36,7 +36,7 @@ function parseSceneArrayInput(value: unknown): unknown {
   }
 }
 
-function formatSrtTimestamp(totalSeconds: number): string {
+export function formatSrtTimestamp(totalSeconds: number): string {
   const ms = Math.round(totalSeconds * 1000);
   const hours = Math.floor(ms / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
@@ -49,12 +49,12 @@ function formatSrtTimestamp(totalSeconds: number): string {
  * Strips vocal directions like [cheerful], [whisper], etc. from text.
  * These are used by Orpheus TTS for expressiveness but shouldn't appear in captions.
  */
-function stripVocalDirections(text: string): string {
+export function stripVocalDirections(text: string): string {
   // Remove vocal directions: [word], [multiple words], etc.
   return text.replace(/\[\s*[a-zA-Z][a-zA-Z\s]*\]/g, '').trim();
 }
 
-async function writeEpisodeCaptions(params: {
+export async function writeEpisodeCaptions(params: {
   seriesId: number;
   episodeNumber: number;
   scenes: CaptionScene[];

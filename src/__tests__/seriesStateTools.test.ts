@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("freetier-deepagent-framework", () => ({
+  createAudioGenTool: () => ({
+    invoke: vi.fn().mockResolvedValue("Audio generated successfully"),
+  }),
+}));
+
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
 import { buildSeriesStateTools } from "../tools/seriesStateTools.js";
 import { EpisodeAudioReadinessError } from "../state/seriesState.js";
@@ -1290,7 +1297,7 @@ describe("seriesStateTools", () => {
     });
   });
 
-  it("preserves the exact one-episode-per-day terminal response", async () => {
+  it("preserves the exact daily limit terminal response", async () => {
     const availability = {
       kind: "daily_limit",
       episode: null,
@@ -1298,7 +1305,7 @@ describe("seriesStateTools", () => {
       localDate: "2026-09-04",
       completedEpisodeNumber: 2,
       completedAt: "2026-09-04 12:30:00",
-      message: "Only 1 episode per day can be generated.",
+      message: "Only 2 episodes per day can be generated.",
     };
     const getNextEpisodeAvailability = vi.fn().mockResolvedValue(availability);
     const tools = buildSeriesStateTools({ getNextEpisodeAvailability } as any);
@@ -1307,7 +1314,7 @@ describe("seriesStateTools", () => {
     const result = await (tool as any).call({ seriesId: 12 });
 
     expect(JSON.parse(result)).toEqual(availability);
-    expect(JSON.parse(result).message).toBe("Only 1 episode per day can be generated.");
+    expect(JSON.parse(result).message).toBe("Only 2 episodes per day can be generated.");
   });
 
   it.each([

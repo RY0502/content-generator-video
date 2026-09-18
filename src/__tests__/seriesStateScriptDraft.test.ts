@@ -315,6 +315,7 @@ describe("SeriesState episode script drafts", () => {
     expect(await state.getNextEpisodeAvailability(seriesId, {
       now: new Date("2026-09-05T02:00:00.000Z"),
       timeZone: "Asia/Kolkata",
+      maxEpisodesPerDay: 1,
     })).toMatchObject({
       kind: "ready",
       episode: { id: secondEpisode.id, episodeNumber: 2 },
@@ -324,6 +325,7 @@ describe("SeriesState episode script drafts", () => {
     expect(await state.getNextEpisodeAvailability(seriesId, {
       now: new Date("2026-09-05T02:00:00.000Z"),
       timeZone: "Asia/Kolkata",
+      maxEpisodesPerDay: 1,
     })).toMatchObject({ kind: "daily_limit", episode: null });
   });
 

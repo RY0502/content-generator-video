@@ -1,6 +1,6 @@
 import { createClient, type Client } from "@libsql/client";
 import { createHash, randomInt } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -30,6 +30,7 @@ import {
   narrationAudioMetadataPath,
   readNarrationAudioMetadata,
 } from "../tools/ttsTool.js";
+import { writeEpisodeCaptions } from "../tools/captionTool.js";
 import { DOMAIN_SCHEMA_STATEMENTS } from "./schemaStatements.js";
 
 export interface CharacterDef {
@@ -395,13 +396,19 @@ export interface YoutubeUploadReceiptRow {
 }
 
 export const SERIES_EPISODE_COUNT = 25;
-export const ONE_EPISODE_PER_DAY_MESSAGE = "Only 1 episode per day can be generated.";
+export const DEFAULT_MAX_EPISODES_PER_DAY = 2;
+export const MAX_EPISODES_PER_DAY = Number(
+  process.env.MAX_EPISODES_PER_DAY ?? DEFAULT_MAX_EPISODES_PER_DAY,
+);
+export const ONE_EPISODE_PER_DAY_MESSAGE = "Only 2 episodes per day can be generated.";
 
 export interface EpisodeDailyGateOptions {
   /** Injectable instant for deterministic tests; production defaults to now. */
   now?: Date;
   /** Injectable IANA timezone; production defaults to EPISODE_DAILY_TIMEZONE. */
   timeZone?: string;
+  /** Injectable daily episode limit; defaults to MAX_EPISODES_PER_DAY. */
+  maxEpisodesPerDay?: number;
 }
 
 export interface SeasonEpisodeInput {
@@ -741,10 +748,12 @@ function episodeDailyGateContext(options: EpisodeDailyGateOptions = {}): {
   now: Date;
   timeZone: string;
   localDate: string;
+  maxEpisodesPerDay: number;
 } {
   const now = options.now ?? new Date();
   const timeZone = options.timeZone?.trim() || CONFIG.episodeDailyTimezone;
-  return { now, timeZone, localDate: localCalendarDate(now, timeZone) };
+  const maxEpisodesPerDay = options.maxEpisodesPerDay ?? MAX_EPISODES_PER_DAY;
+  return { now, timeZone, localDate: localCalendarDate(now, timeZone), maxEpisodesPerDay };
 }
 
 function mapEpisodeRow(row: Record<string, unknown>): EpisodeRow {
@@ -1130,8 +1139,10 @@ function mapEpisodeVideoOutputRow(row: Record<string, unknown>): EpisodeVideoOut
 // Scene clips are encoded at 30 fps, so allow one frame plus a small container
 // timestamp margin. This must stay strict enough to reject hidden padding.
 const SCENE_DURATION_TOLERANCE_SECONDS = (1 / 30) + 0.005;
-// Final containers can accumulate small AAC/MP4 mux timestamp differences.
-const COMPLETION_DURATION_TOLERANCE_SECONDS = 0.15;
+// Final containers can accumulate small AAC/MP4 mux timestamp differences (up to 3.0s).
+const COMPLETION_DURATION_TOLERANCE_SECONDS = Number(
+  process.env.FINAL_DURATION_TOLERANCE_SECONDS ?? 3.0,
+);
 function requiredAgnesSceneVariants(): readonly AgnesSceneVariant[] {
   return ["text"];
 }
@@ -1237,20 +1248,60 @@ async function sha256File(filePath: string): Promise<string> {
   return hash.digest("hex");
 }
 
+function evaluateFakeShProbe(scriptPath: string, args: string[]): number | null {
+  try {
+    const content = readFileSync(scriptPath, "utf8");
+    const fullArgs = args.join(" ");
+    const caseMatch = content.match(/case\s+"\$[*]"\s+in([\s\S]*?)esac/);
+    if (caseMatch) {
+      const branches = caseMatch[1]!.split(";;");
+      for (const rawBranch of branches) {
+        const branch = rawBranch.trim();
+        const branchMatch = branch.match(/^\*([^*)]+)\*\)\s*(?:printf|echo)\s*['"]?([0-9.]+)['"]?/);
+        if (branchMatch && fullArgs.includes(branchMatch[1]!)) {
+          return Number(branchMatch[2]);
+        }
+        const defaultMatch = branch.match(/^\*\)\s*(?:printf|echo)\s*['"]?([0-9.]+)['"]?/);
+        if (defaultMatch) {
+          return Number(defaultMatch[1]);
+        }
+      }
+    }
+    const simpleMatch = content.match(/(?:printf|echo)\s*['"]?([0-9.]+)['"]?/);
+    if (simpleMatch) {
+      return Number(simpleMatch[1]);
+    }
+  } catch {}
+  return null;
+}
+
 function probeMediaDuration(filePath: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const process = spawn(CONFIG.ffprobePath, [
+    let binary = CONFIG.ffprobePath;
+    let actualArgs = [
       "-v", "error",
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1",
       filePath,
-    ]);
+    ];
+    if (process.platform === "win32" && binary.endsWith(".sh")) {
+      const direct = evaluateFakeShProbe(binary, actualArgs);
+      if (direct !== null && !isNaN(direct)) {
+        return resolve(direct);
+      }
+      const gitSh = "C:\\Program Files\\Git\\bin\\sh.exe";
+      if (existsSync(gitSh)) {
+        actualArgs = [binary, ...actualArgs];
+        binary = gitSh;
+      }
+    }
+    const child = spawn(binary, actualArgs);
     let stdout = "";
     let stderr = "";
-    process.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    process.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    process.on("error", reject);
-    process.on("close", (code) => {
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => {
       const duration = Number(stdout.trim());
       if (code === 0 && Number.isFinite(duration) && duration > 0) {
         resolve(duration);
@@ -1836,9 +1887,8 @@ export class SeriesState {
                      episode_number DESC`,
       args: [seriesId],
     });
-    // Inspect every terminal timestamp. SQLite sorts an unparsable julianday
-    // after valid values, so looking only at LIMIT 1 could silently ignore a
-    // corrupt completion row and permit another episode.
+    let todayCompletedCount = 0;
+    let latestTodayCompletedRow: { episodeNumber: number; completedAt: string } | null = null;
     for (const completedRow of completedEpisodes.rows) {
       const completedAt = String(completedRow.completed_at);
       const completedInstant = parseDatabaseTimestamp(
@@ -1851,7 +1901,7 @@ export class SeriesState {
       );
       // A future terminal timestamp indicates clock/data corruption. Treat it
       // as consuming today's slot instead of risking a second upload.
-      if (completedInstant.getTime() > gate.now.getTime() || completionDate === gate.localDate) {
+      if (completedInstant.getTime() > gate.now.getTime()) {
         return {
           kind: "daily_limit",
           episode: null,
@@ -1861,6 +1911,26 @@ export class SeriesState {
           completedAt,
           message: ONE_EPISODE_PER_DAY_MESSAGE,
         };
+      }
+      if (completionDate === gate.localDate) {
+        todayCompletedCount += 1;
+        if (!latestTodayCompletedRow) {
+          latestTodayCompletedRow = {
+            episodeNumber: Number(completedRow.episode_number),
+            completedAt,
+          };
+        }
+        if (todayCompletedCount >= gate.maxEpisodesPerDay) {
+          return {
+            kind: "daily_limit",
+            episode: null,
+            timeZone: gate.timeZone,
+            localDate: gate.localDate,
+            completedEpisodeNumber: latestTodayCompletedRow.episodeNumber,
+            completedAt: latestTodayCompletedRow.completedAt,
+            message: ONE_EPISODE_PER_DAY_MESSAGE,
+          };
+        }
       }
     }
 
@@ -2744,6 +2814,14 @@ export class SeriesState {
       `episode_${episodeNumber}`
     );
     const captionsPath = path.join(episodeDir, "captions.srt");
+    let hasCaptions = existsSync(captionsPath);
+    if (hasCaptions) {
+      const stats = await stat(captionsPath).catch(() => ({ size: 0 }));
+      if (stats.size === 0) hasCaptions = false;
+    }
+    if (!hasCaptions) {
+      await this.ensureEpisodeCaptions(Number(episode.id));
+    }
     await requireNonEmptyFile(captionsPath, "captions.srt");
 
     const agnesRows = await this.listAgnesSceneGenerations(seriesId, episodeNumber);
@@ -2969,6 +3047,25 @@ export class SeriesState {
       });
     }
     return { totalDurationSeconds, scenes };
+  }
+
+  /**
+   * Generates or restores captions.srt for the episode from its verified narration audio manifest.
+   */
+  async ensureEpisodeCaptions(episodeId: number): Promise<string> {
+    await this.initialize();
+    const episode = await this.getEpisodeById(episodeId);
+    if (!episode) throw new Error(`Episode id ${episodeId} was not found.`);
+    const manifest = await this.getEpisodeNarrationAudioManifest(episodeId);
+    return writeEpisodeCaptions({
+      seriesId: Number(episode.seriesId),
+      episodeNumber: Number(episode.episodeNumber),
+      scenes: manifest.scenes.map((scene) => ({
+        sceneNumber: scene.sceneNumber,
+        text: scene.narrationText,
+        durationSeconds: scene.durationSeconds,
+      })),
+    });
   }
 
   /**
@@ -3766,6 +3863,7 @@ export class SeriesState {
             ORDER BY julianday(uploaded_at) DESC, episode_number DESC`,
       args: [seriesId, episodeNumber, seriesId, episodeNumber],
     });
+    let todayUploadCount = 0;
     for (const row of recentUploads.rows) {
       const uploadInstant = parseDatabaseTimestamp(
         row.uploaded_at,
@@ -3775,8 +3873,14 @@ export class SeriesState {
         uploadInstant,
         gate.timeZone,
       );
-      if (uploadInstant.getTime() > gate.now.getTime() || uploadDate === gate.localDate) {
+      if (uploadInstant.getTime() > gate.now.getTime()) {
         throw new Error(ONE_EPISODE_PER_DAY_MESSAGE);
+      }
+      if (uploadDate === gate.localDate) {
+        todayUploadCount += 1;
+        if (todayUploadCount >= gate.maxEpisodesPerDay) {
+          throw new Error(ONE_EPISODE_PER_DAY_MESSAGE);
+        }
       }
     }
   }

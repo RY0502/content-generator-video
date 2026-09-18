@@ -95,6 +95,12 @@ interface IssueRule {
 // productionScriptContract and scriptRefinementTool wording.
 const ISSUE_RULES: readonly IssueRule[] = [
   {
+    code: "narration.premature_closing",
+    pattern: /contains premature closing dialogue or sign-off/iu,
+    field: "narrationText",
+    weight: 55,
+  },
+  {
     code: "narration.too_many_spoken_words",
     pattern: /narration(?:Text)? (?:has|contains) \d+ spoken words[^.]*?(?:at most|maximum is|maximum of|allow(?:s)? at most) \d+/iu,
     field: "narrationText",
@@ -193,6 +199,12 @@ const ISSUE_RULES: readonly IssueRule[] = [
     pattern: /supportingEntities contains (?:the same stable identity more than once|duplicate entries)/iu,
     field: "supportingEntities",
     weight: 65,
+  },
+  {
+    code: "cast.visible_cast_duplicate",
+    pattern: /(?:visible cast must contain each main or supporting figure exactly once|supportingEntities contains duplicate figure name)/iu,
+    field: "supportingEntities",
+    weight: 70,
   },
   {
     code: "cast.main_character_in_supporting_entities",

@@ -16,6 +16,7 @@
  * not repeat a text character sheet or try to re-describe the portrait.
  */
 import type { CharacterDef } from "./state/seriesState.js";
+import { supportingEntityName } from "./services/productionScriptContract.js";
 export interface StylizedImageSpec {
 
   subjectDescription: string;
@@ -192,7 +193,7 @@ export function buildStylizedImagePrompt(spec: StylizedImageSpec): string {
   }
   parts.push(spec.cameraAngle ?? "straight-on to slight 3/4 angle camera");
   parts.push(spec.framing ?? "medium close-up");
-  if (spec.kidsFriendly) parts.push("gentle, non-threatening presence, bright inviting colors, appealing and safe-looking for a 2-5 year old audience");
+  if (spec.kidsFriendly) parts.push("gentle, non-threatening presence, bright inviting colors, appealing and safe-looking for a 4-8 year old audience");
   if (spec.ultraCuteMode) parts.push("warm expressive eyes with a friendly glint, endearing and approachable overall look");
   parts.push(CONSISTENCY_BLOCK);
   return parts.join(", ");
@@ -370,11 +371,6 @@ function buildCreatureIdentityGuard(characterVisuals: SceneCharacterVisual[] | u
   ].filter(Boolean).join(" ");
 }
 
-function supportingEntityName(descriptor: string, index: number): string {
-  const prefix = descriptor.split(":", 1)[0]?.replace(/\s+/g, " ").trim();
-  return prefix || `Supporting entity ${index + 1}`;
-}
-
 function buildExactCastLedger(
   characterNames: string[] | undefined,
   characterCount: number,
@@ -505,7 +501,7 @@ export function buildStylizedScenePrompt(params: {
   );
   const charLayer = charCount > 0
     ? `REFERENCE-CONDITIONED MAIN CAST — ${normalizedCharacterNames.map((name) => `[${name}]`).join("; ")}. ` +
-      "Use each matching supplied portrait as the sole appearance authority; do not invent or infer a second design from text."
+    "Use each matching supplied portrait as the sole appearance authority; do not invent or infer a second design from text."
     : supportingCount > 0
       ? "MAIN-CAST EXCLUSION — no main-series character is visible; only the supporting figures in the ledger appear."
       : "EMPTY-SCENE LOCK — exactly zero people, animals, creatures, living objects, silhouettes, or other figures.";
@@ -520,8 +516,8 @@ export function buildStylizedScenePrompt(params: {
 
   const figureCountLayer = totalFigureCount > 0
     ? `COUNT AND TRAJECTORY LOCK — keep those same ${totalFigureCount} ledger ${totalFigureCount === 1 ? "identity" : "identities"} ` +
-      "throughout, one continuous path each with species-correct anatomy. Never split, fork, duplicate across depth, " +
-      "re-enter, or copy after movement, occlusion, or portals."
+    "throughout, one continuous path each with species-correct anatomy. Never split, fork, duplicate across depth, " +
+    "re-enter, or copy after movement, occlusion, or portals."
     : "";
 
   // CONSISTENCY — episode-local recurring props/setup continuity.
@@ -646,7 +642,7 @@ export function buildSeriesKeyArtPrompt(params: {
     "Characters occupy the centre-bottom of the composition, with title text above or overlaid.",
     "Rich detailed background suggesting the show's world.",
     "Vibrant saturated colors with natural tone, clean composition, professional polish.",
-    "Warm friendly atmosphere, appealing to ages 2-5.",
+    "Warm friendly atmosphere, appealing to ages 4-8.",
     "16:9 landscape aspect ratio.",
     "No logos. No watermarks. No UI elements beyond the series title.",
     "No scary elements. No dark shadows. No photorealism.",
@@ -700,7 +696,7 @@ export function buildEpisodeKeyArtPrompt(params: {
     "Main character occupies the centre-bottom of the composition, large and clearly visible, with episode title above.",
     "Background suggests the episode's setting and story.",
     "Vibrant saturated colors with natural tone, clean composition, professional polish.",
-    "Warm friendly atmosphere, appealing to ages 2-5.",
+    "Warm friendly atmosphere, appealing to ages 4-8.",
     "16:9 landscape aspect ratio.",
     "No logos. No watermarks. No UI elements beyond the episode title.",
     "No scary elements. No dark shadows. No photorealism.",

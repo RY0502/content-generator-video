@@ -5,13 +5,14 @@ import {
   inspectProductionScript,
   productionScriptReadiness,
 } from "../services/productionScriptContract.js";
+import { DEFAULT_PRODUCTION_MIN_SCENES } from "../services/narrationContract.js";
 
 function productionScript() {
   const narration =
     "Pip gently carries the bright berry across the sunny meadow while patient friends smile beside their cozy little clubhouse today.";
   return {
     title: "Pip Shares a Berry",
-    scenes: Array.from({ length: 40 }, (_unused, index) => ({
+    scenes: Array.from({ length: DEFAULT_PRODUCTION_MIN_SCENES }, (_unused, index) => ({
       sceneNumber: index + 1,
       narrationText: narration,
       environmentDescription: "A sunny green meadow beside the little wooden clubhouse.",
@@ -36,7 +37,7 @@ describe("productionScriptContract", () => {
   it("accepts a complete fixed-roster direct-video manifest", () => {
     expect(inspectProductionScript(productionScript(), ["Pip the Ant"])).toMatchObject({
       pass: true,
-      sceneCount: 40,
+      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
     });
   });
 
@@ -302,5 +303,30 @@ describe("productionScriptContract", () => {
     expect(error).toBeInstanceOf(ProductionScriptContractError);
     expect(error.inspection).toBe(inspection);
     expect(error.message).toContain("Persisted episode script violates the production contract");
+  });
+
+  it("enforces unique visible cast across characterNames and supportingEntities", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = ["Pip the Ant"];
+    scene.supportingEntities = [
+      "Stable: tall green trees with thick foliage",
+      "Stable: friendly animal sounds echoing gently",
+    ];
+
+    let result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("Scene 1 visible cast must contain each main or supporting figure exactly once.");
+
+    // Collision between supporting figure name and characterNames
+    scene.supportingEntities = ["Pip the Ant: guest appearance in a blue coat"];
+    result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("Scene 1 visible cast must contain each main or supporting figure exactly once.");
+
+    // Valid unique guest
+    scene.supportingEntities = ["Bella the Bird: tiny yellow canary with bright feathers"];
+    result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(true);
   });
 });

@@ -1,4 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("freetier-deepagent-framework", () => ({
+  createAudioGenTool: () => ({
+    invoke: vi.fn().mockResolvedValue("Audio generated successfully"),
+  }),
+}));
+
 import {
   ONE_EPISODE_PER_DAY_MESSAGE,
   SeriesState,
@@ -133,6 +140,7 @@ describe("SeriesState one-episode-per-day selection", () => {
     const { state, seriesId } = await createState();
     // Both instants are September 5 in India, although the stored UTC date is September 4.
     await markComplete(state, seriesId, 1, "2026-09-04 18:45:00");
+    await markComplete(state, seriesId, 2, "2026-09-04 18:50:00");
 
     const blocked = await state.getNextEpisodeAvailability(seriesId, {
       now: new Date("2026-09-04T19:00:00.000Z"),
@@ -142,7 +150,7 @@ describe("SeriesState one-episode-per-day selection", () => {
       kind: "daily_limit",
       episode: null,
       localDate: "2026-09-05",
-      completedEpisodeNumber: 1,
+      completedEpisodeNumber: 2,
       message: ONE_EPISODE_PER_DAY_MESSAGE,
     });
     expect(await state.getNextEpisode(seriesId, {
@@ -155,7 +163,7 @@ describe("SeriesState one-episode-per-day selection", () => {
       now: new Date("2026-09-05T12:00:00.000Z"),
       timeZone: "America/New_York",
     });
-    expect(allowed).toMatchObject({ kind: "ready", episode: { episodeNumber: 2 } });
+    expect(allowed).toMatchObject({ kind: "ready", episode: { episodeNumber: 3 } });
   });
 
   it("returns an already-started episode before applying today's gate", async () => {
@@ -241,16 +249,27 @@ describe("SeriesState one-episode-per-day selection", () => {
     });
   });
 
-  it("prevents a stale runner from uploading a second episode on the same local day", async () => {
+  it("prevents a runner from uploading a third episode on the same local day", async () => {
     const { state, seriesId } = await createState();
     await markComplete(state, seriesId, 1, "2026-09-04T18:45:00.000Z");
 
+    // Episode 2 is allowed today since limit is 2 per day
     await expect(state.assertEpisodeUploadAllowedToday(seriesId, 2, {
+      now: new Date("2026-09-04T19:00:00.000Z"),
+      timeZone: "Asia/Kolkata",
+    })).resolves.toBeUndefined();
+
+    // Mark episode 2 complete on the same local day
+    await markComplete(state, seriesId, 2, "2026-09-04T18:50:00.000Z");
+
+    // Episode 3 should now be blocked
+    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 3, {
       now: new Date("2026-09-04T19:00:00.000Z"),
       timeZone: "Asia/Kolkata",
     })).rejects.toThrow(ONE_EPISODE_PER_DAY_MESSAGE);
 
-    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 2, {
+    // Allowed on the next day
+    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 3, {
       now: new Date("2026-09-05T19:00:00.000Z"),
       timeZone: "Asia/Kolkata",
     })).resolves.toBeUndefined();
@@ -258,19 +277,20 @@ describe("SeriesState one-episode-per-day selection", () => {
 
   it("counts another episode's durable YouTube outbox before local finalization", async () => {
     const { state, seriesId } = await createState();
+    await markComplete(state, seriesId, 1, "2026-09-04T18:40:00.000Z");
     await state.recordYoutubeUploadReceipt({
       seriesId,
-      episodeNumber: 1,
-      videoId: "outbox-video-1",
-      url: "https://www.youtube.com/watch?v=outbox-video-1",
+      episodeNumber: 2,
+      videoId: "outbox-video-2",
+      url: "https://www.youtube.com/watch?v=outbox-video-2",
     });
     await stateClient(state).execute({
       sql: `UPDATE youtube_upload_receipts SET created_at = '2026-09-04 18:45:00'
-            WHERE series_id = ? AND episode_number = 1`,
+            WHERE series_id = ? AND episode_number = 2`,
       args: [seriesId],
     });
 
-    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 2, {
+    await expect(state.assertEpisodeUploadAllowedToday(seriesId, 3, {
       now: new Date("2026-09-04T19:00:00.000Z"),
       timeZone: "Asia/Kolkata",
     })).rejects.toThrow(ONE_EPISODE_PER_DAY_MESSAGE);
@@ -279,7 +299,7 @@ describe("SeriesState one-episode-per-day selection", () => {
       timeZone: "Asia/Kolkata",
     })).toMatchObject({
       kind: "ready",
-      episode: { episodeNumber: 1 },
+      episode: { episodeNumber: 2 },
     });
   });
 

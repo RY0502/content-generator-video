@@ -154,11 +154,11 @@ function normalizeScript(raw: unknown): EpisodeScript {
       const item = scene as Partial<EpisodeScene>;
       const characterVisuals = Array.isArray(item.characterVisuals)
         ? item.characterVisuals.map((visual) => ({
-            name: String((visual as SceneCharacterVisual).name ?? "").trim(),
-            visualForm: (visual as SceneCharacterVisual).visualForm,
-            speciesOrType: (visual as SceneCharacterVisual).speciesOrType?.trim() || undefined,
-            humanoidAllowed: (visual as SceneCharacterVisual).humanoidAllowed,
-          })).filter((visual) => visual.name)
+          name: String((visual as SceneCharacterVisual).name ?? "").trim(),
+          visualForm: (visual as SceneCharacterVisual).visualForm,
+          speciesOrType: (visual as SceneCharacterVisual).speciesOrType?.trim() || undefined,
+          humanoidAllowed: (visual as SceneCharacterVisual).humanoidAllowed,
+        })).filter((visual) => visual.name)
         : undefined;
       const characterNames = characterVisuals && characterVisuals.length > 0
         ? characterVisuals.map((visual) => visual.name)
@@ -213,7 +213,7 @@ async function draftEpisodeScene(params: {
       `Episode premise: ${params.premise}\n\n` +
       `Target scene number: ${params.sceneNumber} of ${SCENE_LIMIT}.\n` +
       `Previously drafted scenes JSON:\n${JSON.stringify(params.previousScenes)}\n\n` +
-      `Draft only scene ${params.sceneNumber} for a drift test, suitable for ages 2-5. Keep one clear image moment. Include vivid narration, concrete environment, action, continuity anchors when relevant, and explicit characterVisuals. Preserve continuity with the previous scenes. Keep the response minimal. Return exactly one scene object only.`,
+      `Draft only scene ${params.sceneNumber} for a drift test, suitable for ages 4-8. Keep one clear image moment. Include vivid narration, concrete environment, action, continuity anchors when relevant, and explicit characterVisuals. Preserve continuity with the previous scenes. Keep the response minimal. Return exactly one scene object only.`,
   });
 
   return parseDraftSceneResponse(raw);

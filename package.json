@@ -17,7 +17,8 @@
     "db:migrate-signatures": "tsx scripts/migrateCharacterSignaturePrompts.ts",
     "episode:scheduler-skip": "tsx scripts/setEpisodeSchedulerSkip.ts",
     "smoke:one-minute": "tsx scripts/smokeOneMinuteEpisode.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node scripts/patchLanggraphSdk.cjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",

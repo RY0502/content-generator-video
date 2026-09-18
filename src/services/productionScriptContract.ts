@@ -124,9 +124,16 @@ function parseJson(value: unknown): unknown {
   }
 }
 
+export function supportingEntityName(descriptor: string, index: number): string {
+  const prefix = descriptor.split(":", 1)[0]?.replace(/\s+/gu, " ").trim();
+  return prefix || `Supporting entity ${index + 1}`;
+}
+
 function normalizedText(value: unknown): string {
   return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
 }
+
+
 
 /**
  * Rejects only unmistakable transport/authoring stubs. This intentionally does
@@ -235,13 +242,20 @@ export function inspectProductionScript(
       }
     }
 
-    stringArray(
+    const supportingEntities = stringArray(
       scene.supportingEntities,
       "supportingEntities",
       label,
       issues,
       false,
     );
+    const supportingNames = supportingEntities.map(supportingEntityName);
+    const allCastNames = [...characterNames, ...supportingNames];
+    if (new Set(allCastNames.map((name) => name.toLocaleLowerCase())).size !== allCastNames.length) {
+      issues.push(
+        `${label} visible cast must contain each main or supporting figure exactly once.`,
+      );
+    }
     stringArray(
       scene.continuityAnchors,
       "continuityAnchors",

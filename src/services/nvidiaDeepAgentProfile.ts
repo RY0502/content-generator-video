@@ -212,7 +212,22 @@ export function withNvidiaDeepAgentProfile(model: ProviderModel): ProviderModel 
  * rotates providers. Every created model gets bounded transport behavior;
  * only models created for its NVIDIA branch get NVIDIA quality settings.
  */
+export const TARGET_PROVIDER_ORDER = Object.freeze([
+  "nvidia",
+  "openrouter",
+  "anyapi",
+  "requesty",
+  "huggingface",
+] as const);
+
 export function configureNvidiaDeepAgentProfile(): void {
+  if (
+    PROVIDER_ORDER.length !== TARGET_PROVIDER_ORDER.length
+    || PROVIDER_ORDER.some((name, index) => name !== TARGET_PROVIDER_ORDER[index])
+  ) {
+    PROVIDER_ORDER.splice(0, PROVIDER_ORDER.length, ...TARGET_PROVIDER_ORDER);
+  }
+
   const prototype = ProviderManager.prototype as ProviderManagerPrototype;
   if (prototype[INSTALL_MARKER] === true) return;
 

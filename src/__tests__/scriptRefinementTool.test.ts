@@ -27,6 +27,7 @@ import {
   getEpisodeScriptChunkAuthoringProgress,
   type EpisodeScript,
   validateEpisodeScript,
+  validateProductionRefinementCandidate,
 } from "../tools/scriptRefinementTool.js";
 import {
   DEFAULT_PRODUCTION_MAX_SCENES,
@@ -810,7 +811,7 @@ describe("scriptRefinementTool", () => {
         },
       });
       expect(result.nextAction).toContain(`expectedDraftRevision=${accepted.draftRevision}`);
-      expect(result.nextAction).toContain("exactly scenes 17-24");
+      expect(result.nextAction).toContain(`exactly scenes 17-${Math.min(24, DEFAULT_PRODUCTION_MIN_SCENES)}`);
       expect(result.nextAction).toContain("Omit targetSceneCount and authoringPlan");
       expect(fixture.getCurrentDraft()).toEqual(before);
     }
@@ -1228,7 +1229,7 @@ describe("scriptRefinementTool", () => {
       authoringProgress: {
         completedSceneCount: 16,
         nextSceneNumber: 17,
-        nextSceneEnd: 24,
+        nextSceneEnd: Math.min(24, DEFAULT_PRODUCTION_MIN_SCENES),
       },
     });
     expect(fixture.getCurrentDraft().scriptJson.scenes).toEqual([
@@ -1331,7 +1332,7 @@ describe("scriptRefinementTool", () => {
       authoringProgress: {
         completedSceneCount: 15,
         nextSceneNumber: 16,
-        nextSceneEnd: 23,
+        nextSceneEnd: Math.min(23, DEFAULT_PRODUCTION_MIN_SCENES),
       },
     });
     expect(fixture.getCurrentDraft().scriptJson.scenes).toHaveLength(15);
@@ -1368,15 +1369,16 @@ describe("scriptRefinementTool", () => {
   it("rejects overflow past the final target, then completes with the exact remainder", async () => {
     const fixture = chunkStateForEpisode();
     const tool = buildEpisodeScriptChunkTool(fixture.state);
+    const testTargetScenes = Math.max(30, DEFAULT_PRODUCTION_MIN_SCENES);
     let result = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
-      authoringPlan: chunkAuthoringPlan(),
+      targetSceneCount: testTargetScenes,
+      authoringPlan: chunkAuthoringPlan(testTargetScenes),
       scenes: chunkScenes(1, 8),
     }));
 
-    for (const [startScene, count] of [[9, 8], [17, 8], [25, 8], [33, 7]]) {
+    for (const [startScene, count] of [[9, 8], [17, 8], [25, 5]]) {
       result = JSON.parse(await (tool as any).call({
         operation: "append",
         episodeId: 17,
@@ -1387,9 +1389,9 @@ describe("scriptRefinementTool", () => {
     expect(result).toMatchObject({
       status: "script_chunk_appended",
       authoringProgress: {
-        completedSceneCount: 39,
-        nextSceneNumber: 40,
-        nextSceneEnd: 40,
+        completedSceneCount: testTargetScenes - 1,
+        nextSceneNumber: testTargetScenes,
+        nextSceneEnd: testTargetScenes,
       },
     });
     const beforeOverflow = structuredClone(fixture.getCurrentDraft());
@@ -1398,7 +1400,7 @@ describe("scriptRefinementTool", () => {
       operation: "append",
       episodeId: 17,
       expectedDraftRevision: result.draftRevision,
-      scenes: chunkScenes(40, 2),
+      scenes: chunkScenes(testTargetScenes, 2),
     }));
 
     expect(overflow).toMatchObject({
@@ -1407,7 +1409,7 @@ describe("scriptRefinementTool", () => {
       retryThisInvocation: true,
     });
     expect(overflow.validation.issues.join(" ")).toContain(
-      "at most 1 scene for remaining range 40-40",
+      `at most 1 scene for remaining range ${testTargetScenes}-${testTargetScenes}`,
     );
     expect(fixture.getCurrentDraft()).toEqual(beforeOverflow);
 
@@ -1415,12 +1417,12 @@ describe("scriptRefinementTool", () => {
       operation: "append",
       episodeId: 17,
       expectedDraftRevision: result.draftRevision,
-      scenes: chunkScenes(40, 1),
+      scenes: chunkScenes(testTargetScenes, 1),
     }));
     expect(completed).toMatchObject({
       status: "script_draft_complete",
       persisted: true,
-      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      sceneCount: testTargetScenes,
       validation: { pass: true },
     });
   });
@@ -1626,7 +1628,7 @@ describe("scriptRefinementTool", () => {
   });
 
   it("ignores a legacy aggregate recovery floor when restarting bounded scene authoring", async () => {
-    const minimumReplacementSpokenWords = 825;
+    const minimumReplacementSpokenWords = 650;
     const rejectedScript = validFiveMinuteScript();
     const initialDraft = {
       episodeId: 17,
@@ -1636,7 +1638,7 @@ describe("scriptRefinementTool", () => {
       validation: {
         pass: false,
         sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
-        totalSpokenWords: 800,
+        totalSpokenWords: 600,
         issueCount: 1,
         issues: ["Measured narration is below five minutes."],
         omittedIssueCount: 0,
@@ -1911,7 +1913,7 @@ describe("scriptRefinementTool", () => {
   it("accepts a complete fenced script larger than the failed provider payload", async () => {
     const script = validFiveMinuteScript();
     for (const scene of script.scenes) {
-      scene.sceneDetails = `${scene.sceneDetails} ${"Visible period details preserve the exact layout, character spacing, prop state, camera composition, and gentle emotional expression. ".repeat(10)}`;
+      scene.sceneDetails = `${scene.sceneDetails} ${"Visible period details preserve the exact layout, character spacing, prop state, camera composition, and gentle emotional expression. ".repeat(25)}`;
     }
     const transported = `\`\`\`json\n${JSON.stringify(script)}\n\`\`\``;
     expect(transported.length).toBeGreaterThan(65_536);
@@ -2241,29 +2243,29 @@ describe("scriptRefinementTool", () => {
   });
 
   it("uses the canonical audio audit and ignores a short aggregate runtime", async () => {
-    const script = validFiveMinuteScript(45);
+    const script = validFiveMinuteScript(35);
     const { state, getCurrentDraft } = productionStateForDraft(script);
     getCurrentDraft().validation = {
       pass: false,
-      sceneCount: 45,
-      totalSpokenWords: 751,
+      sceneCount: 35,
+      totalSpokenWords: 600,
       issueCount: 3,
       issues: ["Stale model-supplied timing evidence."],
       omittedIssueCount: 0,
       repairEvidence: {
         durationExceededScenes: [
-          { sceneNumber: 38, durationSeconds: 16.3 },
-          { sceneNumber: 42, durationSeconds: 16.3 },
-          { sceneNumber: 44, durationSeconds: 18.5 },
+          { sceneNumber: 28, durationSeconds: 16.3 },
+          { sceneNumber: 32, durationSeconds: 16.3 },
+          { sceneNumber: 34, durationSeconds: 18.5 },
         ],
         measuredTotalNarrationSeconds: 587.6,
-        measuredNarrationSceneCount: 45,
+        measuredNarrationSceneCount: 35,
       },
     };
     state.auditEpisodeNarrationAudioTiming = vi.fn().mockResolvedValue({
       complete: true,
-      sceneCount: 45,
-      verifiedSceneCount: 45,
+      sceneCount: 35,
+      verifiedSceneCount: 35,
       totalDurationSeconds: 284.952485,
       durationExceededScenes: [],
       invalidSceneNumbers: [],
@@ -2338,7 +2340,7 @@ describe("scriptRefinementTool", () => {
   });
 
   it("repairs only measured-overlong narration and preserves every non-narration field", async () => {
-    const source = validFiveMinuteScript(41);
+    const source = validFiveMinuteScript(36);
     const first = source.scenes[0]!;
     const before = structuredClone(source);
     const shortened =
@@ -2357,14 +2359,14 @@ describe("scriptRefinementTool", () => {
       draftRevision: 3,
       durationExceededScenes: [{ sceneNumber: 1, durationSeconds: 13.275 }],
       measuredTotalNarrationSeconds: 320,
-      measuredNarrationSceneCount: 41,
+      measuredNarrationSceneCount: 36,
     }));
 
     expect(result).toMatchObject({
       status: "ready",
       persisted: true,
       narrationRepairCallCount: 1,
-      sceneCount: 41,
+      sceneCount: 36,
     });
     expect(chatStructuredNarrationRepairMock).toHaveBeenCalledTimes(1);
     const request = chatStructuredNarrationRepairMock.mock.calls[0]![0];
@@ -2389,8 +2391,8 @@ describe("scriptRefinementTool", () => {
     expect(chatStructuredRepairMock).not.toHaveBeenCalled();
   });
 
-  it("repairs every measured-overlong narration in one invocation up to the 60-scene limit", async () => {
-    const source = validFiveMinuteScript(46);
+  it("repairs every measured-overlong narration in one invocation up to the 40-scene limit", async () => {
+    const source = validFiveMinuteScript(40);
     const before = structuredClone(source);
     const shortened =
       "Mia watches the golden lantern as friendly fireflies dance above the quiet meadow and smile.";
@@ -2413,14 +2415,14 @@ describe("scriptRefinementTool", () => {
       draftRevision: 3,
       durationExceededScenes: durations,
       measuredTotalNarrationSeconds: 360,
-      measuredNarrationSceneCount: 46,
+      measuredNarrationSceneCount: 40,
     }));
 
     expect(first).toMatchObject({
       status: "ready",
       persisted: true,
       narrationRepairCallCount: 6,
-      sceneCount: 46,
+      sceneCount: 40,
     });
     expect(chatStructuredNarrationRepairMock).toHaveBeenCalledTimes(6);
     expect(getCurrentDraft().scriptJson.scenes.slice(0, 6).map((scene: any) =>
@@ -2475,7 +2477,7 @@ describe("scriptRefinementTool", () => {
   });
 
   it("persists measured evidence when a narration-only response violates the narrow schema", async () => {
-    const source = validFiveMinuteScript(41);
+    const source = validFiveMinuteScript(36);
     const before = structuredClone(source);
     const shortened =
       "Mia watches the golden lantern as friendly fireflies dance above the quiet meadow and smile.";
@@ -2494,7 +2496,7 @@ describe("scriptRefinementTool", () => {
       draftRevision: 3,
       durationExceededScenes: [{ sceneNumber: 2, durationSeconds: 13.125 }],
       measuredTotalNarrationSeconds: 320,
-      measuredNarrationSceneCount: 41,
+      measuredNarrationSceneCount: 36,
     });
     const result = JSON.parse(rawResult);
 
@@ -2512,7 +2514,7 @@ describe("scriptRefinementTool", () => {
     expect(getCurrentDraft().validation.repairEvidence).toEqual({
       durationExceededScenes: [{ sceneNumber: 2, durationSeconds: 13.125 }],
       measuredTotalNarrationSeconds: 320,
-      measuredNarrationSceneCount: 41,
+      measuredNarrationSceneCount: 36,
     });
     expect(getCurrentDraft().scriptJson).toEqual(before);
     expect(state.promoteEpisodeScriptDraft).not.toHaveBeenCalled();
@@ -2562,8 +2564,8 @@ describe("scriptRefinementTool", () => {
   });
 
   it("blocks complete-draft replacement while durable overlong narration evidence exists", async () => {
-    const source = validFiveMinuteScript(41);
-    const replacement = validFiveMinuteScript(41);
+    const source = validFiveMinuteScript(36);
+    const replacement = validFiveMinuteScript(36);
     replacement.premise = "A replacement premise that must not be accepted.";
     const before = structuredClone(source);
     const { state, getCurrentDraft } = productionStateForDraft(source);
@@ -2620,8 +2622,8 @@ describe("scriptRefinementTool", () => {
   });
 
   it("drops a legacy recovery word target while accepting a bounded replacement", async () => {
-    const targetSceneCount = 45;
-    const minimumReplacementSpokenWords = 820;
+    const targetSceneCount = 35;
+    const minimumReplacementSpokenWords = 650;
     const rejectedScript = validFiveMinuteScript(targetSceneCount);
     const initialDraft = {
       episodeId: 17,
@@ -2631,7 +2633,7 @@ describe("scriptRefinementTool", () => {
       validation: {
         pass: false,
         sceneCount: targetSceneCount,
-        totalSpokenWords: 900,
+        totalSpokenWords: 600,
         issueCount: 1,
         issues: [
           `Complete measured narration is too short; author at least ${minimumReplacementSpokenWords} spoken words.`,
@@ -2706,8 +2708,8 @@ describe("scriptRefinementTool", () => {
   });
 
   it.each([
-    ["too few scenes", 34],
-    ["too many scenes", 61],
+    ["too few scenes", DEFAULT_PRODUCTION_MIN_SCENES - 1],
+    ["too many scenes", DEFAULT_PRODUCTION_MAX_SCENES + 1],
   ])("returns needs_reauthor for %s without model repair", async (_label, sceneCount) => {
     const source = validFiveMinuteScript(sceneCount);
     const { state } = productionStateForDraft(source);
@@ -3829,5 +3831,24 @@ describe("scriptRefinementTool", () => {
     expect(tooMany.issues.join(" ")).toContain("maximum is 5");
     expect(duplicate.issues.join(" ")).toContain("duplicate entries");
     expect(nonRoster.issues.join(" ")).toContain("non-roster names: Guest");
+  });
+
+  it("rejects premature closing dialogue before the final scenes", () => {
+    const roster = ["Mia"];
+    const script = validFiveMinuteScript(24);
+    // Introduce premature closing in scene 16
+    script.scenes[15]!.narrationText = "Sunny ends with a warm wish 'Until our next adventure!'";
+
+    const result = validateEpisodeScript(
+      script,
+      DEFAULT_PRODUCTION_MIN_SCENES,
+      DEFAULT_PRODUCTION_MAX_SCENES,
+      5,
+      roster,
+      { productionSceneContract: true, deferAggregateMinimums: true },
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("Scene 16 contains premature closing dialogue or sign-off");
   });
 });

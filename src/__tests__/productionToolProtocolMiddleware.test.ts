@@ -1669,7 +1669,7 @@ describe("production tool protocol middleware", () => {
   });
 
   it.each([
-    '{"kind":"daily_limit","message":"Only 1 episode per day can be generated."}',
+    '{"kind":"daily_limit","message":"Only 2 episodes per day can be generated."}',
     '{"kind":"ready","resumeAction":"stop"}',
     '{"status":"needs_reauthor","retryThisInvocation":false}',
   ])("preserves an explicitly terminal receipt: %s", async (receipt) => {

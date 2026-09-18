@@ -19,7 +19,7 @@ describe("production system prompt", () => {
       expect(SYSTEM_PROMPT_EXTENSION, requiredDetail).toContain(requiredDetail);
     }
 
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("40-60 scene preschool adventure");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("20-24 scene preschool adventure");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("one naturally integrated learning idea");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Avoid filler and repeated beats");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("not semantic pass/fail tests");

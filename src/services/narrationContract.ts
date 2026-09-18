@@ -11,8 +11,14 @@ export const NARRATION_MAX_SPOKEN_WORDS = 20;
 export const NARRATION_MAX_AUDIO_SECONDS = 12;
 export const NARRATION_TARGET_MAX_AUDIO_SECONDS = 10;
 export const NARRATION_WORDS_PER_MINUTE = 150;
-export const DEFAULT_PRODUCTION_MIN_SCENES = 40;
-export const DEFAULT_PRODUCTION_MAX_SCENES = 60;
+export const DEFAULT_PRODUCTION_MIN_SCENES = Math.max(
+  8,
+  Number.parseInt(process.env.PRODUCTION_MIN_SCENES ?? "24", 10) || 24,
+);
+export const DEFAULT_PRODUCTION_MAX_SCENES = Math.max(
+  DEFAULT_PRODUCTION_MIN_SCENES,
+  Number.parseInt(process.env.PRODUCTION_MAX_SCENES ?? "40", 10) || 40,
+);
 
 export type NarrationTextIssueCode =
   | "empty"
@@ -86,7 +92,7 @@ export function inspectNarrationText(
       code: "too_many_raw_characters",
       message:
         `Narration has ${rawCharacterCount} raw characters; the Groq one-request limit is ` +
-        `${NARRATION_MAX_RAW_CHARACTERS}. Split it into consecutive scenes.`,
+        `${NARRATION_MAX_RAW_CHARACTERS}. Shorten this scene's narration to under ${NARRATION_MAX_RAW_CHARACTERS} characters.`,
     });
   }
   if (options.production && spokenWordCount > NARRATION_MAX_SPOKEN_WORDS) {
@@ -95,7 +101,7 @@ export function inspectNarrationText(
       message:
         `Narration has ${spokenWordCount} spoken words; production scenes allow at most ` +
         `${NARRATION_MAX_SPOKEN_WORDS} to leave headroom under the 12-second audio limit. ` +
-        "Split it into consecutive scenes.",
+        `Shorten this scene's narration sentence to ${NARRATION_MAX_SPOKEN_WORDS} words or fewer (target 10-16 words). Do not list all character names in narration.`,
     });
   }
 

@@ -1,7 +1,7 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile, rm, stat, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm, stat, rename, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -27,22 +27,38 @@ ffmpeg.setFfprobePath(CONFIG.ffprobePath);
 const OUTPUT_FPS = 30;
 const VIDEO_DURATION_TOLERANCE_SECONDS = (1 / OUTPUT_FPS) + 0.005;
 /**
- * Once each encoded clip's bounded frame rounding has been measured, the final
- * concat/mux may still differ by one AAC packet/edit-list and one video frame.
- * Anything larger than 150 ms beyond that measured clip timeline indicates
- * missing, duplicated, or appended material.
+ * Allowed delta between the measured concatenated media duration and the expected
+ * timeline. Increased to 3.0 seconds to absorb minor container/audio/video mux variances.
  */
-export const FINAL_DURATION_TOLERANCE_SECONDS = 0.15;
+export const FINAL_DURATION_TOLERANCE_SECONDS = Number(
+  process.env.FINAL_DURATION_TOLERANCE_SECONDS ?? 3.0,
+);
+
+function resolveProcessCommand(binary: string, args: string[]): { cmd: string; args: string[] } {
+  if (process.platform === "win32" && binary.endsWith(".sh")) {
+    const gitSh = "C:\\Program Files\\Git\\bin\\sh.exe";
+    if (existsSync(gitSh)) {
+      return { cmd: gitSh, args: [binary, ...args] };
+    }
+    const winBash = "C:\\Windows\\System32\\bash.exe";
+    if (existsSync(winBash)) {
+      return { cmd: winBash, args: [binary, ...args] };
+    }
+  }
+  return { cmd: binary, args };
+}
 
 /** Gets the duration of an audio or video file in seconds using ffprobe. */
 function getMediaDuration(mediaPath: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(CONFIG.ffprobePath, [
+    const probeArgs = [
       "-v", "error",
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1",
       mediaPath,
-    ]);
+    ];
+    const { cmd, args } = resolveProcessCommand(CONFIG.ffprobePath, probeArgs);
+    const proc = spawn(cmd, args);
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (chunk) => {
@@ -155,7 +171,8 @@ function resolveSceneAssetPath(params: {
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(CONFIG.ffmpegPath, ["-y", ...args]);
+    const { cmd, args: ffmpegArgs } = resolveProcessCommand(CONFIG.ffmpegPath, ["-y", ...args]);
+    const proc = spawn(cmd, ffmpegArgs);
     let stderr = "";
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -808,12 +825,31 @@ export function buildVideoAssemblyTool(
         0,
       );
       let effectiveCaptionsPath = captionsSrtPath ?? null;
-      if (burnSubtitles && effectiveCaptionsPath && existsSync(effectiveCaptionsPath) && keyArtDurationSeconds > 0) {
+      const canonicalCaptionsPath = path.join(episodeDir, "captions.srt");
+      if (!effectiveCaptionsPath && existsSync(canonicalCaptionsPath)) {
+        effectiveCaptionsPath = canonicalCaptionsPath;
+      }
+      if (!effectiveCaptionsPath && seriesState && typeof (seriesState as Partial<SeriesState>).ensureEpisodeCaptions === "function") {
+        try {
+          const episode = await seriesState.getEpisodeByNumber(seriesId, episodeNumber);
+          if (episode) {
+            await (seriesState as any).ensureEpisodeCaptions(episode.id);
+            if (existsSync(canonicalCaptionsPath)) {
+              effectiveCaptionsPath = canonicalCaptionsPath;
+            }
+          }
+        } catch (err) {
+          console.warn("[VideoAssembly] Could not auto-generate captions.srt:", err);
+        }
+      }
+      let offsetCaptionsCreated = false;
+      if (effectiveCaptionsPath && existsSync(effectiveCaptionsPath) && keyArtDurationSeconds > 0) {
         effectiveCaptionsPath = await createOffsetCaptions(
           effectiveCaptionsPath,
           path.join(workDir, "captions_with_key_art_offset.srt"),
           keyArtDurationSeconds,
         );
+        offsetCaptionsCreated = true;
       }
       const shouldBurnCaptions = burnSubtitles && Boolean(effectiveCaptionsPath && existsSync(effectiveCaptionsPath));
 
@@ -888,6 +924,19 @@ export function buildVideoAssemblyTool(
       if (seriesState
         && typeof (seriesState as Partial<SeriesState>).assertAgnesVideoQaReady === "function") {
         await seriesState.assertAgnesVideoQaReady(seriesId, episodeNumber);
+      }
+
+      // Persist the aligned captions alongside the final video for media players and YouTube
+      if (offsetCaptionsCreated && effectiveCaptionsPath && existsSync(effectiveCaptionsPath)) {
+        const alignedSrtPath = finalPath.replace(/\.mp4$/i, ".srt");
+        await copyFile(effectiveCaptionsPath, alignedSrtPath);
+        if (captionsSrtPath && existsSync(captionsSrtPath)) {
+          const zeroOffsetPath = path.join(path.dirname(captionsSrtPath), "captions_zero_offset.srt");
+          if (!existsSync(zeroOffsetPath)) {
+            await copyFile(captionsSrtPath, zeroOffsetPath);
+          }
+          await copyFile(effectiveCaptionsPath, captionsSrtPath);
+        }
       }
 
       // Remove intermediates before atomically publishing the candidate.

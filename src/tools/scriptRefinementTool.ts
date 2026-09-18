@@ -22,6 +22,7 @@ import {
   MAX_SCENE_MAIN_CHARACTER_COUNT,
   ProductionScriptContractError,
   inspectProductionScript,
+  supportingEntityName,
 } from "../services/productionScriptContract.js";
 import {
   buildCompletedSceneBeatLedger,
@@ -132,22 +133,22 @@ type EpisodeScriptPendingChunkRow = {
 
 type PromoteEpisodeScriptDraftResult =
   | {
-      status: "promoted";
-      episodeId: number;
-      sourceDraft: { revision: number; contentDigest: string };
-    }
+    status: "promoted";
+    episodeId: number;
+    sourceDraft: { revision: number; contentDigest: string };
+  }
   | {
-      status: "stale";
-      episodeId: number;
-      expectedDraft: { revision: number; contentDigest: string };
-      currentDraft: { revision: number; contentDigest: string } | null;
-    }
+    status: "stale";
+    episodeId: number;
+    expectedDraft: { revision: number; contentDigest: string };
+    currentDraft: { revision: number; contentDigest: string } | null;
+  }
   | {
-      status: "blocked";
-      episodeId: number;
-      sourceDraft: { revision: number; contentDigest: string };
-      reason: "agnes_started" | "episode_completed";
-    };
+    status: "blocked";
+    episodeId: number;
+    sourceDraft: { revision: number; contentDigest: string };
+    reason: "agnes_started" | "episode_completed";
+  };
 
 /** Structural boundary implemented by SeriesState and small test fakes. */
 type ScriptDraftPersistence = {
@@ -373,7 +374,7 @@ const sceneCharacterVisualSchema = z.object({
   visualForm: z.enum(["real_creature", "humanoid", "anthropomorphic_creature", "object_character", "fantasy_creature"]),
   speciesOrType: z.string().optional(),
   humanoidAllowed: z.boolean().optional(),
-  });
+});
 
 const draftSceneSchema = z.object({
   sceneNumber: z.number().optional(),
@@ -476,9 +477,9 @@ const completeChunkSceneSchema = z.object({
       "characterNames must contain unique exact roster names.",
     )
     .describe(
-    "Only main characters actually visible in this shot, using exact stored names and no descriptors. " +
-    "Together with supportingEntities, this is the complete exact on-screen cast: count every visible individual once and omit every off-screen individual.",
-  ),
+      "Only main characters actually visible in this shot, using exact stored names and no descriptors. " +
+      "Together with supportingEntities, this is the complete exact on-screen cast: count every visible individual once and omit every off-screen individual.",
+    ),
   characterVisuals: z.array(chunkCharacterVisualSchema).max(MAX_SCENE_MAIN_CHARACTER_COUNT).optional().describe(
     "One compact identity record per characterName in the same order; do not duplicate wardrobe or scene prose here.",
   ),
@@ -486,10 +487,18 @@ const completeChunkSceneSchema = z.object({
     boundedRequiredText("supportingEntities entry", 1_000).describe(
       "TARGET: at most 220 characters per stable name + locked visual descriptor; include only visible entities and reuse unchanged text verbatim.",
     ),
-  ).max(12).default([]).describe(
-    "Each entry is exactly one named visible individual, never a group/herd/flock/cluster. " +
-    "Together with characterNames, this is the complete exact on-screen cast; do not leave any visible figure uncounted.",
-  ),
+  ).max(12).default([])
+    .refine(
+      (entities) => {
+        const names = entities.map((e, idx) => supportingEntityName(e, idx).toLocaleLowerCase());
+        return new Set(names).size === names.length;
+      },
+      "supportingEntities must contain unique guest figure names; never duplicate guest names or reuse generic prefixes like 'Stable:'.",
+    )
+    .describe(
+      "Each entry is exactly one named visible individual, never a group/herd/flock/cluster. " +
+      "Together with characterNames, this is the complete exact on-screen cast; do not leave any visible figure uncounted.",
+    ),
   continuityAnchors: z.array(
     boundedRequiredText("continuityAnchors entry", 1_000).describe(
       "TARGET: at most 220 characters per concrete continuing prop/layout/state anchor; reuse unchanged text verbatim.",
@@ -516,7 +525,7 @@ const authoringPlanBeatSchema = z.object({
   endScene: z.number().int().min(1).max(DEFAULT_PRODUCTION_MAX_SCENES)
     .default(DEFAULT_PRODUCTION_MAX_SCENES),
   storyBeat: z.string().max(900).default("").describe(
-    "TARGET: at most 220 characters describing the range's new causal story movement; each range must advance rather than replay an earlier clue/action.",
+    "TARGET: at most 220 characters describing the range's new causal story movement for the single continuous quest; each range must advance rather than replay an earlier clue/action or start a new quest.",
   ),
   setting: z.string().max(600).default("").describe(
     "TARGET: at most 140 characters naming the range's location/setup.",
@@ -528,13 +537,13 @@ const authoringPlanBeatSchema = z.object({
 
 export const episodeScriptChunkAuthoringPlanSchema = z.object({
   storyArc: z.string().max(2_000).default("").describe(
-    "TARGET: 500-900 characters covering the complete causal arc without scene-by-scene repetition.",
+    "TARGET: 500-900 characters covering ONE single continuous preschool adventure from scenes 1 to 24 matching the premise. Never combine multiple adventures.",
   ),
   educationalIdea: z.string().max(600).default("").describe(
     "TARGET: at most 240 characters for the one integrated learning idea.",
   ),
   endingInsight: z.string().max(600).default("").describe(
-    "TARGET: at most 240 characters for the final preschool takeaway.",
+    "TARGET: at most 240 characters for the final takeaway or insight for ages 4-8.",
   ),
   beats: z.array(authoringPlanBeatSchema).max(12).default([]),
   supportingEntityBible: z.array(
@@ -837,8 +846,8 @@ export function getEpisodeScriptChunkAuthoringProgress(
   const activePlanBeat = nextSceneNumber === null
     ? null
     : envelope.authoring.plan.beats.find((beat) =>
-        beat.startScene <= nextSceneNumber && beat.endScene >= nextSceneNumber
-      ) ?? null;
+      beat.startScene <= nextSceneNumber && beat.endScene >= nextSceneNumber
+    ) ?? null;
   return {
     protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
     status: remainingSceneCount === 0 ? "complete" : "in_progress",
@@ -883,11 +892,11 @@ function normalizeSceneNumbers(script: EpisodeScript): EpisodeScript {
           : [],
       characterVisuals: Array.isArray(scene.characterVisuals)
         ? scene.characterVisuals.map((item) => ({
-            name: item.name.trim(),
-            visualForm: item.visualForm,
-            speciesOrType: item.speciesOrType?.trim() || undefined,
-            humanoidAllowed: item.humanoidAllowed,
-          })).filter((item) => item.name)
+          name: item.name.trim(),
+          visualForm: item.visualForm,
+          speciesOrType: item.speciesOrType?.trim() || undefined,
+          humanoidAllowed: item.humanoidAllowed,
+        })).filter((item) => item.name)
         : undefined,
       supportingEntities: Array.isArray(scene.supportingEntities) ? scene.supportingEntities : undefined,
       continuityAnchors: Array.isArray(scene.continuityAnchors) ? scene.continuityAnchors : undefined,
@@ -1084,6 +1093,19 @@ export function validateEpisodeScript(
       issues.push(`${label}: ${issue.message}`);
     });
 
+    const prematureClosingMatch = narrationText.match(
+      /\b(?:until\s+(?:our\s+)?next\s+(?:adventure|mission|rescue|time)|see\s+you\s+(?:on\s+our\s+next\s+adventure|next\s+time)|adventure\s+(?:was|is)\s+(?:complete|over|finished)|our\s+next\s+adventure\s+awaits|that\s+concludes\s+our\s+adventure|our\s+work\s+here\s+is\s+done)\b/iu,
+    );
+    const isPrematureScene = options.deferAggregateMinimums
+      ? scene.sceneNumber < 21
+      : scene.sceneNumber <= Math.max(1, maxScenes - 3);
+    if (isPrematureScene && prematureClosingMatch) {
+      issues.push(
+        `${label} contains premature closing dialogue or sign-off ("${prematureClosingMatch[0]}"). ` +
+        "The single continuous quest must not conclude early; save resolutions and sign-offs for the final scenes.",
+      );
+    }
+
     if (!Array.isArray(scene.characterNames)) {
       issues.push(`${label} is missing characterNames.`);
     } else {
@@ -1112,6 +1134,20 @@ export function validateEpisodeScript(
     }
 
     validateOptionalStringArray(scene.supportingEntities, "supportingEntities", label);
+    if (Array.isArray(scene.supportingEntities)) {
+      const suppNames = scene.supportingEntities
+        .filter((e): e is string => typeof e === "string" && Boolean(e.trim()))
+        .map(supportingEntityName);
+      const charNames = Array.isArray(scene.characterNames)
+        ? scene.characterNames.filter((n): n is string => typeof n === "string" && Boolean(n.trim()))
+        : [];
+      const allNames = [...charNames, ...suppNames];
+      if (new Set(allNames.map((n) => n.toLocaleLowerCase())).size !== allNames.length) {
+        issues.push(
+          `${label} visible cast must contain each main or supporting figure exactly once.`,
+        );
+      }
+    }
     validateOptionalStringArray(scene.continuityAnchors, "continuityAnchors", label);
   });
 
@@ -1158,7 +1194,7 @@ async function rewriteScript(params: {
     `TOTAL RUNTIME & WORD COUNT DISCIPLINE (CRITICAL): The episode must reach at least ${params.targetRuntimeMinutes} minutes and ${requiredWords} total spoken words across ${params.minScenes}-${params.maxScenes} concise scenes. Add meaningful consecutive visual beats; never lengthen an individual narration beyond the per-scene limits. ` +
     "SPLIT-METADATA PRESERVATION (CRITICAL): When splitting one source scene into consecutive child scenes, preserve its environmentDescription verbatim while the location is unchanged. Preserve each visible character's exact characterVisuals entry and keep it aligned with characterNames. Copy a supportingEntities descriptor only into children where that one individual remains visible. Copy only non-living continuityAnchors through children while that prop/layout/environment state remains visible; never use an anchor for a character, creature, living object, pose, or action. Divide action and sceneDetails into one clear visible sub-action and emotion per child. Preserve cameraAngle and lighting unless the new visible beat deliberately requires a change. " +
     "Preserve the story, characters, tone, and continuity. Expand by splitting overloaded scenes rather than inventing filler. " +
-    "Use full character names. Keep narration warm, vivid, and suitable for ages 2-5. " +
+    "Use full character names. Keep narration warm, vivid, and suitable for ages 4-8. " +
     "CRITICAL CAST DISCIPLINE: characterNames must contain every main series character actually visible in that shot exactly once and no off-screen roster member. supportingEntities must contain every visible secondary figure exactly once. The combined arrays are the scene's authoritative exact figure count; do not impose an arbitrary cast-size ceiling and do not invent unlisted background figures. Do NOT invent new character names in characterNames. Every visible secondary creature must be placed in supportingEntities (e.g. ['Baby duck: tiny yellow duckling with orange bill']), never merely implied in visual prose. Each supporting entry is exactly one individual, never a family, pair, herd, flock, group, crowd, or cluster. Keep environmentDescription free of people, animals, creatures, living objects, and other background figures. " +
     "VISUAL NAME DISCIPLINE: In action and sceneDetails, name each visible individual by its exact stable name. Do not use collective or generic aliases such as 'the children', 'the friends', 'everyone', 'the boys', 'the backpack', 'the bag', or 'the baby dinosaur'. " +
     "WARDROBE & ACCESSORY CONTINUITY (CRITICAL): Characters must strictly maintain their canonical appearance and wardrobe across all scenes. Never describe characters acquiring, wearing, or carrying unapproved clothing, hats, sunhats, dresses, shirts, shoes, bags, satchels, or glasses in narrationText, action, or sceneDetails unless explicitly defined in their canonical character description or introduced as an explicit episodic plot prop. " +
@@ -1175,10 +1211,10 @@ async function rewriteScript(params: {
 
   const canonicalContextText = params.canonicalContext
     ?
-      `Canonical episode title (preserve exactly): ${JSON.stringify(params.canonicalContext.episodeTitle)}\n` +
-      `Canonical episode premise and story objective (preserve): ${JSON.stringify(params.canonicalContext.episodePremise)}\n` +
-      `Canonical character appearance bible (preserve these identities and visual details): ${JSON.stringify(params.canonicalContext.characters)}\n` +
-      `Established series environment bible (reuse exact relevant setting details and do not flatten scene-specific action): ${JSON.stringify(params.canonicalContext.environments)}\n`
+    `Canonical episode title (preserve exactly): ${JSON.stringify(params.canonicalContext.episodeTitle)}\n` +
+    `Canonical episode premise and story objective (preserve): ${JSON.stringify(params.canonicalContext.episodePremise)}\n` +
+    `Canonical character appearance bible (preserve these identities and visual details): ${JSON.stringify(params.canonicalContext.characters)}\n` +
+    `Established series environment bible (reuse exact relevant setting details and do not flatten scene-specific action): ${JSON.stringify(params.canonicalContext.environments)}\n`
     : "";
 
   const baseUserText =
@@ -1327,7 +1363,7 @@ function validateRefinementCandidate(params: {
   };
 }
 
-function validateProductionRefinementCandidate(params: {
+export function validateProductionRefinementCandidate(params: {
   sourceScript: EpisodeScript;
   candidate: EpisodeScript;
   mainCharacterNames: readonly string[];
@@ -1499,14 +1535,14 @@ function compactValidationEnvelope(
     || hasCompleteMeasuredTotal
   )
     ? {
-        durationExceededScenes: boundedDurationEvidence,
-        ...(hasCompleteMeasuredTotal
-          ? {
-              measuredTotalNarrationSeconds: repairEvidence.measuredTotalNarrationSeconds,
-              measuredNarrationSceneCount: repairEvidence.measuredNarrationSceneCount,
-            }
-          : {}),
-      }
+      durationExceededScenes: boundedDurationEvidence,
+      ...(hasCompleteMeasuredTotal
+        ? {
+          measuredTotalNarrationSeconds: repairEvidence.measuredTotalNarrationSeconds,
+          measuredNarrationSceneCount: repairEvidence.measuredNarrationSceneCount,
+        }
+        : {}),
+    }
     : undefined;
   return {
     pass: validation.pass,
@@ -2171,9 +2207,9 @@ function staleDraftReceipt(params: {
 }): string {
   const authoringProgress = params.currentDraft
     ? getEpisodeScriptChunkAuthoringProgress(
-        params.currentDraft.scriptJson,
-        params.currentDraft.validation,
-      )
+      params.currentDraft.scriptJson,
+      params.currentDraft.validation,
+    )
     : null;
   return JSON.stringify({
     status: params.currentDraft ? "stale_draft_revision" : "draft_missing",
@@ -2189,8 +2225,8 @@ function staleDraftReceipt(params: {
     nextAction: authoringProgress?.status === "in_progress"
       ? "Stop this invocation. On a later fresh run obey resumeAction=script_authoring and append only the exact next range from the durable authoring progress; do not call refinement yet."
       : params.currentDraft
-      ? `Stop this invocation. On a later fresh run call refine_episode_script with episodeId=${params.episodeId} and draftRevision=${params.currentDraft.revision}; do not resend scriptJson.`
-      : `Stop this invocation. On a later fresh run begin bounded authoring with write_episode_script_chunk operation=start for episodeId=${params.episodeId}.`,
+        ? `Stop this invocation. On a later fresh run call refine_episode_script with episodeId=${params.episodeId} and draftRevision=${params.currentDraft.revision}; do not resend scriptJson.`
+        : `Stop this invocation. On a later fresh run begin bounded authoring with write_episode_script_chunk operation=start for episodeId=${params.episodeId}.`,
   });
 }
 
@@ -2323,9 +2359,9 @@ function compactChunkInputFailure(params: CompactChunkInputFailureParams): strin
     ...(params.correctionRetryNumber === undefined
       ? {}
       : {
-          correctionRetryNumber: params.correctionRetryNumber,
-          correctionRetryLimit: params.correctionRetryLimit,
-        }),
+        correctionRetryNumber: params.correctionRetryNumber,
+        correctionRetryLimit: params.correctionRetryLimit,
+      }),
     validation: {
       pass: false,
       issues,
@@ -2335,9 +2371,9 @@ function compactChunkInputFailure(params: CompactChunkInputFailureParams): strin
     },
     nextAction: params.retryThisInvocation
       ? params.retryNextAction
-        ?? "Immediately call write_episode_script_chunk again with the same operation and correct only the listed input fields."
+      ?? "Immediately call write_episode_script_chunk again with the same operation and correct only the listed input fields."
       : params.nextAction
-        ?? "Start a fresh run, reload the durable authoring progress, and send only the exact requested scene range.",
+      ?? "Start a fresh run, reload the durable authoring progress, and send only the exact requested scene range.",
   });
 }
 
@@ -2629,10 +2665,10 @@ function staleScriptChunkReceipt(params: {
       : { requestedDraftRevision: params.requestedRevision }),
     ...(params.currentDraft
       ? {
-          draftRevision: params.currentDraft.revision,
-          contentDigest: params.currentDraft.contentDigest,
-          authoringProgress: chunkProgressReceipt(params.currentDraft),
-        }
+        draftRevision: params.currentDraft.revision,
+        contentDigest: params.currentDraft.contentDigest,
+        authoringProgress: chunkProgressReceipt(params.currentDraft),
+      }
       : {}),
     nextAction: "Start a fresh run and reload the authoritative draft revision with get_next_episode.",
   });
@@ -3220,14 +3256,14 @@ export function buildEpisodeScriptChunkTool(
       }
       const rangeIssues = pendingScenes && observedPendingChunk
         ? pendingRepairSubmissionIssues({
-            pending: observedPendingChunk,
-            submittedScenes,
-          })
+          pending: observedPendingChunk,
+          submittedScenes,
+        })
         : chunkRangeIssues({
-            completed: baseEnvelope.scenes.length,
-            target: targetSceneCount,
-            scenes: submittedScenes,
-          });
+          completed: baseEnvelope.scenes.length,
+          target: targetSceneCount,
+          scenes: submittedScenes,
+        });
       if (rangeIssues.length > 0) {
         return recoverableInputFailure({
           episodeId: input.episodeId,
@@ -3242,11 +3278,11 @@ export function buildEpisodeScriptChunkTool(
 
       const correctionCandidateScenes = pendingScenes && pendingIssueSummary
         ? mergePendingChunkCorrection({
-            pendingScenes,
-            submittedScenes,
-            pendingIssues: pendingIssueSummary,
-            pendingIssueTargets,
-          })
+          pendingScenes,
+          submittedScenes,
+          pendingIssues: pendingIssueSummary,
+          pendingIssueTargets,
+        })
         : submittedScenes.map((scene) => structuredClone(scene));
       const canonicalizedChunk = canonicalizeChunkScenes({
         acceptedScenes: baseEnvelope.scenes as EpisodeScene[],
@@ -3321,19 +3357,19 @@ export function buildEpisodeScriptChunkTool(
       const isComplete = candidate.scenes.length === targetSceneCount;
       const validation = isComplete
         ? validateProductionRefinementCandidate({
-            sourceScript: candidate,
-            candidate,
-            mainCharacterNames,
-            durationExceededScenes: [],
-          })
+          sourceScript: candidate,
+          candidate,
+          mainCharacterNames,
+          durationExceededScenes: [],
+        })
         : validateEpisodeScriptChunkPrefix({
-            script: candidate,
-            targetSceneCount,
-            mainCharacterNames,
-            authoringPlan: baseEnvelope.authoring.plan,
-            minimumReplacementSpokenWords:
-              baseEnvelope.authoring.minimumReplacementSpokenWords,
-          });
+          script: candidate,
+          targetSceneCount,
+          mainCharacterNames,
+          authoringPlan: baseEnvelope.authoring.plan,
+          minimumReplacementSpokenWords:
+            baseEnvelope.authoring.minimumReplacementSpokenWords,
+        });
 
       if (!validation.pass) {
         const validationReceipt = structuredChunkValidationEnvelope(candidate, validation);
@@ -3417,11 +3453,11 @@ export function buildEpisodeScriptChunkTool(
               totalCorrectionAttempts,
               ...(replaceablePendingChunk
                 ? {
-                    expectedPendingCandidateDigest: replaceablePendingChunk.candidateDigest,
-                    expectedPendingIssueFingerprint: replaceablePendingChunk.issueFingerprint,
-                    expectedPendingTotalCorrectionAttempts:
-                      replaceablePendingChunk.totalCorrectionAttempts,
-                  }
+                  expectedPendingCandidateDigest: replaceablePendingChunk.candidateDigest,
+                  expectedPendingIssueFingerprint: replaceablePendingChunk.issueFingerprint,
+                  expectedPendingTotalCorrectionAttempts:
+                    replaceablePendingChunk.totalCorrectionAttempts,
+                }
                 : {}),
             });
             observedPendingChunk = storedPendingChunk;
@@ -3466,9 +3502,9 @@ export function buildEpisodeScriptChunkTool(
           : 0;
         const retryThisInvocation = Boolean(durablePrefix)
           && correctionState.consecutiveNoProgressAttempts
-            <= EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+          <= EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
           && correctionState.correctionAttemptNumber
-            <= EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION;
+          <= EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION;
         const authoringProgress = durablePrefix
           ? retryThisInvocation
             ? immediateChunkCorrectionProgress(durablePrefix)
@@ -3479,8 +3515,8 @@ export function buildEpisodeScriptChunkTool(
           : null;
         const pendingRepairSceneInstruction = pendingRepair
           ? `only complete scenes ${pendingRepair.requiredSceneNumbers.join(", ")} copied from ` +
-            "pendingRepair.candidateScenes; change only the per-scene fields in " +
-            "pendingRepair.editableFields"
+          "pendingRepair.candidateScenes; change only the per-scene fields in " +
+          "pendingRepair.editableFields"
           : `exactly scenes ${expectedRangeStart}-${pendingSceneEnd}`;
         let nextAction: string;
         if (retryThisInvocation) {
@@ -3525,35 +3561,35 @@ export function buildEpisodeScriptChunkTool(
           episodeId: input.episodeId,
           ...(durablePrefix
             ? {
-                draftRevision: durablePrefix.revision,
-                contentDigest: durablePrefix.contentDigest,
-                authoringProgress,
-                correctionRetryNumber,
-                correctionRetryLimit:
-                  EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
-                consecutiveNoProgressAttempts:
-                  correctionState.consecutiveNoProgressAttempts,
-                consecutiveNoProgressLimit:
-                  EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
-                progressDirection: correctionState.progressDirection,
-                totalCorrectionAttempts: storedPendingChunk?.totalCorrectionAttempts
-                  ?? correctionState.correctionAttemptNumber,
-                pendingCandidatePreserved: Boolean(storedPendingChunk),
-                ...(pendingRepair === null ? {} : { pendingRepair }),
-              }
+              draftRevision: durablePrefix.revision,
+              contentDigest: durablePrefix.contentDigest,
+              authoringProgress,
+              correctionRetryNumber,
+              correctionRetryLimit:
+                EPISODE_SCRIPT_CHUNK_MAX_TOTAL_CORRECTIONS_PER_INVOCATION,
+              consecutiveNoProgressAttempts:
+                correctionState.consecutiveNoProgressAttempts,
+              consecutiveNoProgressLimit:
+                EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+              progressDirection: correctionState.progressDirection,
+              totalCorrectionAttempts: storedPendingChunk?.totalCorrectionAttempts
+                ?? correctionState.correctionAttemptNumber,
+              pendingCandidatePreserved: Boolean(storedPendingChunk),
+              ...(pendingRepair === null ? {} : { pendingRepair }),
+            }
             : input.operation === "restart" && currentDraft
               ? {
-                  draftRevision: currentDraft.revision,
-                  contentDigest: currentDraft.contentDigest,
-                  restartPlan: {
-                    targetSceneCount,
-                    minimumReplacementSpokenWords:
-                      baseEnvelope.authoring.minimumReplacementSpokenWords,
-                    authoringPlan: input.authoringPlan,
-                    nextSceneNumber: expectedRangeStart,
-                    nextSceneEnd: expectedRangeEnd,
-                  },
-                }
+                draftRevision: currentDraft.revision,
+                contentDigest: currentDraft.contentDigest,
+                restartPlan: {
+                  targetSceneCount,
+                  minimumReplacementSpokenWords:
+                    baseEnvelope.authoring.minimumReplacementSpokenWords,
+                  authoringPlan: input.authoringPlan,
+                  nextSceneNumber: expectedRangeStart,
+                  nextSceneEnd: expectedRangeEnd,
+                },
+              }
               : {}),
           validation: publicValidationReceipt(validationReceipt),
           castCanonicalization: compactCastCanonicalizationAudit(
@@ -3566,9 +3602,9 @@ export function buildEpisodeScriptChunkTool(
       const valueToPersist: EpisodeScript | EpisodeScriptChunkDraftEnvelope = isComplete
         ? candidate
         : {
-            ...baseEnvelope,
-            scenes: candidate.scenes,
-          };
+          ...baseEnvelope,
+          scenes: candidate.scenes,
+        };
       const validationToPersist = compactProductionValidationEnvelope(candidate, validation);
       let written: EpisodeScriptDraftRow;
       let created = false;
@@ -3674,13 +3710,22 @@ export function buildEpisodeScriptChunkTool(
           canonicalizedChunk.audits,
         ),
         authoringProgress,
-        nextAction: authoringProgress
-          ? `Call write_episode_script_chunk once with operation=append, episodeId=${input.episodeId}, ` +
+        nextAction: (() => {
+          if (!authoringProgress) {
+            return "Start a fresh run and reload durable authoring progress.";
+          }
+          const nextSceneEnd = authoringProgress.nextSceneEnd;
+          const pacingGuidance = nextSceneEnd !== null
+            ? (nextSceneEnd <= 16
+              ? " Continue the single episode quest without concluding early; do NOT solve the quest or conclude in scenes 9-16."
+              : " Bring the SAME single quest from scene 1 to its cooperative retrieval climax (scenes 17-20) and final celebration (scenes 21-24). NEVER start a second adventure or new problem.")
+            : "";
+          return `Call write_episode_script_chunk once with operation=append, episodeId=${input.episodeId}, ` +
             `expectedDraftRevision=${written.revision}, starting at scene ` +
             `${authoringProgress.nextSceneNumber} and continuing through up to scene ` +
-            `${authoringProgress.nextSceneEnd}; target the complete range. ` +
-            "Omit targetSceneCount and authoringPlan."
-          : "Start a fresh run and reload durable authoring progress.",
+            `${authoringProgress.nextSceneEnd}; target the complete range.${pacingGuidance} ` +
+            "Omit targetSceneCount and authoringPlan.";
+        })(),
       });
     },
   });
@@ -3822,10 +3867,10 @@ export function buildScriptDraftTool(seriesState: ScriptDraftPersistence): Dynam
       const status = replacedInvalidDraft
         ? "draft_replaced"
         : staged.created
-        ? "draft_staged"
-        : staged.matches
-          ? "draft_already_staged"
-          : "draft_conflict";
+          ? "draft_staged"
+          : staged.matches
+            ? "draft_already_staged"
+            : "draft_conflict";
       const stagedScript = parseDraftScriptInput(staged.draft.scriptJson);
 
       return JSON.stringify({
@@ -4200,9 +4245,9 @@ function buildDeterministicProductionScriptRefinementTool(
               ...(effectiveMeasuredTotal === undefined
                 ? {}
                 : {
-                    measuredTotalNarrationSeconds: effectiveMeasuredTotal,
-                    measuredNarrationSceneCount: effectiveMeasuredSceneCount,
-                  }),
+                  measuredTotalNarrationSeconds: effectiveMeasuredTotal,
+                  measuredNarrationSceneCount: effectiveMeasuredSceneCount,
+                }),
             },
           ),
         });
@@ -4266,9 +4311,9 @@ function buildDeterministicProductionScriptRefinementTool(
               narrationChanged || effectiveMeasuredTotal === undefined
                 ? {}
                 : {
-                    measuredTotalNarrationSeconds: effectiveMeasuredTotal,
-                    measuredNarrationSceneCount: effectiveMeasuredSceneCount,
-                  }
+                  measuredTotalNarrationSeconds: effectiveMeasuredTotal,
+                  measuredNarrationSceneCount: effectiveMeasuredSceneCount,
+                }
             ),
           },
         );
@@ -4365,9 +4410,9 @@ function buildDeterministicProductionScriptRefinementTool(
           episodeId,
           ...(promotion.currentDraft
             ? {
-                draftRevision: promotion.currentDraft.revision,
-                contentDigest: promotion.currentDraft.contentDigest,
-              }
+              draftRevision: promotion.currentDraft.revision,
+              contentDigest: promotion.currentDraft.contentDigest,
+            }
             : {}),
           nextAction: promotion.currentDraft
             ? `Retry on a later run with episodeId=${episodeId} and draftRevision=${promotion.currentDraft.revision}.`
@@ -4444,8 +4489,8 @@ export function buildLegacyStandaloneScriptRefinementFixtureTool(): DynamicStruc
       maxScenes: z.number().int().positive().default(DEFAULT_PRODUCTION_MAX_SCENES),
       targetRuntimeMinutes: z.number().positive().default(5),
       mainCharacterNames: mainCharacterNamesSchema.optional().describe(
-          "The exact fixed main-character names returned by get_or_create_series. Required for production refinement.",
-        ),
+        "The exact fixed main-character names returned by get_or_create_series. Required for production refinement.",
+      ),
     }),
     func: async ({ episodeId, scriptJson, minScenes, maxScenes, targetRuntimeMinutes, mainCharacterNames }) => {
       const normalizedInput = decodeJsonInput(scriptJson) as EpisodeScript;

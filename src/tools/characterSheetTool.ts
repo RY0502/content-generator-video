@@ -126,7 +126,7 @@ export function buildEnsureSeriesCharacterSheetsTool(
         reusedCount: result.reusedCount,
         characters: result.characters.map(({ name, status }) => ({ name, status })),
         nextAction:
-          "Continue the exact resumeAction returned by get_next_episode. For first-time authoring, the next assistant action must be write_episode_script_chunk(operation=start): put the complete 40-60-scene plan and only opening scenes 1-8 in tool arguments; emit no visible planning, manual counting, draft, JSON, or preamble.",
+          "Continue the exact resumeAction returned by get_next_episode. For first-time authoring, the next assistant action must be write_episode_script_chunk(operation=start): put the complete 20-24-scene plan and only opening scenes 1-8 in tool arguments; emit no visible planning, manual counting, draft, JSON, or preamble.",
       });
     },
   });
