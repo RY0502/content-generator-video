@@ -3833,11 +3833,12 @@ describe("scriptRefinementTool", () => {
     expect(nonRoster.issues.join(" ")).toContain("non-roster names: Guest");
   });
 
-  it("rejects premature closing dialogue before the final scenes", () => {
+  it("rejects premature quest resolution or homecoming before the final scenes", () => {
     const roster = ["Mia"];
     const script = validFiveMinuteScript(24);
-    // Introduce premature closing in scene 16
-    script.scenes[15]!.narrationText = "Sunny ends with a warm wish 'Until our next adventure!'";
+    // Scene 16 tries to declare quest complete and lead friends home for rest
+    script.scenes[15]!.narrationText =
+      "Pip declares the day's quest complete and leads friends home for a well-earned rest.";
 
     const result = validateEpisodeScript(
       script,
@@ -3849,6 +3850,26 @@ describe("scriptRefinementTool", () => {
     );
 
     expect(result.pass).toBe(false);
-    expect(result.issues.join(" ")).toContain("Scene 16 contains premature closing dialogue or sign-off");
+    expect(result.issues.join(" ")).toContain("Scene 16 contains premature quest resolution");
+  });
+
+  it("rejects 3 consecutive quote monologue scenes without visual action", () => {
+    const roster = ["Mia"];
+    const script = validFiveMinuteScript(24);
+    script.scenes[20]!.narrationText = "Pip says helping others makes our whole community stronger and kinder.";
+    script.scenes[21]!.narrationText = "Sunny adds even small helpers can make a big difference in many lives.";
+    script.scenes[22]!.narrationText = "Pebble notes that teamwork turns even tiny problems into big successes.";
+
+    const result = validateEpisodeScript(
+      script,
+      DEFAULT_PRODUCTION_MIN_SCENES,
+      DEFAULT_PRODUCTION_MAX_SCENES,
+      5,
+      roster,
+      { productionSceneContract: true, deferAggregateMinimums: false },
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("Scene 23 is the 3rd consecutive scene consisting of a character quote attribution");
   });
 });

@@ -29,11 +29,11 @@ Generate or resume exactly one episode. State, local files, and provider receipt
 ### Story and scene quality
 
 Author one coherent 20-24 scene preschool adventure (~1.5 minutes total runtime) for kids aged 4-8. Scene 1 establishes place, characters, and a single main quest matching the premise; later scenes advance cause and effect through clever problem-solving, humor, teamwork, one naturally integrated learning idea, an exciting climax, a satisfying resolution, and an ending insight.
-CRITICAL — ONE STORY & ONE PROBLEM: Solve only that single problem from start to end; never combine multiple mini-stories or solve 2-3 separate problems (e.g. never solve problem A in 1-8, B in 9-16, C in 17-24). Never resolve early:
+CRITICAL — ONE STORY & ONE PROBLEM: Solve only that single problem from start to end; never combine multiple mini-stories, restart a quest, or solve 2-3 separate problems. Never resolve early:
 - Chunk 1 (Scenes 1-8): Introduce the single quest, friends, plan, and initial search steps. Meet one small obstacle together. Do not find the solution here.
-- Chunk 2 (Scenes 9-16): Search a new area; overcome a physical obstacle using character skills; spot a key clue or the trapped goal. Do not resolve yet.
-- Chunk 3 (Scenes 17-24): Cooperative retrieval climax (17-20); triumphant resolution, joyful celebration, and warm ending takeaway (21-24).
-Advance plot strictly forward. Never loop, re-enter cleared spots, or repeat beats. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout uniform/boots; avoid wild-bird actions contradicting clothes; focus on 1-3 active figures). Never conclude early or use closing sign-offs (e.g. 'until our next adventure') before scenes 22-24.
+- Chunk 2 (Scenes 9-16): Search a new area; overcome an obstacle using character skills; spot the trapped goal. Do NOT return the goal, reach home, or declare quest complete in chunk 2.
+- Chunk 3 (Scenes 17-24): Cooperative retrieval climax (17-20); triumphant resolution, joyful celebration, and warm ending takeaway (21-24). Never start a second rescue. Never write consecutive scenes of characters just reciting quotes.
+Advance plot strictly forward. Never loop, re-enter cleared spots, or repeat beats. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout uniform/boots; avoid wild-bird actions contradicting clothes; focus on 1-3 active figures). Never conclude early, declare quest complete, or use closing sign-offs before scenes 22-24.
 
 Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames. Provide supportingEntities and continuityAnchors when needed; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
 

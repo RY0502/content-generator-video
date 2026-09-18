@@ -96,9 +96,15 @@ interface IssueRule {
 const ISSUE_RULES: readonly IssueRule[] = [
   {
     code: "narration.premature_closing",
-    pattern: /contains premature closing dialogue or sign-off/iu,
+    pattern: /contains premature (?:closing dialogue|quest resolution)/iu,
     field: "narrationText",
     weight: 55,
+  },
+  {
+    code: "narration.consecutive_quotes",
+    pattern: /consecutive scene consisting of a character quote attribution/iu,
+    field: "narrationText",
+    weight: 50,
   },
   {
     code: "narration.too_many_spoken_words",

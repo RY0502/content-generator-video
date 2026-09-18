@@ -156,18 +156,44 @@ Failure policy:
 - a persisted accepted receipt is never replaced;
 - retrieval always uses the exact submitting account and key fingerprint.
 
-Do not remove or replace a submitting key while its tasks are still active;
-the provider requires that exact credential for later status retrieval.
+# Walkthrough - Anti-Premature Resolution & Single-Story Architecture
 
-## 6. Verify after queue acknowledgement
+## 1. Summary of Changes
+Implemented robust multi-layer safeguards to permanently eliminate the split-story issue (where a 24-scene video previously packed 2 separate mini-adventures or prematurely finished the quest in Chunk 2 before restarting a second rescue in Chunk 3):
 
-`verify_agnes_scene_videos` can run in the same invocation when submission has
-no pending assets; normally it runs on a later invocation while Agnes renders.
-It first finds missing or safe-pending key-art/scene assets. If any exist, it applies the same
-submission logic once and returns `stopRun: true`.
+### A. Prompt Structure & Character Rules (`src/systemPrompt.ts`)
+- **Strict 3-Act Structure**:
+  - **Chunk 1 (Scenes 1–8)**: Setup, discovery of the single problem/quest, search begins.
+  - **Chunk 2 (Scenes 9–16)**: Rising action, obstacle, complication. The goal is discovered stuck/trapped/guarded, but *cannot* be resolved or taken home.
+  - **Chunk 3 (Scenes 17–24)**: Climax in Scenes 17–20 (the single rescue/solution is executed) followed by resolution, return home, celebration, and takeaway in Scenes 21–24.
+- **Anti-Split Mandate**: Explicitly forbidden to introduce a second problem, secondary quest, or restart another rescue in Chunk 3.
+- **Dynamic Physical Action**: Banned consecutive talking-head quotes; every scene must depict characters performing physical actions in the world.
+- Strict prompt budget maintained (< 8,000 characters; measured at ~7,930 chars).
 
-When both key arts and every scene have accepted receipts, verification retrieves each task once
-and persists `queued`, `in_progress`, `completed`, or `failed`. Provider
+### B. Structural Script Validation (`src/tools/scriptRefinementTool.ts` & `src/services/episodeScriptValidationIssues.ts`)
+- **Deep Premature Resolution Detection**: Extended `PREMATURE_RESOLUTION_PATTERN` to inspect both `narrationText` and `action` for premature quest completion, homecoming, or goal delivery before Scene 21.
+- **Consecutive Quote Guard**: Rejects sequences of 3+ consecutive quote monologues lacking physical action.
+- **Authoring Plan Gate**: Validates the initial authoring plan at `operation="start"` (`authoringPlanPacingIssues`) so the LLM cannot plan early resolution in Chunk 1 or Chunk 2.
+- **Closed Validation Bypass**: Wired `validateEpisodeScript` into `validateProductionRefinementCandidate`, guaranteeing that final candidates undergo full continuity and pacing validation.
+
+---
+
+## 2. Cleanup & Reset Verification
+- **Series 16 Database Cleanup**:
+  - `episodes` table: All 25 episodes in Series 16 verified in `pending` status (`script_json` and `output_path` cleared).
+  - Transient tables wiped: `episode_script_drafts` (0), `episode_script_pending_chunks` (0), `episode_video_outputs` (0), `agnes_scene_generations` (0), `agnes_scene_generation_history` (0), `youtube_upload_receipts` (0).
+  - `getNextEpisode(16)` confirmed to return Episode 1 (`The Lost Ladybug Leaf`, id 201) in `pending` status.
+- **Disk Cleanup**:
+  - `output/series_16/episode_1` and `output/series_16/episode_2` fully deleted from disk.
+
+---
+
+## 3. Test Verification
+- **TypeScript Compilation**: `npx tsc --noEmit` passed with 0 errors.
+- **Script Refinement Suite**: `npx vitest run src/__tests__/scriptRefinementTool.test.ts` (95/95 passing).
+- **Agnes Video Suite**: `npx vitest run src/__tests__/agnesSceneVideoTool.test.ts` (45/45 passing).
+- **System Prompt Character Budget**: `src/__tests__/systemPrompt.test.ts` (3/3 passing).
+
 completion is distinct from local download completion:
 
 ```text

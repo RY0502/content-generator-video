@@ -1093,17 +1093,30 @@ export function validateEpisodeScript(
       issues.push(`${label}: ${issue.message}`);
     });
 
-    const prematureClosingMatch = narrationText.match(
-      /\b(?:until\s+(?:our\s+)?next\s+(?:adventure|mission|rescue|time)|see\s+you\s+(?:on\s+our\s+next\s+adventure|next\s+time)|adventure\s+(?:was|is)\s+(?:complete|over|finished)|our\s+next\s+adventure\s+awaits|that\s+concludes\s+our\s+adventure|our\s+work\s+here\s+is\s+done)\b/iu,
+    const prematureResolutionMatch = `${narrationText} ${scene.action ?? ""}`.match(
+      /\b(?:(?:until\s+(?:our\s+)?next\s+(?:adventure|mission|rescue|time)|see\s+you\s+(?:on\s+our\s+next\s+adventure|next\s+time)|our\s+next\s+adventure\s+awaits|that\s+concludes\s+our\s+adventure)|(?:(?:day'?s\s+|the\s+)?(?:quest|mission|adventure|search)\s+(?:is\s+|was\s+)?(?:complete|completed|finished|over|won|success))|(?:declares?\s+(?:the\s+)?(?:day'?s\s+)?(?:quest|mission|adventure|search)\s+(?:complete|finished|over|won|success))|(?:our\s+work\s+(?:here\s+)?is\s+done)|(?:mission\s+accomplished)|(?:leads?\s+(?:the\s+)?(?:friends|club|team)\s+home)|(?:(?:head|heads|headed|heading|return|returns|returned|returning|walk|walks|walked|walking|march|marches|marched)\s+home)|(?:back\s+home\s+(?:for|to|after))|(?:(?:well-earned|well\s+earned|ready\s+for|time\s+for)\s+(?:a\s+)?rest)|(?:safe\s+return)|(?:safely\s+returned)|(?:back\s+(?:in|at|to)\s+(?:her|his|their)\s+(?:leaf\s+)?home)|(?:reached?\s+(?:her|his|their)\s+(?:leaf\s+)?home\s+safely))\b/iu,
     );
     const isPrematureScene = options.deferAggregateMinimums
       ? scene.sceneNumber < 21
       : scene.sceneNumber <= Math.max(1, maxScenes - 3);
-    if (isPrematureScene && prematureClosingMatch) {
+    if (isPrematureScene && prematureResolutionMatch) {
       issues.push(
-        `${label} contains premature closing dialogue or sign-off ("${prematureClosingMatch[0]}"). ` +
-        "The single continuous quest must not conclude early; save resolutions and sign-offs for the final scenes.",
+        `${label} contains premature quest resolution, homecoming, or completion sign-off ("${prematureResolutionMatch[0]}"). ` +
+        "In a 20-24 scene preschool episode, the quest cannot be completed, the goal cannot be returned home, and friends cannot head home before scenes 21-24. Keep the quest actively in progress through scenes 1-20.",
       );
+    }
+
+    if (index >= 2) {
+      const prev1 = script.scenes[index - 1]?.narrationText ?? "";
+      const prev2 = script.scenes[index - 2]?.narrationText ?? "";
+      const isSpeechAttribution = (text: string): boolean =>
+        /^[A-Z][a-z]+(?:\s+the\s+[A-Z][a-z]+)?\s+(?:says|adds|notes|shares|reminds|tells|replies|explains)\b/iu.test(text.trim());
+      if (isSpeechAttribution(narrationText) && isSpeechAttribution(prev1) && isSpeechAttribution(prev2)) {
+        issues.push(
+          `${label} is the 3rd consecutive scene consisting of a character quote attribution without advancing physical action. ` +
+          "Preschool episodes require active visual storytelling (team high-fives, returning the item, celebratory feast, group walk); at most one final takeaway scene is allowed at the very end.",
+        );
+      }
     }
 
     if (!Array.isArray(scene.characterNames)) {
@@ -1374,6 +1387,18 @@ export function validateProductionRefinementCandidate(params: {
     params.candidate,
     params.mainCharacterNames,
   );
+  const scriptValidation = validateEpisodeScript(
+    params.candidate,
+    DEFAULT_PRODUCTION_MIN_SCENES,
+    DEFAULT_PRODUCTION_MAX_SCENES,
+    5,
+    params.mainCharacterNames,
+    {
+      productionSceneContract: true,
+      deferAggregateMinimums: false,
+      knownSupportingEntityNames: params.knownSupportingEntityNames,
+    },
+  );
   const measuredDurationIssues = durationRepairIssues(
     params.sourceScript,
     params.candidate,
@@ -1381,6 +1406,7 @@ export function validateProductionRefinementCandidate(params: {
   );
   const issues = dedupeEpisodeScriptValidationIssues([
     ...authoritative.issues,
+    ...scriptValidation.issues,
     ...measuredDurationIssues,
   ]).map((issue) => issue.message);
   return { pass: issues.length === 0, issues };
@@ -2293,7 +2319,28 @@ function chunkValuesEqual(left: unknown, right: unknown): boolean {
   return canonicalComparableJson(left) === canonicalComparableJson(right);
 }
 
+function authoringPlanPacingIssues(plan: EpisodeScriptChunkAuthoringPlan | undefined): string[] {
+  if (!plan || !Array.isArray(plan.beats)) return [];
+  const issues: string[] = [];
+  const prematureResolutionPattern =
+    /\b(?:(?:until\s+(?:our\s+)?next\s+(?:adventure|mission|rescue|time)|see\s+you\s+(?:on\s+our\s+next\s+adventure|next\s+time)|our\s+next\s+adventure\s+awaits|that\s+concludes\s+our\s+adventure)|(?:(?:day'?s\s+|the\s+)?(?:quest|mission|adventure|search)\s+(?:is\s+|was\s+)?(?:complete|completed|finished|over|won|success))|(?:declares?\s+(?:the\s+)?(?:day'?s\s+)?(?:quest|mission|adventure|search)\s+(?:complete|finished|over|won|success))|(?:our\s+work\s+(?:here\s+)?is\s+done)|(?:mission\s+accomplished)|(?:leads?\s+(?:the\s+)?(?:friends|club|team)\s+home)|(?:(?:head|heads|headed|heading|return|returns|returned|returning|walk|walks|walked|walking|march|marches|marched)\s+home)|(?:back\s+home\s+(?:for|to|after))|(?:(?:well-earned|well\s+earned|ready\s+for|time\s+for)\s+(?:a\s+)?rest)|(?:safe\s+return)|(?:safely\s+returned)|(?:back\s+(?:in|at|to)\s+(?:her|his|their)\s+(?:leaf\s+)?home)|(?:reached?\s+(?:her|his|their)\s+(?:leaf\s+)?home\s+safely))\b/iu;
+  for (const beat of plan.beats) {
+    if (beat.endScene < 21) {
+      const beatText = `${beat.storyBeat} ${beat.continuityOutcome}`;
+      const match = beatText.match(prematureResolutionPattern);
+      if (match) {
+        issues.push(
+          `authoringPlan beat for scenes ${beat.startScene}-${beat.endScene} plans premature resolution/homecoming ("${match[0]}"). ` +
+          "In a 20-24 scene preschool episode, early beats (scenes 1-16) must describe the search and obstacles; the climax and resolution belong exclusively in the final beat (scenes 17-24).",
+        );
+      }
+    }
+  }
+  return issues;
+}
+
 function scriptChunkOperationIssues(input: EpisodeScriptChunkInput): string[] {
+  const planIssues = input.authoringPlan ? authoringPlanPacingIssues(input.authoringPlan) : [];
   if (input.operation === "start") {
     return [
       ...(input.expectedDraftRevision === undefined
@@ -2305,6 +2352,7 @@ function scriptChunkOperationIssues(input: EpisodeScriptChunkInput): string[] {
       ...(input.authoringPlan === undefined
         ? ["authoringPlan is required for operation=start."]
         : []),
+      ...planIssues,
     ];
   }
   if (input.operation === "append") {
@@ -2324,6 +2372,7 @@ function scriptChunkOperationIssues(input: EpisodeScriptChunkInput): string[] {
     ...(input.authoringPlan === undefined
       ? ["authoringPlan is required for operation=restart."]
       : []),
+    ...planIssues,
   ];
 }
 
