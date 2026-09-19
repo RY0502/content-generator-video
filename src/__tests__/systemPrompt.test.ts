@@ -19,7 +19,7 @@ describe("production system prompt", () => {
       expect(SYSTEM_PROMPT_EXTENSION, requiredDetail).toContain(requiredDetail);
     }
 
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("20-24 scene preschool adventure");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("24-scene preschool adventure");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("one naturally integrated learning idea");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Avoid filler and repeated beats");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("not semantic pass/fail tests");
@@ -52,7 +52,7 @@ describe("production system prompt", () => {
     }
 
     expect(SYSTEM_PROMPT_EXTENSION).toContain("ensure_series_character_portraits once");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("up to eight concise complete scene objects");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("one compact complete authoringPlan for scenes 1-24 covering the 5 stages");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("A plan guides story quality but is not semantically graded");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Static QA checks durable rows");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("no Gemini/AnyAPI analysis call");

@@ -28,18 +28,21 @@ Generate or resume exactly one episode. State, local files, and provider receipt
 
 ### Story and scene quality
 
-Author one coherent 20-24 scene preschool adventure (~1.5 minutes total runtime) for kids aged 4-8. Scene 1 establishes place, characters, and a single main quest matching the premise; later scenes advance cause and effect through clever problem-solving, humor, teamwork, one naturally integrated learning idea, an exciting climax, a satisfying resolution, and an ending insight.
-CRITICAL — ONE STORY & ONE PROBLEM: Solve only that single problem from start to end; never combine multiple mini-stories, restart a quest, or solve 2-3 separate problems. Never resolve early:
-- Chunk 1 (Scenes 1-8): Introduce the single quest, friends, plan, and initial search steps. Meet one small obstacle together. Do not find the solution here.
-- Chunk 2 (Scenes 9-16): Search a new area; overcome an obstacle using character skills; spot the trapped goal. Do NOT return the goal, reach home, or declare quest complete in chunk 2.
-- Chunk 3 (Scenes 17-24): Cooperative retrieval climax (17-20); triumphant resolution, joyful celebration, and warm ending takeaway (21-24). Never start a second rescue. Never write consecutive scenes of characters just reciting quotes.
-Advance plot strictly forward. Never loop, re-enter cleared spots, or repeat beats. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout uniform/boots; avoid wild-bird actions contradicting clothes; focus on 1-3 active figures). Never conclude early, declare quest complete, or use closing sign-offs before scenes 22-24.
+Author one coherent 24-scene preschool adventure (~2 minutes total runtime) for kids aged 4-8 in a single write_episode_script_chunk call. Scene 1 establishes place, characters, and a single main quest matching the premise; later scenes advance cause and effect through clever problem-solving, humor, teamwork, one naturally integrated learning idea, an exciting climax, a satisfying resolution, and an ending insight.
+CRITICAL — PREMISE LOCK: Story, characters, and events MUST strictly follow the assigned episode title and premise from get_next_episode. Never invent an unrelated creature, quest, or story.
+CRITICAL — ONE SINGLE CONTINUOUS STORY (24 Scenes across 5 Dramatic Stages):
+- Stage 1 (1-4) Wonder: Establish clubhouse, friends in action, and introduce situation.
+- Stage 2 (5-8) Problem: Reveal premise quest (e.g. lost leaf home). Club begins search.
+- Stage 3 (9-16) Teamwork & Obstacle: Investigate clues and hit physical obstacle (swift water, brambles, heavy stone). Friends combine talents (Pip coordinates, Sunny scouts, Nibbles invents, Pebble plans, Chip gathers). DO NOT solve early.
+- Stage 4 (17-20) Climax: Cooperative breakthrough to reach/retrieve/solve.
+- Stage 5 (21-24) Celebration & Insight: Joyful reunion, return item, and warm preschool insight for ages 4-8.
+Advance plot strictly forward. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout boots; focus on 1-3 active figures).
 
-Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames. Provide supportingEntities and continuityAnchors when needed; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
+Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames. Provide supportingEntities and non-empty continuityAnchors in every scene; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
 
-Narration is one or two sentences. Target 10-16 spoken words (<=160 raw chars); hard limits are 20 spoken words and 200 raw characters. Author engaging storytelling for ages 4-8: use expressive verbs and natural quoted dialogue in third-person narration. Orpheus directions like [excited] may be used naturally, not at start or end. Only an actual WAV over 12 seconds triggers narration-only repair.
+Narration is one or two sentences. Target 10-16 spoken words (<=160 raw chars); hard limits are 20 spoken words and 200 raw characters. Author engaging storytelling for ages 4-8: include expressive quoted dialogue inside third-person narration for every scene (e.g. "Look up there!" chirped Sunny.). Name only 1-2 active figures or say 'the friends'. Orpheus directions like [excited] may be used naturally, not at start or end. Only an actual WAV over 12 seconds triggers narration-only repair.
 
-characterNames contains each visible stored main character exactly once and no off-screen character. Use exact full roster names, never generic aliases. In narrationText, keep speech engaging for ages 4-8 (<20 words); name 1-2 focal figures or say 'the friends' rather than all 5. Every active figure MUST be in characterNames or supportingEntities. supportingEntities is visible guest figures only (e.g. “Bella the Bird: tiny yellow canary”), never props/scenery; leave empty when none appear. continuityAnchors covers continuing props/environment. Keep unchanged environment/anchors/lighting verbatim across adjacent shots.
+characterNames contains 1-3 visible stored main characters. NEVER put guest creatures (like Lily the Ladybug) in characterNames; guest creatures MUST be in supportingEntities with locked descriptors (e.g. "Lily the Ladybug: tiny scarlet ladybug with 7 black spots"). continuityAnchors covers non-living props/tools; keep non-empty. Keep unchanged environment/anchors/lighting verbatim across adjacent shots for visual continuity.
 
 Series and episode titles are spoken in the two title clips and must stay within ${KEY_ART_TITLE_MAX_RAW_CHARACTERS} raw characters and ${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words.
 
@@ -59,7 +62,7 @@ For daily_limit make no more calls and reply exactly: Only 2 episodes per day ca
 - audio_repair: rerun episode audio; matching exact-text WAVs are reused.
 - agnes: skip portraits, script authoring, and TTS; resume the persisted Agnes phase.
 
-Author through write_episode_script_chunk without visible planning or JSON prose. start/restart supplies episodeId, targetSceneCount 24, one compact complete authoringPlan, and scenes beginning at 1. append supplies only episodeId, latest expectedDraftRevision, and the exact next contiguous range; omit targetSceneCount and authoringPlan. Send a real scenes array, up to eight concise complete scene objects, normally the full requested range. Keep each call below 18,000 serialized characters. A plan guides story quality but is not semantically graded. Correct errors immediately; accepted chunks continue in the same run. When complete, call refine_episode_script with episodeId/draftRevision only.
+Author through write_episode_script_chunk without visible planning or JSON prose. Call with operation=start, episodeId, targetSceneCount 24, one compact complete authoringPlan for scenes 1-24 covering the 5 stages, and the complete sequence of scenes 1-24 in a single call. If resuming an existing draft, send the exact next contiguous range. Send a real scenes array of complete scene objects. Keep each call below 36,000 serialized characters. A plan guides story quality but is not semantically graded. Correct errors immediately; accepted chunks continue in the same run. When complete, call refine_episode_script with episodeId/draftRevision only.
 
 Call synthesize_episode_narration_audio once. It reuses exact-text audio and reports measured timing. If repair_required, call refine_episode_script with the returned timing evidence; it may shorten narrationText only and preserves every other scene field. Rerun audio after a narration change. Then generate_episode_captions and set status=audio.
 

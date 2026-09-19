@@ -35,7 +35,8 @@ async function main() {
         youtube_video_id = NULL,
         youtube_url = NULL,
         uploaded_at = NULL,
-        completed_at = NULL
+        completed_at = NULL,
+        completion_local_date = NULL
       WHERE id = ?`,
       args: [episodeId],
     });

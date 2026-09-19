@@ -214,9 +214,9 @@ export function withNvidiaDeepAgentProfile(model: ProviderModel): ProviderModel 
  */
 export const TARGET_PROVIDER_ORDER = Object.freeze([
   "nvidia",
+  "requesty",
   "openrouter",
   "anyapi",
-  "requesty",
   "huggingface",
 ] as const);
 

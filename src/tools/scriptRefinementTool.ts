@@ -417,13 +417,20 @@ const draftScriptSchema = z.object({
 });
 
 export const EPISODE_SCRIPT_CHUNK_PROTOCOL = "chunked_episode_script_v1" as const;
-const EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER =
+export const EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER =
   "Accepted chunk prefix requires deterministic restart under the current direct-video contract.";
-export const EPISODE_SCRIPT_SCENES_PER_CHUNK = 8;
-export const EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS = 18_000;
-export const EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS = 20_000;
-export const EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS = 24_000;
-export const EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS = 48_000;
+export const EPISODE_SCRIPT_SCENES_PER_CHUNK = Math.max(
+  8,
+  Number.parseInt(process.env.EPISODE_SCRIPT_SCENES_PER_CHUNK ?? "8", 10) || 8,
+);
+export const EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS =
+  Number.parseInt(process.env.EPISODE_SCRIPT_CHUNK_APPEND_TARGET_SERIALIZED_CHARACTERS ?? "18000", 10) || 18_000;
+export const EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS =
+  Number.parseInt(process.env.EPISODE_SCRIPT_CHUNK_START_TARGET_SERIALIZED_CHARACTERS ?? "20000", 10) || 20_000;
+export const EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS =
+  Number.parseInt(process.env.EPISODE_SCRIPT_CHUNK_MAX_SERIALIZED_CHARACTERS ?? "24000", 10) || 24_000;
+export const EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS =
+  Number.parseInt(process.env.EPISODE_SCRIPT_CHUNK_MAX_RAW_TRANSPORT_CHARACTERS ?? "48000", 10) || 48_000;
 export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_CORRECTION_RETRIES = 3;
 export const EPISODE_SCRIPT_CHUNK_MAX_IN_RUN_INPUT_CORRECTIONS = 2;
 export const EPISODE_SCRIPT_CHUNK_MAX_CONSECUTIVE_NO_PROGRESS_RETRIES = 2;
@@ -537,7 +544,7 @@ const authoringPlanBeatSchema = z.object({
 
 export const episodeScriptChunkAuthoringPlanSchema = z.object({
   storyArc: z.string().max(2_000).default("").describe(
-    "TARGET: 500-900 characters covering ONE single continuous preschool adventure from scenes 1 to 24 matching the premise. Never combine multiple adventures.",
+    "TARGET: 500-900 characters covering ONE single continuous preschool adventure from scene 1 to targetSceneCount strictly matching the episode title and premise. Never combine multiple adventures.",
   ),
   educationalIdea: z.string().max(600).default("").describe(
     "TARGET: at most 240 characters for the one integrated learning idea.",
@@ -812,11 +819,11 @@ function boundedDraftValidationIssues(value: unknown): string[] {
 
 /** Recognizes the durable migration state used for a legacy invalid prefix. */
 export function episodeScriptChunkDraftRequiresRestart(value: unknown): boolean {
-  void value;
-  // Prefixes rejected by the retired subjective contract are now revalidated
-  // under the objective scene/provider limits and continue from their durable
-  // range. No automatic full-script restart is required.
-  return false;
+  if (!isRecord(value) || value.pass !== false || !Array.isArray(value.issues)) return false;
+  return value.issues.some((issue) => (
+    typeof issue === "string"
+    && issue.startsWith(EPISODE_SCRIPT_CHUNK_RESTART_REQUIRED_MARKER)
+  ));
 }
 
 /**
@@ -3764,10 +3771,11 @@ export function buildEpisodeScriptChunkTool(
             return "Start a fresh run and reload durable authoring progress.";
           }
           const nextSceneEnd = authoringProgress.nextSceneEnd;
+          const targetCount = targetSceneCount;
           const pacingGuidance = nextSceneEnd !== null
-            ? (nextSceneEnd <= 16
-              ? " Continue the single episode quest without concluding early; do NOT solve the quest or conclude in scenes 9-16."
-              : " Bring the SAME single quest from scene 1 to its cooperative retrieval climax (scenes 17-20) and final celebration (scenes 21-24). NEVER start a second adventure or new problem.")
+            ? (nextSceneEnd < targetCount
+              ? ` Continue the single episode quest without concluding early; do NOT solve the quest or conclude in scenes before ${targetCount}. End this range at a mid-quest obstacle.`
+              : ` Bring the SAME single quest to its cooperative retrieval climax and final celebration in scenes ${authoringProgress.nextSceneNumber}-${targetCount}. Continue directly from scene ${authoringProgress.completedSceneCount}; do NOT restart, re-introduce characters, or invent a new problem.`)
             : "";
           return `Call write_episode_script_chunk once with operation=append, episodeId=${input.episodeId}, ` +
             `expectedDraftRevision=${written.revision}, starting at scene ` +

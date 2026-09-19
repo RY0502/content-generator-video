@@ -5,6 +5,7 @@ import {
   KEY_ART_TITLE_MAX_SPOKEN_WORDS,
   canonicalizeKeyArtTitle,
 } from "../services/keyArtTitleContract.js";
+import { DEFAULT_PRODUCTION_MIN_SCENES } from "../services/narrationContract.js";
 import {
   inspectProductionScriptReadiness,
 } from "../services/productionScriptContract.js";
@@ -601,7 +602,7 @@ export function buildSeriesStateTools(
               pass: false,
               sceneCount: 0,
               nextAction:
-                "After the one roster preflight, immediately call write_episode_script_chunk with operation=start. Put the complete plan for scenes 1-targetSceneCount and only opening scenes 1-8 directly in its tool arguments. Emit no visible planning, manual counting, draft, JSON, or preamble.",
+                `After the one roster preflight, immediately call write_episode_script_chunk with operation=start, targetSceneCount=${DEFAULT_PRODUCTION_MIN_SCENES} for episode "${availability.episode.title}" with premise: "${availability.episode.premise}". The entire story MUST strictly follow this title and premise across a single continuous ${DEFAULT_PRODUCTION_MIN_SCENES}-scene arc (2 chunks). Put the complete plan for scenes 1-${DEFAULT_PRODUCTION_MIN_SCENES} and only opening scenes 1-${Math.min(8, DEFAULT_PRODUCTION_MIN_SCENES)} directly in its tool arguments. Do NOT conclude the story in scenes 1-8. Emit no visible planning, manual counting, draft, JSON, or preamble.`,
             }
           : scriptAuthoringProgress?.status === "in_progress"
             ? {

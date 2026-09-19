@@ -41,10 +41,10 @@ const providerManagerPath = path.join(
 
 if (fs.existsSync(providerManagerPath)) {
   const content = fs.readFileSync(providerManagerPath, 'utf8');
-  const target = "export const PROVIDER_ORDER = ['nvidia', 'anyapi', 'requesty', 'openrouter', 'huggingface'];";
-  const replacement = "export const PROVIDER_ORDER = ['nvidia', 'openrouter', 'anyapi', 'requesty', 'huggingface'];";
-  if (content.includes(target)) {
-    fs.writeFileSync(providerManagerPath, content.replace(target, replacement), 'utf8');
+  const regex = /export const PROVIDER_ORDER = \[[^\]]+\];/;
+  const replacement = "export const PROVIDER_ORDER = ['nvidia', 'requesty', 'openrouter', 'anyapi', 'huggingface'];";
+  if (regex.test(content)) {
+    fs.writeFileSync(providerManagerPath, content.replace(regex, replacement), 'utf8');
     console.log('[postinstall] patched PROVIDER_ORDER in freetier-deepagent-framework');
   }
 }

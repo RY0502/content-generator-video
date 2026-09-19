@@ -44,8 +44,10 @@ function buildScriptRefinementTool(state?: Parameters<typeof buildProductionScri
     : buildLegacyStandaloneScriptRefinementFixtureTool();
 }
 
+const TEST_TARGET_SCENE_COUNT = 24;
+
 function validFiveMinuteScript(
-  sceneCount = DEFAULT_PRODUCTION_MIN_SCENES,
+  sceneCount = TEST_TARGET_SCENE_COUNT,
 ): EpisodeScript {
   const narration =
     "Mia watches the golden lantern glow softly while friendly fireflies dance above the quiet meadow and everyone smiles together happily.";
@@ -138,7 +140,7 @@ function productionStateForDraft(
   return { state, getCurrentDraft: () => currentDraft };
 }
 
-function chunkAuthoringPlan(targetSceneCount = DEFAULT_PRODUCTION_MIN_SCENES) {
+function chunkAuthoringPlan(targetSceneCount = TEST_TARGET_SCENE_COUNT) {
   const beatSize = Math.ceil(targetSceneCount / 4);
   const beats = [];
   let startScene = 1;
@@ -390,7 +392,7 @@ describe("scriptRefinementTool", () => {
       const result = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
         operation: "start",
         episodeId: 17,
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: TEST_TARGET_SCENE_COUNT,
         authoringPlan: plan,
         scenes: chunkScenes(1, EPISODE_SCRIPT_SCENES_PER_CHUNK),
       }));
@@ -409,7 +411,7 @@ describe("scriptRefinementTool", () => {
     const raw = await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes,
     });
@@ -431,7 +433,7 @@ describe("scriptRefinementTool", () => {
     expect(stored.scriptJson.scenes).toEqual(scenes);
     expect(stored.scriptJson.authoring).toMatchObject({
       protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       plan: chunkAuthoringPlan(),
     });
     const durableProgress = getEpisodeScriptChunkAuthoringProgress(
@@ -474,7 +476,7 @@ describe("scriptRefinementTool", () => {
     const result = JSON.parse(await (buildEpisodeScriptChunkTool(state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes,
     }));
@@ -514,7 +516,7 @@ describe("scriptRefinementTool", () => {
     const result = JSON.parse(await (buildEpisodeScriptChunkTool(state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes,
     }));
@@ -555,7 +557,7 @@ describe("scriptRefinementTool", () => {
     const oversizedInput = {
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: oversizedScenes,
     };
@@ -605,7 +607,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -653,7 +655,7 @@ describe("scriptRefinementTool", () => {
     const oversizedInput = {
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: oversizedChunkScenes(1),
     };
@@ -685,7 +687,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: chunkScenes(1, 8),
     }));
@@ -694,7 +696,7 @@ describe("scriptRefinementTool", () => {
       operation: "append",
       episodeId: 17,
       expectedDraftRevision: started.draftRevision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: structuredClone(plan),
       scenes: chunkScenes(9, 8),
     }));
@@ -707,7 +709,7 @@ describe("scriptRefinementTool", () => {
     });
     expect(fixture.getCurrentDraft().scriptJson.authoring).toEqual({
       protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       minimumReplacementSpokenWords: 0,
       plan,
     });
@@ -721,7 +723,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: chunkScenes(1, 8),
     }));
@@ -736,7 +738,7 @@ describe("scriptRefinementTool", () => {
     };
     const redundantAppend = {
       ...canonicalAppend,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: structuredClone(plan),
     };
     expect(JSON.stringify(canonicalAppend).length)
@@ -761,7 +763,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: chunkScenes(1, 8),
     }));
@@ -778,7 +780,7 @@ describe("scriptRefinementTool", () => {
 
     const cases = [
       {
-        extra: { targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES + 1 },
+        extra: { targetSceneCount: TEST_TARGET_SCENE_COUNT + 1 },
         path: "targetSceneCount",
         issue: "durable draft requires",
       },
@@ -811,7 +813,7 @@ describe("scriptRefinementTool", () => {
         },
       });
       expect(result.nextAction).toContain(`expectedDraftRevision=${accepted.draftRevision}`);
-      expect(result.nextAction).toContain(`exactly scenes 17-${Math.min(24, DEFAULT_PRODUCTION_MIN_SCENES)}`);
+      expect(result.nextAction).toContain(`exactly scenes 17-${TEST_TARGET_SCENE_COUNT}`);
       expect(result.nextAction).toContain("Omit targetSceneCount and authoringPlan");
       expect(fixture.getCurrentDraft()).toEqual(before);
     }
@@ -826,7 +828,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: JSON.stringify(firstScenes),
     }));
@@ -866,7 +868,7 @@ describe("scriptRefinementTool", () => {
     const malformedInput = {
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: '[{"sceneNumber":1',
     };
@@ -908,7 +910,7 @@ describe("scriptRefinementTool", () => {
     const raw = await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: JSON.stringify(scenes),
     });
@@ -937,7 +939,7 @@ describe("scriptRefinementTool", () => {
     const rejected = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: JSON.stringify(scenes),
     }));
@@ -983,7 +985,7 @@ describe("scriptRefinementTool", () => {
     const raw = await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: {},
       scenes,
     });
@@ -1026,7 +1028,7 @@ describe("scriptRefinementTool", () => {
     const rejected = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes,
     }));
@@ -1059,7 +1061,7 @@ describe("scriptRefinementTool", () => {
       scenes: [],
       authoring: {
         protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: TEST_TARGET_SCENE_COUNT,
         plan,
       },
     });
@@ -1071,7 +1073,7 @@ describe("scriptRefinementTool", () => {
       operation: "append",
       episodeId: 17,
       expectedDraftRevision: rejected.draftRevision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: structuredClone(plan),
       scenes: chunkScenes(1, 8),
     }));
@@ -1088,7 +1090,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -1145,7 +1147,7 @@ describe("scriptRefinementTool", () => {
     let result = JSON.parse(await (tool as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: invalidScenes,
     }));
@@ -1204,7 +1206,7 @@ describe("scriptRefinementTool", () => {
     const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -1229,7 +1231,7 @@ describe("scriptRefinementTool", () => {
       authoringProgress: {
         completedSceneCount: 16,
         nextSceneNumber: 17,
-        nextSceneEnd: Math.min(24, DEFAULT_PRODUCTION_MIN_SCENES),
+        nextSceneEnd: TEST_TARGET_SCENE_COUNT,
       },
     });
     expect(fixture.getCurrentDraft().scriptJson.scenes).toEqual([
@@ -1251,7 +1253,7 @@ describe("scriptRefinementTool", () => {
     const staged = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -1282,7 +1284,7 @@ describe("scriptRefinementTool", () => {
     await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     });
@@ -1312,7 +1314,7 @@ describe("scriptRefinementTool", () => {
     const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -1332,7 +1334,7 @@ describe("scriptRefinementTool", () => {
       authoringProgress: {
         completedSceneCount: 15,
         nextSceneNumber: 16,
-        nextSceneEnd: Math.min(23, DEFAULT_PRODUCTION_MIN_SCENES),
+        nextSceneEnd: TEST_TARGET_SCENE_COUNT - 1,
       },
     });
     expect(fixture.getCurrentDraft().scriptJson.scenes).toHaveLength(15);
@@ -1344,7 +1346,7 @@ describe("scriptRefinementTool", () => {
     const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     }));
@@ -1443,7 +1445,7 @@ describe("scriptRefinementTool", () => {
     const start = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: firstScenes,
     }));
@@ -1496,7 +1498,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: firstScenes,
     }));
@@ -1538,7 +1540,7 @@ describe("scriptRefinementTool", () => {
     const started = JSON.parse(await (buildEpisodeScriptChunkTool(fixture.state) as any).call({
       operation: "start",
       episodeId: 17,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: firstScenes,
     }));
@@ -1658,7 +1660,7 @@ describe("scriptRefinementTool", () => {
       operation: "restart",
       episodeId: 17,
       expectedDraftRevision: initialDraft.revision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       minimumReplacementSpokenWords,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, EPISODE_SCRIPT_SCENES_PER_CHUNK),
@@ -1711,7 +1713,7 @@ describe("scriptRefinementTool", () => {
       operation: "restart",
       episodeId: 17,
       expectedDraftRevision: initialDraft.revision,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: plan,
       scenes: invalidScenes,
     }));
@@ -1724,7 +1726,7 @@ describe("scriptRefinementTool", () => {
       draftRevision: initialDraft.revision,
       contentDigest: initialDraft.contentDigest,
       restartPlan: {
-        targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+        targetSceneCount: TEST_TARGET_SCENE_COUNT,
         authoringPlan: plan,
         nextSceneNumber: 1,
         nextSceneEnd: 8,
@@ -1736,7 +1738,7 @@ describe("scriptRefinementTool", () => {
       `expectedDraftRevision=${initialDraft.revision}`,
     );
     expect(result.nextAction).toContain(
-      `targetSceneCount=${DEFAULT_PRODUCTION_MIN_SCENES}`,
+      `targetSceneCount=${TEST_TARGET_SCENE_COUNT}`,
     );
     expect(result.nextAction).toContain("same authoringPlan");
     expect(result.nextAction).toContain("exactly scenes 1-8");
@@ -1768,7 +1770,7 @@ describe("scriptRefinementTool", () => {
       operation: "restart",
       episodeId: 17,
       expectedDraftRevision: 4,
-      targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      targetSceneCount: TEST_TARGET_SCENE_COUNT,
       authoringPlan: chunkAuthoringPlan(),
       scenes: chunkScenes(1, 8),
     };
@@ -1817,7 +1819,7 @@ describe("scriptRefinementTool", () => {
         scenes: legacyScenes,
         authoring: {
           protocol: EPISODE_SCRIPT_CHUNK_PROTOCOL,
-          targetSceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+          targetSceneCount: TEST_TARGET_SCENE_COUNT,
           plan,
         },
       },
@@ -1880,7 +1882,7 @@ describe("scriptRefinementTool", () => {
       persisted: true,
       episodeId: 17,
       draftRevision: 3,
-      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      sceneCount: TEST_TARGET_SCENE_COUNT,
     });
     expect(result.scriptJson).toBeUndefined();
     const stagedScript = state.stageEpisodeScriptDraft.mock.calls[0]?.[1];
@@ -2111,7 +2113,7 @@ describe("scriptRefinementTool", () => {
       seriesId: 7,
       episodeNumber: 3,
       draftRevision: 3,
-      sceneCount: DEFAULT_PRODUCTION_MIN_SCENES,
+      sceneCount: TEST_TARGET_SCENE_COUNT,
       narrationRepairCallCount: 0,
       scriptReloadRequired: true,
       validation: { pass: true, issues: [] },
