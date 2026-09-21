@@ -7,3 +7,20 @@ assets/
 get-youtube-token.js
 prompt.txt
 temp_script.json
+
+# Debug / scratch directories
+scratch/
+
+# One-off inspection & repair scripts (not part of production pipeline)
+scripts/checkCharacterSheets.ts
+scripts/checkRateState.ts
+scripts/fixReceiptEnvelopes.ts
+scripts/inspectAllScenes.ts
+scripts/inspectDbState.ts
+scripts/inspectEpisodePrompts.ts
+scripts/inspectFullScript.ts
+scripts/inspectSeriesInfo.ts
+scripts/prepareKeyArtAudio.ts
+scripts/produceRefreshedEpisode1.ts
+scripts/repairEpisode1CastAndResetScenes.ts
+scripts/inspectEpisode1Script.ts

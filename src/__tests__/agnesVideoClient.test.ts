@@ -198,6 +198,8 @@ describe("AgnesVideoClient", () => {
     let call = 0;
     const client = new AgnesVideoClient({
       apiKeys: ["first-key", "first-key", "second-key"],
+      submissionMaxRetries: 0,
+      sleep: async () => {},
       fetch: async (_input, init) => {
         bearerValues.push(new Headers(init?.headers).get("authorization"));
         bodies.push(String(init?.body));
@@ -225,6 +227,64 @@ describe("AgnesVideoClient", () => {
     await expect(unauthorized.submitVideo({ mode: "text", prompt: "Forest", seconds: 6 }))
       .rejects.toMatchObject({ kind: "authentication", ambiguousOutcome: false });
     expect(authCalls).toBe(1);
+  });
+
+  it("retries transient rejections up to 3 times on the same account with 1-minute delay by default", async () => {
+    const bearerValues: Array<string | null> = [];
+    const sleeps: number[] = [];
+    let call = 0;
+
+    const client = new AgnesVideoClient({
+      apiKeys: ["account-key"],
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetch: async (_input, init) => {
+        bearerValues.push(new Headers(init?.headers).get("authorization"));
+        call += 1;
+        // Fails 3 times (attempts 1, 2, 3), succeeds on 4th attempt (3rd retry)
+        return call <= 3
+          ? jsonResponse({ code: "rate_limit", message: "Rate limited" }, 429)
+          : jsonResponse(providerTask());
+      },
+    });
+
+    const task = await client.submitVideo({ mode: "text", prompt: "Forest", seconds: 6 });
+    expect(bearerValues).toEqual([
+      "Bearer account-key",
+      "Bearer account-key",
+      "Bearer account-key",
+      "Bearer account-key",
+    ]);
+    expect(sleeps).toEqual([60_000, 60_000, 60_000]);
+    expect(task.video_id).toBe("video-1");
+  });
+
+  it("fails after exhausting 3 retries on the same account", async () => {
+    const bearerValues: Array<string | null> = [];
+    const sleeps: number[] = [];
+    let call = 0;
+
+    const client = new AgnesVideoClient({
+      apiKeys: ["single-key"],
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetch: async (_input, init) => {
+        bearerValues.push(new Headers(init?.headers).get("authorization"));
+        call += 1;
+        return jsonResponse({ code: "rate_limit", message: "Too many requests" }, 429);
+      },
+    });
+
+    await expect(client.submitVideo({ mode: "text", prompt: "Forest", seconds: 6 }))
+      .rejects.toMatchObject({
+        kind: "rate_limit",
+        rotationExhausted: true,
+      });
+    // 1 initial attempt + 3 retries = 4 total calls
+    expect(bearerValues).toHaveLength(4);
+    expect(sleeps).toEqual([60_000, 60_000, 60_000]);
   });
 
   it("does not rotate credentials when the Agnes render queue is full", async () => {
@@ -306,7 +366,7 @@ describe("AgnesVideoClient", () => {
 
     const result = await client.retrieveVideo(persistedTask("submission-key"));
     expect(calls).toEqual([{
-      url: `${AGNES_RETRIEVE_VIDEO_URL}?video_id=video-1&model_name=agnes-video-2.5-flash`,
+      url: `${AGNES_RETRIEVE_VIDEO_URL}/video-1`,
       bearer: "Bearer submission-key",
     }]);
     expect(result.status).toBe("in_progress");

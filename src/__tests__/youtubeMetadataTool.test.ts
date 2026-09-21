@@ -111,12 +111,9 @@ describe("youtubeMetadataTool", () => {
     expect(request.userText).toContain("Episode Title: The Breezy Picnic");
     expect(request.userText).toContain("Characters: Pip, Mia");
     expect(request.userText).toContain("Number of Scenes: 2");
-    expect(result).toMatchObject({
-      status: "generated",
-      metadata: {
-        tags: ["kids stories", "educational", "friendship"],
-      },
-    });
+    expect(result.status).toBe("generated");
+    expect(result.metadata.tags).toEqual(expect.arrayContaining(["kids stories", "educational", "friendship"]));
+    expect(result.metadata.tags.length).toBeLessThanOrEqual(6);
 
     const stored = JSON.parse(await readFile(result.path, "utf8"));
     expect(stored).toMatchObject({
@@ -153,11 +150,9 @@ describe("youtubeMetadataTool", () => {
     expect(result.metadata.seriesTags).toEqual(expect.arrayContaining([
       "kids stories",
       "educational",
-      "Children stories",
-      "stories for kids",
-      "stories for children",
       "nature for kids",
     ]));
+    expect(result.metadata.seriesTags.length).toBeLessThanOrEqual(6);
 
     const stored = JSON.parse(await readFile(result.path, "utf8"));
     expect(stored).toMatchObject({

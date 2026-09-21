@@ -63,6 +63,6 @@ describe("production system prompt", () => {
     const enabledPrompt = buildSystemPromptExtension(true);
     expect(enabledPrompt).toContain("Only its durable success receipt may mark the episode done");
     expect(enabledPrompt).toContain("call upload_to_youtube once with the canonical seriesId and episodeNumber");
-    expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(8_000);
+    expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(8_500);
   });
 });

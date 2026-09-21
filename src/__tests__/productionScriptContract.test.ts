@@ -329,4 +329,37 @@ describe("productionScriptContract", () => {
     result = inspectProductionScript(script, ["Pip the Ant"]);
     expect(result.pass).toBe(true);
   });
+
+  it("rejects empty characterNames when action or narration mentions a main character", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = [];
+    scene.action = "Sunny hops forward, spreading her wings, and the friends gather.";
+    scene.narrationText = "Sunny chirps awake the friends at the clubhouse.";
+    scene.supportingEntities = ["Ladybug: tiny red ladybug"];
+
+    const result = inspectProductionScript(script, [
+      "Pip the Ant",
+      "Sunny the Sparrow",
+    ]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain(
+      'Scene 1 action/narration mentions main character "Sunny the Sparrow" but characterNames is empty',
+    );
+  });
+
+  it("allows empty characterNames for genuine scenery-only scenes", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = [];
+    scene.action = "Fireflies glow softly over the darkening meadow grass.";
+    scene.narrationText = "As dusk settled over the meadow, tiny yellow fireflies blinked.";
+    scene.supportingEntities = [];
+
+    const result = inspectProductionScript(script, [
+      "Pip the Ant",
+      "Sunny the Sparrow",
+    ]);
+    expect(result.pass).toBe(true);
+  });
 });

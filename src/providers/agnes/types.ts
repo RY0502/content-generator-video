@@ -3,7 +3,7 @@ import type { AgnesError } from "./errors.js";
 export const AGNES_VIDEO_MODEL = "agnes-video-2.5-flash" as const;
 export const AGNES_DEFAULT_BASE_URL = "https://apihub.agnes-ai.com" as const;
 export const AGNES_CREATE_VIDEO_URL = "https://apihub.agnes-ai.com/v1/videos" as const;
-export const AGNES_RETRIEVE_VIDEO_URL = "https://apihub.agnes-ai.com/agnesapi" as const;
+export const AGNES_RETRIEVE_VIDEO_URL = "https://apihub.agnes-ai.com/v1/videos" as const;
 export const AGNES_VIDEO_SIZE = "720P" as const;
 export const AGNES_VIDEO_ASPECT_RATIO = "16:9" as const;
 export const AGNES_MIN_SECONDS = 4 as const;
@@ -45,10 +45,14 @@ export interface AgnesClientOptions {
   pollIntervalMs?: number;
   /** Defaults to eight minutes. */
   pollWindowMs?: number;
-  /** Per submit/retrieve HTTP deadline. Defaults to 60 seconds. */
+  /** Defaults to 60 seconds. */
   requestTimeoutMs?: number;
   /** Maximum accepted media download size. Defaults to 256 MiB. */
   maxDownloadBytes?: number;
+  /** Maximum retries per key for retryable submission failures. Defaults to 3. */
+  submissionMaxRetries?: number;
+  /** Delay between retries on the same key in milliseconds. Defaults to 60,000 (1 minute). */
+  submissionRetryIntervalMs?: number;
 }
 
 interface AgnesSubmitVideoRequestBase {

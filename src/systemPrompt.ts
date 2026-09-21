@@ -33,16 +33,18 @@ CRITICAL — PREMISE LOCK: Story, characters, and events MUST strictly follow th
 CRITICAL — ONE SINGLE CONTINUOUS STORY (24 Scenes across 5 Dramatic Stages):
 - Stage 1 (1-4) Wonder: Establish clubhouse, friends in action, and introduce situation.
 - Stage 2 (5-8) Problem: Reveal premise quest (e.g. lost leaf home). Club begins search.
-- Stage 3 (9-16) Teamwork & Obstacle: Investigate clues and hit physical obstacle (swift water, brambles, heavy stone). Friends combine talents (Pip coordinates, Sunny scouts, Nibbles invents, Pebble plans, Chip gathers). DO NOT solve early.
+- Stage 3 (9-16) Teamwork & Obstacle: Investigate clues and hit physical obstacles (swift water, brambles, heavy stone). Friends combine talents (Pip coordinates, Sunny scouts, Nibbles invents, Pebble plans, Chip gathers). DO NOT solve early.
 - Stage 4 (17-20) Climax: Cooperative breakthrough to reach/retrieve/solve.
 - Stage 5 (21-24) Celebration & Insight: Joyful reunion, return item, and warm preschool insight for ages 4-8.
+CRITICAL PACING: Dedicate scenes 5-20 to active multi-stage problem solving and obstacles; do not resolve before scene 19. Limit celebration/insight strictly to final scenes 22-24; never repeat moral recaps across multiple scenes.
 Advance plot strictly forward. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout boots; focus on 1-3 active figures).
 
 Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames. Provide supportingEntities and non-empty continuityAnchors in every scene; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
 
 Narration is one or two sentences. Target 10-16 spoken words (<=160 raw chars); hard limits are 20 spoken words and 200 raw characters. Author engaging storytelling for ages 4-8: include expressive quoted dialogue inside third-person narration for every scene (e.g. "Look up there!" chirped Sunny.). Name only 1-2 active figures or say 'the friends'. Orpheus directions like [excited] may be used naturally, not at start or end. Only an actual WAV over 12 seconds triggers narration-only repair.
 
-characterNames contains 1-3 visible stored main characters. NEVER put guest creatures (like Lily the Ladybug) in characterNames; guest creatures MUST be in supportingEntities with locked descriptors (e.g. "Lily the Ladybug: tiny scarlet ladybug with 7 black spots"). continuityAnchors covers non-living props/tools; keep non-empty. Keep unchanged environment/anchors/lighting verbatim across adjacent shots for visual continuity.
+characterNames contains 1-3 visible stored main characters. NEVER put guest creatures (like Lily the Ladybug) in characterNames; guest creatures MUST be in supportingEntities with locked descriptors (e.g. "Lily the Ladybug: tiny scarlet ladybug with 7 black spots"). continuityAnchors covers non-living scene elements: props, tools, AND key environmental features (bridges, flowers, rock formations, streams) that persist visually across adjacent scenes.
+CROSS-SCENE CONTINUITY: Adjacent scenes sharing a location must copy environmentDescription, continuityAnchors, and lighting VERBATIM. Reuse each supportingEntities descriptor string character-for-character when the same guest recurs. Include key landmarks (e.g. "old wooden bridge", "cluster of white daisies beside the mossy log") in continuityAnchors.
 
 Series and episode titles are spoken in the two title clips and must stay within ${KEY_ART_TITLE_MAX_RAW_CHARACTERS} raw characters and ${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words.
 

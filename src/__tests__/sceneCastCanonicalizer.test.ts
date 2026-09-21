@@ -474,4 +474,81 @@ describe("sceneCastCanonicalizer", () => {
     expect(result.scene.action).toBe(input.action);
     expect(result.scene.sceneDetails).toBe(input.sceneDetails);
   });
+
+  it("resolves animal character aliases and heals empty characterNames from action text", () => {
+    const input = baseScene({
+      sceneNumber: 1,
+      narrationText: "Sunny chirps awake the friends at the clubhouse as a ladybug lands nearby, looking sad.",
+      action: "Sunny hops forward, spreading her wings, and the friends gather around the tired ladybug.",
+      characterNames: [],
+      characterVisuals: [],
+      supportingEntities: ["Ladybug the Ladybug: tiny red ladybug with 7 black spots"],
+      sceneDetails: "Sunny remains on the left while the ladybug waits on the right.",
+    });
+
+    const result = canonicalizeSceneCast(input, {
+      mainCharacterNames: [
+        "Pip the Ant",
+        "Nibbles the Hamster",
+        "Sunny the Sparrow",
+        "Pebble the Turtle",
+        "Chip the Squirrel",
+      ],
+    });
+
+    expect(result.scene.characterNames).toEqual(["Sunny the Sparrow"]);
+    expect(result.scene.characterVisuals).toEqual([
+      {
+        name: "Sunny the Sparrow",
+        visualForm: "real_creature",
+        speciesOrType: "sparrow",
+        humanoidAllowed: false,
+      },
+    ]);
+    expect(result.scene.action).toBe(
+      "Sunny the Sparrow hops forward, spreading her wings, and the friends gather around the tired ladybug.",
+    );
+    expect(result.exactCastNames).toEqual(["Sunny the Sparrow", "Ladybug the Ladybug"]);
+    expect(result.audit.applied).toContainEqual(
+      expect.objectContaining({
+        kind: "healed_character_name",
+        field: "characterNames",
+        name: "Sunny the Sparrow",
+      }),
+    );
+  });
+
+  it("heals multiple characters mentioned in action and narration", () => {
+    const input = baseScene({
+      sceneNumber: 19,
+      narrationText: "Nibbles: I'm so glad we helped our friend the friends murmur agreement around the fire",
+      action: "Nibbles smiles; others nod and Nibbles rests her head on Pebble's ear.",
+      characterNames: [],
+      characterVisuals: [],
+      supportingEntities: ["Ladybug the Ladybug: tiny red ladybug with 7 black spots"],
+      sceneDetails: "Nibbles and Pebble sit together by the fire.",
+    });
+
+    const result = canonicalizeSceneCast(input, {
+      mainCharacterNames: [
+        "Pip the Ant",
+        "Nibbles the Hamster",
+        "Sunny the Sparrow",
+        "Pebble the Turtle",
+        "Chip the Squirrel",
+      ],
+    });
+
+    expect(result.scene.characterNames).toEqual([
+      "Nibbles the Hamster",
+      "Pebble the Turtle",
+    ]);
+    expect(result.scene.characterVisuals).toHaveLength(2);
+    expect(result.scene.characterVisuals![0]).toEqual(
+      expect.objectContaining({ name: "Nibbles the Hamster", visualForm: "real_creature", speciesOrType: "hamster" }),
+    );
+    expect(result.scene.characterVisuals![1]).toEqual(
+      expect.objectContaining({ name: "Pebble the Turtle", visualForm: "real_creature", speciesOrType: "turtle" }),
+    );
+  });
 });

@@ -34,6 +34,8 @@ export const DEFAULT_AGNES_POLL_INTERVAL_MS = 30_000;
 export const DEFAULT_AGNES_POLL_WINDOW_MS = 8 * 60_000;
 export const DEFAULT_AGNES_REQUEST_TIMEOUT_MS = 60_000;
 export const DEFAULT_AGNES_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
+export const DEFAULT_AGNES_SUBMISSION_MAX_RETRIES = 3;
+export const DEFAULT_AGNES_SUBMISSION_RETRY_INTERVAL_MS = 60_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -393,7 +395,7 @@ function resolveAgnesEndpoints(baseUrl: string): AgnesEndpoints {
   const createUrl = new URL(parsed.toString());
   createUrl.pathname = createPath || "/v1/videos";
   const retrieveUrl = new URL(parsed.toString());
-  retrieveUrl.pathname = retrievalPath || "/agnesapi";
+  retrieveUrl.pathname = createPath || "/v1/videos";
   return {
     createVideo: createUrl.toString(),
     retrieveVideo: retrieveUrl.toString(),
@@ -436,6 +438,8 @@ export class AgnesVideoClient {
   private readonly pollWindowMs: number;
   private readonly maxDownloadBytes: number;
   private readonly requestTimeoutMs: number;
+  private readonly submissionMaxRetries: number;
+  private readonly submissionRetryIntervalMs: number;
   private readonly endpoints: AgnesEndpoints;
 
   constructor(options: AgnesClientOptions = {}) {
@@ -470,6 +474,16 @@ export class AgnesVideoClient {
       "requestTimeoutMs",
       options.requestTimeoutMs ?? DEFAULT_AGNES_REQUEST_TIMEOUT_MS,
       false,
+    );
+    this.submissionMaxRetries = finiteMilliseconds(
+      "submissionMaxRetries",
+      options.submissionMaxRetries ?? DEFAULT_AGNES_SUBMISSION_MAX_RETRIES,
+      true,
+    );
+    this.submissionRetryIntervalMs = finiteMilliseconds(
+      "submissionRetryIntervalMs",
+      options.submissionRetryIntervalMs ?? DEFAULT_AGNES_SUBMISSION_RETRY_INTERVAL_MS,
+      true,
     );
   }
 
@@ -533,104 +547,120 @@ export class AgnesVideoClient {
     for (let index = 0; index < this.keys.length; index += 1) {
       const configuredKey = this.keys[index];
       if (!configuredKey) continue;
-      try {
-        request.onAttempt?.({ keyLabel: configuredKey.keyLabel });
-      } catch {
-        // Diagnostics callbacks must never influence provider behavior.
-      }
 
-      let response: Response;
-      let result: ReadPayloadResult;
-      try {
-        ({ response, result } = await this.requestJson(this.endpoints.createVideo, {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${configuredKey.key}`,
-            "content-type": "application/json",
-          },
-          body,
-        }));
-      } catch (error) {
-        if (error instanceof AgnesRequestTimedOut) {
-          throw new AgnesError(error.message, {
-            kind: "timeout",
-            keyLabel: configuredKey.keyLabel,
-            keys: rawKeys,
-            ambiguousOutcome: true,
-          });
-        }
-        throw new AgnesError(
-          `Agnes submission network failure: ${safeThrownMessage(error, rawKeys)}`,
-          {
-            kind: "network",
-            keyLabel: configuredKey.keyLabel,
-            keys: rawKeys,
-            ambiguousOutcome: true,
-          },
-        );
-      }
-
-      if (response.ok && !result.malformedJson) {
+      let keyAttempt = 0;
+      while (true) {
         try {
-          const task = normalizeTask(result.payload, configuredKey);
-          if (task.status === "failed" && task.error !== undefined) {
+          request.onAttempt?.({ keyLabel: configuredKey.keyLabel });
+        } catch {
+          // Diagnostics callbacks must never influence provider behavior.
+        }
+
+        let response: Response;
+        let result: ReadPayloadResult;
+        try {
+          ({ response, result } = await this.requestJson(this.endpoints.createVideo, {
+            method: "POST",
+            headers: {
+              accept: "application/json",
+              authorization: `Bearer ${configuredKey.key}`,
+              "content-type": "application/json",
+            },
+            body,
+          }));
+        } catch (error) {
+          if (error instanceof AgnesRequestTimedOut) {
+            throw new AgnesError(error.message, {
+              kind: "timeout",
+              keyLabel: configuredKey.keyLabel,
+              keys: rawKeys,
+              ambiguousOutcome: true,
+            });
+          }
+          throw new AgnesError(
+            `Agnes submission network failure: ${safeThrownMessage(error, rawKeys)}`,
+            {
+              kind: "network",
+              keyLabel: configuredKey.keyLabel,
+              keys: rawKeys,
+              ambiguousOutcome: true,
+            },
+          );
+        }
+
+        if (response.ok && !result.malformedJson) {
+          try {
+            const task = normalizeTask(result.payload, configuredKey);
+            if (task.status === "failed" && task.error !== undefined) {
+              const retryAfterMs = retryAfterFromResponse(response, result.payload, this.now);
+              const failedTaskError = classifyAgnesError(
+                response.status,
+                result.payload,
+                "Agnes rejected the submitted video task",
+                {
+                  keyLabel: configuredKey.keyLabel,
+                  keys: rawKeys,
+                  ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+                },
+              );
+              if (failedTaskError.mayTryAnotherKey && keyAttempt < this.submissionMaxRetries) {
+                keyAttempt += 1;
+                const delayMs = Math.max(this.submissionRetryIntervalMs, failedTaskError.retryAfterMs ?? 0);
+                if (delayMs > 0) await this.sleep(delayMs);
+                continue;
+              }
+              if (failedTaskError.mayTryAnotherKey && index + 1 < this.keys.length) break;
+              if (failedTaskError.mayTryAnotherKey) {
+                failedTaskError.rotationExhausted = true;
+                throw failedTaskError;
+              }
+              throw failedTaskError;
+            }
+            return task;
+          } catch (error) {
+            if (!(error instanceof InvalidTaskResponse)) throw error;
             const retryAfterMs = retryAfterFromResponse(response, result.payload, this.now);
-            const failedTaskError = classifyAgnesError(
+            const classified = classifyAgnesError(
               response.status,
               result.payload,
-              "Agnes rejected the submitted video task",
+              error.message,
               {
                 keyLabel: configuredKey.keyLabel,
                 keys: rawKeys,
                 ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+                ambiguousSubmission: true,
               },
             );
-            if (failedTaskError.mayTryAnotherKey && index + 1 < this.keys.length) continue;
-            if (failedTaskError.mayTryAnotherKey) {
-              failedTaskError.rotationExhausted = true;
-              throw failedTaskError;
-            }
-            throw failedTaskError;
+            if (classified.mayTryAnotherKey && index + 1 < this.keys.length) break;
+            if (classified.mayTryAnotherKey) classified.rotationExhausted = true;
+            throw classified;
           }
-          return task;
-        } catch (error) {
-          if (!(error instanceof InvalidTaskResponse)) throw error;
-          const retryAfterMs = retryAfterFromResponse(response, result.payload, this.now);
-          const classified = classifyAgnesError(
-            response.status,
-            result.payload,
-            error.message,
-            {
-              keyLabel: configuredKey.keyLabel,
-              keys: rawKeys,
-              ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-              ambiguousSubmission: true,
-            },
-          );
-          if (classified.mayTryAnotherKey && index + 1 < this.keys.length) continue;
-          if (classified.mayTryAnotherKey) classified.rotationExhausted = true;
-          throw classified;
         }
-      }
 
-      const retryAfterMs = retryAfterFromResponse(response, result.payload, this.now);
-      const classified = classifyAgnesError(
-        response.status,
-        result.payload,
-        result.malformedJson
-          ? `Agnes returned non-JSON HTTP ${response.status}`
-          : `Agnes returned HTTP ${response.status}`,
-        {
-          keyLabel: configuredKey.keyLabel,
-          keys: rawKeys,
-          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-          ambiguousSubmission: response.ok,
-        },
-      );
-      if (classified.mayTryAnotherKey && index + 1 < this.keys.length) continue;
-      if (classified.mayTryAnotherKey) classified.rotationExhausted = true;
-      throw classified;
+        const retryAfterMs = retryAfterFromResponse(response, result.payload, this.now);
+        const classified = classifyAgnesError(
+          response.status,
+          result.payload,
+          result.malformedJson
+            ? `Agnes returned non-JSON HTTP ${response.status}`
+            : `Agnes returned HTTP ${response.status}`,
+          {
+            keyLabel: configuredKey.keyLabel,
+            keys: rawKeys,
+            ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+            ambiguousSubmission: response.ok,
+          },
+        );
+        if (classified.mayTryAnotherKey && keyAttempt < this.submissionMaxRetries) {
+          keyAttempt += 1;
+          const delayMs = Math.max(this.submissionRetryIntervalMs, classified.retryAfterMs ?? 0);
+          if (delayMs > 0) await this.sleep(delayMs);
+          continue;
+        }
+        if (classified.mayTryAnotherKey && index + 1 < this.keys.length) break;
+        if (classified.mayTryAnotherKey) classified.rotationExhausted = true;
+        throw classified;
+      }
     }
 
     throw new AgnesError("No usable Agnes API key remained", { kind: "configuration" });
@@ -651,9 +681,8 @@ export class AgnesVideoClient {
       throw new AgnesError("video_id must not be empty", { kind: "validation" });
     }
 
-    const url = new URL(this.endpoints.retrieveVideo);
-    url.searchParams.set("video_id", task.video_id);
-    url.searchParams.set("model_name", AGNES_VIDEO_MODEL);
+    const endpointBase = this.endpoints.retrieveVideo.replace(/\/+$/, "");
+    const url = new URL(`${endpointBase}/${encodeURIComponent(task.video_id.trim())}`);
     let response: Response;
     let result: ReadPayloadResult;
     try {

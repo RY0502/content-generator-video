@@ -176,7 +176,10 @@ export const CONFIG = {
   agnesMaxDownloadBytes: positiveInteger("AGNES_MAX_DOWNLOAD_BYTES", 500_000_000),
   // An additional minimum beyond the per-account RPM gate. Zero adds no extra
   // delay; it does not disable durable per-account rate limiting.
+  agnesStaleSubmissionLeaseMs: positiveInteger("AGNES_STALE_SUBMISSION_LEASE_MS", 2 * 60_000),
   agnesSubmissionIntervalMs: nonNegativeInteger("AGNES_SUBMISSION_INTERVAL_MS", 0),
+  agnesSubmissionMaxRetries: nonNegativeInteger("AGNES_SUBMISSION_MAX_RETRIES", 0),
+  agnesSubmissionRetryIntervalMs: nonNegativeInteger("AGNES_SUBMISSION_RETRY_INTERVAL_MS", 1_000),
   agnesSeed: optionalInteger("AGNES_SEED"),
   // Cloudflare Workers AI model used for episode scene frames (fallback provider)
   cloudflareSceneModel: process.env.CLOUDFLARE_SCENE_MODEL ?? "@cf/black-forest-labs/flux-1-schnell",

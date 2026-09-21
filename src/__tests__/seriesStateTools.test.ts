@@ -785,7 +785,7 @@ describe("seriesStateTools", () => {
       pass: false,
       sceneCount: 0,
       nextAction:
-        'After the one roster preflight, immediately call write_episode_script_chunk with operation=start, targetSceneCount=16 for episode "The Windy Picnic" with premise: "Pip and friends save a picnic from the wind.". The entire story MUST strictly follow this title and premise across a single continuous 16-scene arc (2 chunks). Put the complete plan for scenes 1-16 and only opening scenes 1-8 directly in its tool arguments. Do NOT conclude the story in scenes 1-8. Emit no visible planning, manual counting, draft, JSON, or preamble.',
+        'After the one roster preflight, immediately call write_episode_script_chunk with operation=start, targetSceneCount=16 for episode "The Windy Picnic" with premise: "Pip and friends save a picnic from the wind.". The entire story MUST strictly follow this title and premise across a single continuous 16-scene arc (2 chunks). Focus scenes 5-20 on active multi-stage problem solving, obstacles, and teamwork; do NOT resolve the quest before scenes 19-20. Keep celebration and takeaway strictly confined to final scenes 22-24, avoiding repetitive recap. Put the complete plan for scenes 1-16 and only opening scenes 1-8 directly in its tool arguments. Do NOT conclude the story in scenes 1-8. Emit no visible planning, manual counting, draft, JSON, or preamble.',
     });
     expect(parsed.episode).not.toHaveProperty("scriptJson");
   });

@@ -77,7 +77,7 @@ export const MIN_PRODUCTION_STATUS_INTERVAL_MS = 30_000;
  * runtime after this lease. Ten minutes is deliberately longer than the
  * one-minute POST timeout plus the five-minute queue-acknowledgement window.
  */
-export const AGNES_STALE_SUBMISSION_LEASE_MS = 10 * 60_000;
+export const AGNES_STALE_SUBMISSION_LEASE_MS = CONFIG.agnesStaleSubmissionLeaseMs ?? (2 * 60_000);
 
 type EpisodeScript = { scenes: Array<Omit<ScenePromptInput, "seriesId">> };
 type AttemptState = "submitting" | "accepted" | "definite_rejection" | "ambiguous";
@@ -208,6 +208,8 @@ export interface AgnesSceneVideoToolOptions {
   submissionBatchSize?: number;
   queuePollIntervalMs?: number;
   queuePollWindowMs?: number;
+  submissionMaxRetries?: number;
+  submissionRetryIntervalMs?: number;
   /** Programmatic subset used only by focused evaluation scripts. */
   sceneNumbers?: readonly number[];
   /** Production enables both title-card videos; focused legacy tests/previews may opt out. */
@@ -216,6 +218,8 @@ export interface AgnesSceneVideoToolOptions {
   ensureKeyArtAudioAssets?: typeof ensureAgnesKeyArtAudioAssets;
   /** Injectable portrait-only roster operation used by focused tests. */
   ensureSeriesCharacterPortraits?: EnsureSeriesCharacterPortraitsOperation;
+  /** Allows multi-account failover on provider_capacity (video_queue_full). Defaults to true in production. */
+  rotateOnCapacity?: boolean;
 }
 
 interface WorkflowRuntime {
@@ -241,6 +245,7 @@ interface WorkflowRuntime {
   includeKeyArt: boolean;
   ensureKeyArtAudioAssets: typeof ensureAgnesKeyArtAudioAssets;
   ensureSeriesCharacterPortraits: EnsureSeriesCharacterPortraitsOperation;
+  rotateOnCapacity: boolean;
 }
 
 interface AgnesAccountRuntime {
@@ -808,7 +813,10 @@ function withReferenceIdentityMap(
     .join("; ");
   return `${prompt.trim()} REFERENCE IMAGE IDENTITY MAP — ${mapping}. Treat each portrait as the `
     + "authoritative identity and art-style reference; preserve its exact age, face, hair, body form, "
-    + "colors, clothing, accessories, markings, proportions, and silhouette in every frame.";
+    + "colors, clothing, accessories, markings, proportions, and silhouette in every frame. "
+    + "Render each character with its complete connected body from head to feet/paws/wings as depicted in the reference; never render a floating head or headless body. Exactly one figure per reference image. "
+    + "Apply each reference image strictly and exclusively to its named character; never duplicate the reference character, and never blend reference features onto other figures. "
+    + "Supporting figures not covered by a reference image must also appear exactly once; never clone or duplicate any supporting figure.";
 }
 
 function withCharacterIntegrityGuard(canonicalPrompt: string): string {
@@ -1349,7 +1357,7 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     options.submissionBatchSize ?? CONFIG.agnesSubmissionBatchSize,
   );
   const submissionIntervalMs = options.submissionIntervalMs ?? Math.max(
-    CONFIG.agnesSubmissionIntervalMs,
+    CONFIG.agnesSubmissionIntervalMs ?? 0,
     requestIntervalForRpm(CONFIG.agnesSubmissionRpmPerAccount),
   );
   const statusIntervalMs = options.statusRequestIntervalMs ?? Math.max(
@@ -1371,6 +1379,8 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
           pollIntervalMs: CONFIG.agnesPollIntervalMs,
           pollWindowMs: CONFIG.agnesPollWindowMs,
           maxDownloadBytes: CONFIG.agnesMaxDownloadBytes,
+          submissionMaxRetries: options.submissionMaxRetries ?? CONFIG.agnesSubmissionMaxRetries,
+          submissionRetryIntervalMs: options.submissionRetryIntervalMs ?? CONFIG.agnesSubmissionRetryIntervalMs,
         }),
       }));
   const seenAccountIds = new Set<string>();
@@ -1428,6 +1438,7 @@ function createRuntime(seriesState: SeriesState, options: AgnesSceneVideoToolOpt
     ensureSeriesCharacterPortraits:
       options.ensureSeriesCharacterPortraits
       ?? ensureSeriesCharacterPortraits,
+    rotateOnCapacity: options.rotateOnCapacity ?? (options.accounts ? false : true),
     ...(options.sceneNumbers ? { selectedSceneNumbers: [...options.sceneNumbers] } : {}),
   };
 }
@@ -1473,7 +1484,12 @@ async function resolveReferenceConditioning(params: {
     return referenceTextFallback(params.prompt);
   }
 
-  if (params.requiredCharacterNames.length === 0) return referenceTextFallback(params.prompt);
+  if (params.requiredCharacterNames.length === 0) {
+    if (params.prompt.includes("REFERENCE-CONDITIONED MAIN CAST")) {
+      throw new Error("Prompt specifies REFERENCE-CONDITIONED MAIN CAST but requiredCharacterNames is empty.");
+    }
+    return referenceTextFallback(params.prompt);
+  }
   if (params.requiredCharacterNames.length > AGNES_MAX_REFERENCE_IMAGES) {
     throw new Error(
       `Agnes accepts at most ${AGNES_MAX_REFERENCE_IMAGES} visible main-character references; ` +
@@ -2239,7 +2255,9 @@ async function submitOneInternal(
         const agnesError = error instanceof AgnesError ? error : undefined;
         const ambiguous = Boolean(agnesError?.ambiguousOutcome);
         const retryable = !ambiguous && retryableNextRun(error);
-        const mayFailover = Boolean(!ambiguous && agnesError?.mayTryAnotherKey);
+        const mayFailover = Boolean(
+          !ambiguous && (agnesError?.mayTryAnotherKey || (runtime.rotateOnCapacity && agnesError?.kind === "provider_capacity")),
+        );
         attempt.state = ambiguous ? "ambiguous" : "definite_rejection";
         attempt.finishedAt = new Date().toISOString();
         attempt.retrySafe = retryable;
@@ -2258,13 +2276,15 @@ async function submitOneInternal(
 
         if (agnesError?.kind === "rate_limit") {
           await account.submissionGate.block(agnesError.retryAfterMs, attempt.error);
+        } else if (agnesError?.kind === "provider_capacity") {
+          await account.submissionGate.block(agnesError.retryAfterMs ?? 60_000, attempt.error);
         } else if (agnesError?.retryAfterMs !== undefined && mayFailover) {
           await account.submissionGate.block(agnesError.retryAfterMs, attempt.error);
         }
         if (agnesError && ["quota_exhausted", "daily_limit", "insufficient_credits"].includes(agnesError.kind)) {
           runtime.disabledAccounts.add(account.accountId);
         }
-        if (ambiguous || agnesError?.kind === "provider_capacity") {
+        if (ambiguous) {
           runtime.haltedSubmissions.add(logicalKey);
         }
 

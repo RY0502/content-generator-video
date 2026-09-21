@@ -41,7 +41,10 @@ describe("promptBuilder", () => {
     });
 
     expect(prompt).toContain("SUPPORTING IDENTITY REFERENCES");
-    expect(prompt).toContain("[Ant leader]: tiny black ant with a shiny chestnut head");
+    expect(prompt).toContain("[Ant leader] × 1: tiny black ant with a shiny chestnut head");
+    expect(prompt).toContain("SUPPORTING FIGURE COUNT LOCK");
+    expect(prompt).toContain("FINAL DUPLICATION GUARD");
+    expect(prompt).toContain("ENVIRONMENT CONTINUITY LOCK");
     expect(prompt).toContain("INANIMATE CONTINUITY");
     expect(prompt).toContain("Picnic setup: red-and-white checkered blanket spread on grass with sandwiches and leaf cups.");
     expect(prompt).toContain("REFERENCE-CONDITIONED MAIN CAST — [Pip the Ant]");
@@ -447,6 +450,6 @@ describe("promptBuilder", () => {
 
     for (const value of [environment, action, details]) expect(prompt).toContain(value);
     for (const value of identities) expect(prompt).not.toContain(value);
-    expect(prompt.length - authoredPayloadLength).toBeLessThan(3_600);
+    expect(prompt.length - authoredPayloadLength).toBeLessThan(4_100);
   });
 });

@@ -49,8 +49,8 @@ const CHARACTER_APPEARANCE_BIBLE =
 /** Locked rendering — prevents Pixar / CGI drift. */
 const RENDERING_BIBLE =
   "2D PAINTERLY RENDERING ONLY: one full-screen animated story world. No 3D, CGI, plastic volumetrics, " +
-  "photorealism, anime, cel-shaded vector art, or other medium; no live-action or photoreal presenter, host, narrator, " +
-  "spokesperson, talking head, studio person, picture-in-picture, overlay, cutaway, or reaction.";
+  "photorealism, anime, cel-shaded vector art, or other medium; no live-action or photoreal presenter, " +
+  "talking head, picture-in-picture, overlay, cutaway, or reaction.";
 
 /** Video-only defects which static-image negative prompts cannot cover. */
 export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
@@ -66,14 +66,16 @@ export const TEMPORAL_STABILITY_NEGATIVE_BIBLE =
 export const CHARACTER_INTEGRITY_NEGATIVE_BIBLE =
   "No duplicate characters, clones, duplicate living objects, or duplicate companions. " +
   "No extra limbs or duplicated appendages beyond the locked species/body form. " +
-  "No double heads or extra heads, duplicated faces, fused heads, or conjoined bodies.";
+  "No double heads or extra heads, duplicated faces, fused heads, or conjoined bodies. " +
+  "No floating heads, missing bodies, or severed parts; full intact body.";
 
 /** Negative prompt — critical constraints, stated once, at the end. */
 const NEGATIVE_BIBLE =
   "NEGATIVE: no text/captions/logos/watermarks; panels/split-screen/collage; mirrors/reflections; portraits/statues/screens; " +
-  "silhouettes/crowds/bystanders/unlisted figures; no gender/age change, wrong anatomy, fused/missing parts, unlisted " +
-  "wardrobe/accessories/markings, chimera traits, or cropped identity features; no live-action/photoreal presenter, host, " +
-  `narrator, spokesperson, talking head, insert, overlay, cutaway, or medium change. ${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
+  "silhouettes/crowds/unlisted figures; no humans in animal scenes; no gender/age change, wrong anatomy, " +
+  "fused/missing parts, unlisted wardrobe/accessories/markings, chimera traits, or cropped identity features; " +
+  "no live-action/photoreal presenter, host, narrator, talking head, overlay, or medium change. " +
+  `${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
 
 // ---------------------------------------------------------------------------
 // Camera presets — only 3 allowed, no freeform strings
@@ -88,7 +90,7 @@ const CAMERA_PRESETS: Record<CameraPreset, string> = {
   medium:
     "medium-wide 16:9 group composition with every declared figure spatially separated and the environment readable",
   close:
-    "medium-close 16:9 single-figure composition with the face, silhouette, and setting context readable",
+    "medium-close 16:9 single-figure composition with full body, face, and setting readable",
 };
 
 /**
@@ -387,7 +389,7 @@ function buildExactCastLedger(
     `VISIBLE CAST — EXACTLY ${names.length} ${names.length === 1 ? "FIGURE" : "FIGURES"}, NO OTHERS: ` +
     `${names.map((name) => `[${name}] × 1`).join("; ")}. Each listed identity appears once; every unlisted adult/child, ` +
     "animal, creature, living object, presenter/host, foreground/background figure, lookalike, substitute, or species " +
-    "appears zero times."
+    "appears zero times. Never depict unlisted 'friends', 'team', 'crowd', or extra characters mentioned in action text."
   );
 }
 
@@ -421,9 +423,13 @@ function buildSceneCameraLayer(rawCameraAngle: string, totalFigureCount: number)
     ? "establishing"
     : totalFigureCount >= 2 && requestedPreset === "close"
       ? "medium"
-      : requestedPreset;
+      : totalFigureCount <= 1 && requestedPreset === "medium"
+        ? "close"
+        : requestedPreset;
   const castFraming = totalFigureCount > 0
-    ? `Keep all ${totalFigureCount} figures readable and separate; no reflections, repeated faces, or body doubles.`
+    ? totalFigureCount === 1
+      ? "Keep the single declared figure clearly framed; no duplicates, reflections, or body doubles."
+      : `Keep all ${totalFigureCount} figures readable and separate; no duplicates, reflections, or body doubles.`
     : "Keep the environment empty of figures.";
 
   return `CAMERA — ${CAMERA_PRESETS[effectivePreset]}; ${resolveCameraViewpoint(authoredIntent)}; ` +
@@ -506,12 +512,28 @@ export function buildStylizedScenePrompt(params: {
       ? "MAIN-CAST EXCLUSION — no main-series character is visible; only the supporting figures in the ledger appear."
       : "EMPTY-SCENE LOCK — exactly zero people, animals, creatures, living objects, silhouettes, or other figures.";
 
-  // SUBJECT — episode-local supporting entities.
+  // SUBJECT — episode-local supporting entities with explicit single-instance locks.
   const supportingEntities = normalizedSupportingEntities
-    .map((entity, index) => `[${supportingEntityName(entity, index)}]: ${entity.includes(":") ? entity.slice(entity.indexOf(":") + 1).trim() : entity}`)
+    .map((entity, index) => `[${supportingEntityName(entity, index)}] × 1: ${entity.includes(":") ? entity.slice(entity.indexOf(":") + 1).trim() : entity}`)
     .join(" | ");
   const supportingLayer = supportingEntities
-    ? `SUPPORTING IDENTITY REFERENCES — ${supportingEntities}`
+    ? `SUPPORTING IDENTITY REFERENCES — ${supportingEntities}. ` +
+      "SUPPORTING FIGURE COUNT LOCK — each supporting figure listed above appears exactly once as a single continuous body; " +
+      "never duplicate, clone, split, or fork any supporting figure."
+    : "";
+
+  const isExplicitlyNonHuman = (params.characterVisuals ?? []).length > 0 && !(params.characterVisuals ?? []).some(
+    (c) => c.visualForm === "humanoid" || c.humanoidAllowed === true,
+  );
+  const nonHumanWorldLock = totalFigureCount > 0 && isExplicitlyNonHuman
+    ? "NON-HUMAN WORLD LOCK — strictly no human people, adults, children, or human hands/faces. All figures are non-human animals/creatures."
+    : "";
+
+  const actionMentionsPluralFriends = /\b(?:the\s+friends|everyone|the\s+club|the\s+team)\b/iu.test(
+    `${params.action} ${params.narrationText}`,
+  );
+  const castIsolationLock = totalFigureCount > 0 && actionMentionsPluralFriends
+    ? `CAST ISOLATION LOCK — only the exact listed visible figures [${allCastNames.join(", ")}] appear; ignore unlisted group/friends mentions in action.`
     : "";
 
   const figureCountLayer = totalFigureCount > 0
@@ -520,7 +542,7 @@ export function buildStylizedScenePrompt(params: {
     "re-enter, or copy after movement, occlusion, or portals."
     : "";
 
-  // CONSISTENCY — episode-local recurring props/setup continuity.
+  // CONSISTENCY — episode-local recurring props/setup and environment continuity.
   const continuityAnchors = params.continuityAnchors
     ?.map((anchor, index) => anchor.replace(/\s+/g, " ").trim())
     .filter(Boolean)
@@ -529,6 +551,13 @@ export function buildStylizedScenePrompt(params: {
   const continuityLayer = continuityAnchors
     ? `INANIMATE CONTINUITY — ${continuityAnchors}. These anchors never authorize another figure.`
     : "";
+
+  // ENVIRONMENT CONTINUITY — lock the setting so secondary environmental
+  // features (bridges, flowers, rock formations, streams) stay stable.
+  const environmentContinuityLock =
+    "ENVIRONMENT CONTINUITY LOCK — preserve every environmental feature, landmark, vegetation, " +
+    "structure, and natural formation described in the SETTING throughout every frame; " +
+    "never add, remove, redesign, relocate, or recolor any described element.";
 
   // ACTION is the only dynamic instruction. DETAILS supplies blocking and the
   // desired end-state, so legacy prose cannot accidentally introduce a second
@@ -551,9 +580,12 @@ export function buildStylizedScenePrompt(params: {
       : "",
   ].filter(Boolean);
   const action = params.action.replace(/\s+/g, " ").trim();
+  const othersClause = totalFigureCount <= 1
+    ? "No other figures appear."
+    : "Declared figures hold steady with subtle reactions.";
   const actionLayer = `ACTION AND CHANGE — ONE CONTINUOUS BEAT: ${action}. ` +
     (blockingParts.length > 0 ? `STATIC BLOCKING AND END-STATE REFERENCE: ${blockingParts.join(". ")}. ` : "") +
-    "Animate only that movement; others stay assigned with subtle reactions. No extra entrance, exit, " +
+    `Animate only that movement. ${othersClause} No extra entrance, exit, ` +
     "replay, cut, montage, or time jump.";
 
   // CONSISTENCY — static and temporal exclusions, stated once at the end.
@@ -578,13 +610,25 @@ export function buildStylizedScenePrompt(params: {
   ].filter(Boolean).join(" ");
   const soundAndRhythmLayer =
     "SOUND AND RHYTHM — silent visual; gentle readable pacing; no speech, music, or effects.";
+  // FINAL DUPLICATION GUARD — restate per-figure counts one last time so the
+  // video model receives an unambiguous terminal reminder.
+  const finalDuplicationGuard = totalFigureCount > 0
+    ? `FINAL DUPLICATION GUARD — render exactly: ${allCastNames.map((name) => `[${name}] × 1`).join("; ")}. ` +
+      `Total on-screen figure count is ${totalFigureCount}. Any frame showing more than ${totalFigureCount} ` +
+      `${totalFigureCount === 1 ? "figure" : "figures"} contains a forbidden duplicate.`
+    : "";
+
   const consistencyLayer = [
     "CONSISTENCY REQUIREMENTS —",
     totalFigureCount > 0 ? CHARACTER_APPEARANCE_BIBLE : "",
+    nonHumanWorldLock,
+    castIsolationLock,
     figureCountLayer,
     continuityLayer,
+    environmentContinuityLock,
     TEMPORAL_STABILITY_NEGATIVE_BIBLE,
     negativeLayer,
+    finalDuplicationGuard,
   ].filter(Boolean).join(" ");
 
   // Agnes Video 2.5's documented order: subject/setting, action/change,

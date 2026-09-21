@@ -94,11 +94,12 @@ describe("youtubeUploadTool", () => {
     expect(insertMock.mock.calls[0][0].requestBody.snippet.tags).toEqual([
       "kids",
       "storytime",
-      "Children stories",
-      "stories for kids",
-      "stories for children",
+      "childrens stories",
+      "moral stories",
+      "modern fairy tales",
       "educational",
     ]);
+    expect(insertMock.mock.calls[0][0].requestBody.snippet.categoryId).toBe("27");
     expect(JSON.parse(result)).toEqual({
       status: "uploaded",
       videoId: "video-123",

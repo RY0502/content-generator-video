@@ -1737,7 +1737,7 @@ describe("three-phase Agnes scene workflow", () => {
       client,
       submissionIntervalMs: 0,
       submissionBatchSize: 2,
-      statusRequestIntervalMs: 20,
+      statusRequestIntervalMs: 50,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
 
@@ -1746,8 +1746,8 @@ describe("three-phase Agnes scene workflow", () => {
 
     expect(verified.status).toBe("ready_to_download");
     expect(retrievalStarts).toHaveLength(3);
-    expect(retrievalStarts[1]! - retrievalStarts[0]!).toBeGreaterThanOrEqual(15);
-    expect(retrievalStarts[2]! - retrievalStarts[1]!).toBeGreaterThanOrEqual(15);
+    expect(retrievalStarts[1]! - retrievalStarts[0]!).toBeGreaterThanOrEqual(25);
+    expect(retrievalStarts[2]! - retrievalStarts[1]!).toBeGreaterThanOrEqual(25);
   });
 
   it("rejects measured narration over 12 seconds before any billed submission", async () => {

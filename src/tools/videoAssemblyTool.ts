@@ -1,7 +1,7 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile, rm, stat, rename, copyFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm, stat, rename, copyFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -279,6 +279,53 @@ function ensureSharedOutroAudio(): Promise<{ audioPath: string; durationSeconds:
   return sharedOutroAudio;
 }
 
+/**
+ * Resolves a background music track for video assembly.
+ * - If explicitPath is "none" (case-insensitive), disables background music.
+ * - If explicitPath points to an existing file, uses it.
+ * - Otherwise (undefined, null, or missing file), randomly selects a soothing, gentle
+ *   track from the YouTube Audio Library placed in assets/music.
+ */
+async function resolveBackgroundMusic(explicitPath?: string | null): Promise<string | null> {
+  const normalized = explicitPath?.trim();
+  if (normalized && normalized.toLowerCase() === "none") {
+    console.log("[VideoAssembly] Background music explicitly disabled ('none').");
+    return null;
+  }
+
+  if (normalized && normalized !== "null" && normalized !== "undefined") {
+    if (existsSync(normalized)) {
+      return normalized;
+    }
+    console.warn(`[VideoAssembly] Specified background music file not found: ${normalized}. Falling back to YouTube Audio Library assets.`);
+  }
+
+  const musicDir = path.join(CONFIG.assetsDir, "music");
+  if (!existsSync(musicDir)) {
+    return null;
+  }
+
+  try {
+    const entries = await readdir(musicDir);
+    const audioFiles = entries.filter((file) => {
+      const ext = path.extname(file).toLowerCase();
+      return [".mp3", ".wav", ".m4a", ".aac", ".ogg"].includes(ext);
+    });
+
+    if (audioFiles.length === 0) {
+      return null;
+    }
+
+    const randomIndex = Math.floor(Math.random() * audioFiles.length);
+    const selected = path.join(musicDir, audioFiles[randomIndex]);
+    console.log(`[VideoAssembly] Selected gentle soothing background music: ${path.basename(selected)}`);
+    return selected;
+  } catch (err) {
+    console.warn(`[VideoAssembly] Could not read music directory: ${err}`);
+    return null;
+  }
+}
+
 interface SceneInput {
   sceneNumber: number;
   narrationAudioPath: string;
@@ -393,7 +440,7 @@ export function buildVideoAssemblyTool(
       scenes: scenesInputSchema.describe(
         "Scenes in playback order as an array of scene objects. A JSON-encoded array string is also accepted and normalized."
       ),
-      musicPath: z.string().nullable().optional().describe("Optional single background-music track for the whole episode."),
+      musicPath: z.string().nullable().optional().describe("Optional background music track for the episode. If omitted or null, a random soothing, gentle track from the YouTube Audio Library (assets/music) is automatically selected and mixed at a low volume/frequency."),
       captionsSrtPath: z.string().nullable().optional(),
       burnSubtitles: z.boolean().default(CONFIG.burnSubtitles ?? false).describe("Whether to burn subtitles directly into video frames. Defaults to CONFIG.burnSubtitles (false)."),
     }),
@@ -781,16 +828,13 @@ export function buildVideoAssemblyTool(
       const concatenatedPath = path.join(workDir, "concatenated.mp4");
       await runFfmpeg(["-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", concatenatedPath]);
 
-      // 3. Mix in background music (looped/trimmed to episode length, low volume) if provided.
+      // 3. Mix in soothing, gentle background music (looped/trimmed to episode length).
+      // Uses lowpass filter (cuts harsh frequencies above 2800 Hz) and volume 0.08 (~ -22 dB)
+      // so it serves as a soft bedtime bed and does not hamper narration clarity.
       let withMusicPath = concatenatedPath;
-      // Validate musicPath: reject invalid string values like "None", "null", "undefined"
-      const validMusicPath = musicPath &&
-        musicPath !== "None" &&
-        musicPath !== "null" &&
-        musicPath !== "undefined" &&
-        existsSync(musicPath);
+      const effectiveMusicPath = await resolveBackgroundMusic(musicPath);
 
-      if (validMusicPath) {
+      if (effectiveMusicPath) {
         withMusicPath = path.join(workDir, "with_music.mp4");
         await runFfmpeg([
           "-i",
@@ -798,9 +842,9 @@ export function buildVideoAssemblyTool(
           "-stream_loop",
           "-1",
           "-i",
-          musicPath,
+          effectiveMusicPath,
           "-filter_complex",
-          "[0:a][1:a]amix=inputs=2:duration=first:weights=1 0.25[aout]",
+          "[1:a]lowpass=f=2800,volume=0.08[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]",
           "-map",
           "0:v",
           "-map",
@@ -812,8 +856,6 @@ export function buildVideoAssemblyTool(
           "-shortest",
           withMusicPath,
         ]);
-      } else if (musicPath && musicPath !== "None" && musicPath !== "null" && musicPath !== "undefined") {
-        console.warn(`[VideoAssembly] Background music file not found: ${musicPath}, skipping music track`);
       }
 
       // 4. Burn in captions directly onto video frames if burnSubtitles is enabled (defaults to false).

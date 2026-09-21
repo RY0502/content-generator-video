@@ -5,6 +5,7 @@ import path from "node:path";
 import { CONFIG } from "../config.js";
 import { SeriesState } from "../state/seriesState.js";
 import { chatText } from "../providers/aiClient.js";
+import { sanitizeAndLimitTags, sanitizeDescriptionHashtags } from "./youtubeUploadTool.js";
 
 /**
  * Generates YouTube metadata (title, description, tags, keywords) for publishing
@@ -70,17 +71,17 @@ function buildMetadataGenerationSystemPrompt(): string {
     "- Include a brief episode summary (3-4 sentences)\n" +
     "- Mention key characters and the lesson learned\n" +
     "- Add a call-to-action (subscribe, like, comment)\n" +
-    "- Include relevant hashtags at the end\n" +
+    "- Search Hashtags at the bottom: Limit strictly to 2-3 specific hashtags (e.g. #KidsStories #BedtimeStories #MoralStories). Never use long hashtag walls or spam lists.\n" +
     "- Keep it under 500 characters for optimal engagement\n\n" +
     "TAGS:\n" +
-    "- Generate 10-15 relevant tags\n" +
-    "- Include: series name, character names, themes, age group, content type\n" +
-    "- Use both specific and broad tags\n" +
-    "- Examples: 'kids stories', 'educational', 'preschool', 'teamwork', character names\n\n" +
+    "- Generate strictly 4 to 6 specific, highly accurate tags (e.g., ['kids stories', 'educational', 'moral stories', 'modern fairy tales']).\n" +
+    "- Eliminate tag stuffing: DO NOT repeat similar variations (e.g., do NOT include both 'stories for kids' and 'stories for children').\n" +
+    "- DO NOT include 'kids animation' or 'animated stories' as this is an illustrated storybook format, not full animation.\n" +
+    "- Include: series name, character names, and key moral/theme.\n\n" +
     "KEYWORDS:\n" +
-    "- Generate 5-10 keyword phrases for SEO\n" +
+    "- Generate 3-5 concise keyword phrases for SEO\n" +
     "- Focus on what parents/educators would search for\n" +
-    "- Examples: 'educational stories for kids 4-8', 'kids teamwork videos', 'kids adventure stories'\n\n" +
+    "- Examples: 'educational stories for kids 4-8', 'kids teamwork videos', 'kids bedtime stories'\n\n" +
     "Reply ONLY with valid JSON in this exact format:\n" +
     "{\n" +
     '  "title": "...",\n' +
@@ -202,13 +203,16 @@ export function buildYoutubeEpisodeMetadataTool(seriesState: SeriesState): Dynam
         throw new Error(`Failed to parse metadata JSON: ${rawResponse}`);
       }
 
-      // Ensure required tags are present
-      if (!metadata.tags.includes("kids stories")) {
-        metadata.tags.unshift("kids stories");
+      // Ensure required core tags without exceeding 4-6 tags, filter animation/duplicates, and limit hashtags
+      const rawTags = Array.isArray(metadata.tags) ? metadata.tags : [];
+      if (!rawTags.some((t) => t.toLowerCase() === "kids stories")) {
+        rawTags.unshift("kids stories");
       }
-      if (!metadata.tags.includes("educational")) {
-        metadata.tags.splice(1, 0, "educational");
+      if (!rawTags.some((t) => t.toLowerCase() === "educational")) {
+        rawTags.splice(1, 0, "educational");
       }
+      metadata.tags = sanitizeAndLimitTags(rawTags, 400, 6);
+      metadata.description = sanitizeDescriptionHashtags(metadata.description || "", 3);
 
       // Save metadata to file
       const metadataDir = path.join(
@@ -305,13 +309,16 @@ export function buildYoutubeSeriesMetadataTool(seriesState: SeriesState): Dynami
         throw new Error(`Failed to parse series metadata JSON: ${rawResponse}`);
       }
 
-      // Ensure required tags for children's content
-      const requiredTags = ["kids stories", "educational", "Children stories", "stories for kids", "stories for children"];
-      for (const tag of requiredTags) {
-        if (!metadata.seriesTags.includes(tag)) {
-          metadata.seriesTags.unshift(tag);
-        }
+      // Ensure clean, deduplicated series tags without exceeding 4-6 tags, filter animation/duplicates, and limit hashtags
+      const rawSeriesTags = Array.isArray(metadata.seriesTags) ? metadata.seriesTags : [];
+      if (!rawSeriesTags.some((t) => t.toLowerCase() === "kids stories")) {
+        rawSeriesTags.unshift("kids stories");
       }
+      if (!rawSeriesTags.some((t) => t.toLowerCase() === "educational")) {
+        rawSeriesTags.splice(1, 0, "educational");
+      }
+      metadata.seriesTags = sanitizeAndLimitTags(rawSeriesTags, 400, 6);
+      metadata.playlistDescription = sanitizeDescriptionHashtags(metadata.playlistDescription || "", 3);
 
       // Save metadata to file
       const metadataDir = path.join(CONFIG.outputDir, `series_${seriesId}`, "metadata");

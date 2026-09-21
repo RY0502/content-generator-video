@@ -15,7 +15,120 @@ function parseJsonArrayInput(value: unknown): unknown {
   }
 }
 
-const DEFAULT_TAGS = ["Children stories", "stories for kids", "stories for children", "educational"];
+export const DEFAULT_TAGS = [
+  "childrens stories",
+  "moral stories",
+  "modern fairy tales",
+  "educational",
+];
+
+/**
+ * Limits description hashtags to a small number of specific ones (default 2-3).
+ * Strips out excess hashtags from hashtag walls/blocks to prevent spam flags.
+ */
+export function sanitizeDescriptionHashtags(description: string, maxHashtags: number = 3): string {
+  if (!description) return "";
+
+  const hashtagRegex = /#[\p{L}\p{N}_]+/gu;
+  const matches = description.match(hashtagRegex);
+  if (!matches || matches.length <= maxHashtags) {
+    return description;
+  }
+
+  let kept = 0;
+  return description
+    .replace(hashtagRegex, (tag) => {
+      kept++;
+      return kept <= maxHashtags ? tag : "";
+    })
+    .replace(/[ \t]+/g, " ")
+    .replace(/[ \t]+(\r?\n)/g, "$1")
+    .replace(/(\r?\n){3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Sanitizes and limits tags to comply with YouTube Data API constraints and anti-spam guidelines:
+ * - Limits to 4–6 specific, highly accurate tags (eliminating tag stuffing).
+ * - Individual tag length between 2 and 100 characters.
+ * - Total characters across all tags (joined by comma) must be <= maxTotalChars (default 400).
+ * - Strips characters forbidden by YouTube: '<', '>', '#', '"', '\'', newlines.
+ * - Splits tags on embedded commas.
+ * - Strips misleading animation tags ('animation', 'animated').
+ * - Deduplicates tags case-insensitively and filters repetitive phrase variations.
+ */
+export function sanitizeAndLimitTags(
+  tags: string[],
+  maxTotalChars: number = 400,
+  maxTags: number = 6
+): string[] {
+  const cleanTags: string[] = [];
+  let currentTotalChars = 0;
+
+  for (const rawTag of tags) {
+    if (typeof rawTag !== "string") continue;
+    const stripped = rawTag
+      .replace(/[<>#"']/g, "")
+      .replace(/[\r\n\t]+/g, " ")
+      .trim();
+
+    const subTags = stripped.includes(",") ? stripped.split(",").map((t) => t.trim()) : [stripped];
+
+    for (let t of subTags) {
+      t = t.replace(/\s+/g, " ").trim();
+      if (!t || t.length < 2 || t.length > 100) continue;
+
+      const lower = t.toLowerCase();
+      // Remove misleading format tags unless genuine animation is produced
+      if (lower.includes("animation") || lower.includes("animated")) {
+        continue;
+      }
+
+      if (cleanTags.some((existing) => existing.toLowerCase() === lower)) continue;
+
+      // Filter redundant variations (e.g. 'stories for kids' vs 'stories for children' vs 'children stories')
+      const isRedundantStoriesTag =
+        (lower.includes("stories for") || lower.includes("children stories") || lower.includes("kids stories")) &&
+        cleanTags.some((existing) => {
+          const exLower = existing.toLowerCase();
+          return exLower.includes("stories for") || exLower.includes("children stories") || exLower.includes("kids stories");
+        });
+
+      if (isRedundantStoriesTag) {
+        continue;
+      }
+
+      const additionalLength = cleanTags.length === 0 ? t.length : t.length + 1;
+      if (currentTotalChars + additionalLength > maxTotalChars) {
+        break;
+      }
+
+      cleanTags.push(t);
+      currentTotalChars += additionalLength;
+
+      if (cleanTags.length >= maxTags) {
+        return cleanTags;
+      }
+    }
+  }
+
+  // If fewer than 4 tags, supplement with curated default tags
+  if (cleanTags.length < 4) {
+    for (const defTag of DEFAULT_TAGS) {
+      const lower = defTag.toLowerCase();
+      if (!cleanTags.some((t) => t.toLowerCase() === lower)) {
+        const additionalLength = cleanTags.length === 0 ? defTag.length : defTag.length + 1;
+        if (currentTotalChars + additionalLength <= maxTotalChars) {
+          cleanTags.push(defTag);
+          currentTotalChars += additionalLength;
+        }
+      }
+      if (cleanTags.length >= 4) break;
+    }
+  }
+
+  return cleanTags.length > 0 ? cleanTags : ["childrens stories", "moral stories", "educational"];
+}
 
 export interface YoutubeUploadReceipt {
   seriesId: number;
@@ -90,6 +203,7 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
         "Optional custom thumbnail image (JPG/PNG, <2MB). If omitted, YouTube selects a frame automatically."
       ),
       privacyStatus: z.enum(["public", "unlisted", "private"]).default("public").describe("Video privacy status (default: public)."),
+      categoryId: z.string().default("27").describe("YouTube category ID: '27' for Education (default), '1' for Film & Animation."),
     }),
     func: async ({
       videoPath,
@@ -100,6 +214,7 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
       tags,
       thumbnailPath,
       privacyStatus,
+      categoryId,
     }) => {
       if (!CONFIG.youtubeUploadEnabled) {
         return JSON.stringify({
@@ -138,9 +253,13 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
       // the caller explicitly supplies a separate custom thumbnail image.
       const finalThumbnailPath = thumbnailPath || undefined;
 
-      // Combine episode-specific tags with common default tags
+      // Combine episode-specific tags with common default tags, enforce 4-6 specific tags, and YouTube constraints
       const customTags = tags || [];
-      const combinedTags = Array.from(new Set([...customTags, ...DEFAULT_TAGS]));
+      const combinedTags = sanitizeAndLimitTags([...customTags, ...DEFAULT_TAGS], 400, 6);
+      const cleanDescription = sanitizeDescriptionHashtags(
+        description.replace(/[<>]/g, "").trim().slice(0, 5000),
+        3
+      );
 
       // Validate video file exists
       try {
@@ -188,9 +307,9 @@ export function buildYoutubeUploadTool(options: YoutubeUploadToolOptions = {}): 
       const videoMetadata: youtube_v3.Schema$Video = {
         snippet: {
           title: title.slice(0, 100), // YouTube max title length
-          description: description,
+          description: cleanDescription,
           tags: combinedTags,
-          categoryId: "22", // People & Blogs (use "24" for Entertainment)
+          categoryId: categoryId || "27", // Education (27) for kids educational moral stories
           defaultLanguage: "en",
           defaultAudioLanguage: "en",
         },

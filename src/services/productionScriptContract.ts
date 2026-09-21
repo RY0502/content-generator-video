@@ -1,4 +1,5 @@
 import { inspectEpisodeNarrationManifest } from "./narrationContract.js";
+import { containsExactRosterOrAlias } from "./sceneCastCanonicalizer.js";
 
 /** Agnes accepts at most five named portrait references in one scene request. */
 export const MAX_SCENE_MAIN_CHARACTER_COUNT = 5;
@@ -233,6 +234,23 @@ export function inspectProductionScript(
         `${label} characterNames contains ${characterNames.length} names; at most ` +
         `${MAX_SCENE_MAIN_CHARACTER_COUNT} exact roster names are allowed.`,
       );
+    }
+    if (characterNames.length === 0) {
+      const actionText = normalizedText(scene.action);
+      const narrationTextVal = normalizedText(scene.narrationText);
+      const combinedText = `${actionText} ${narrationTextVal}`;
+      const mentionedCharacters: string[] = [];
+      for (const rosterName of roster) {
+        if (containsExactRosterOrAlias(combinedText, rosterName)) {
+          mentionedCharacters.push(rosterName);
+        }
+      }
+      if (mentionedCharacters.length > 0) {
+        issues.push(
+          `${label} action/narration mentions main character ${mentionedCharacters.map((c) => `"${c}"`).join(", ")} ` +
+          `but characterNames is empty; active main characters must be listed in characterNames.`,
+        );
+      }
     }
     for (const name of characterNames) {
       if (!rosterSet.has(name)) {
