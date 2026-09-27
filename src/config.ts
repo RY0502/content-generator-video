@@ -138,6 +138,9 @@ export const CONFIG = {
     process.env.ANYAPI_KEY_7 ?? "",
     process.env.ANYAPI_KEY_8 ?? "",
   ].filter((key): key is string => Boolean(key)),
+  imageProvider: (process.env.IMAGE_PROVIDER ?? "pollinations") as "pollinations" | "anyapi",
+  pollinationsModel1: process.env.POLLINATIONS_MODEL_1 ?? "flux",
+  pollinationsModel2: process.env.POLLINATIONS_MODEL_2 ?? "turbo",
   anyApiBaseUrl: process.env.ANYAPI_BASE_URL?.trim() || "https://api.anyapi.ai",
   anyApiImageModel: resolveAnyApiImageModel(
     process.env.ANYAPI_IMAGE_MODEL,

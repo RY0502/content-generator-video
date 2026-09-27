@@ -544,10 +544,10 @@ describe("sceneCastCanonicalizer", () => {
       "Pebble the Turtle",
     ]);
     expect(result.scene.characterVisuals).toHaveLength(2);
-    expect(result.scene.characterVisuals![0]).toEqual(
+    expect((result.scene.characterVisuals as any[])[0]).toEqual(
       expect.objectContaining({ name: "Nibbles the Hamster", visualForm: "real_creature", speciesOrType: "hamster" }),
     );
-    expect(result.scene.characterVisuals![1]).toEqual(
+    expect((result.scene.characterVisuals as any[])[1]).toEqual(
       expect.objectContaining({ name: "Pebble the Turtle", visualForm: "real_creature", speciesOrType: "turtle" }),
     );
   });

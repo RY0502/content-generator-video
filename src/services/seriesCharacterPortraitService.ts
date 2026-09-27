@@ -4,6 +4,7 @@ import path from "node:path";
 import { CONFIG } from "../config.js";
 import { buildCharacterPortraitPrompt } from "../promptBuilder.js";
 import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
+import { generatePollinationsImageDetailed } from "../providers/pollinationsImageClient.js";
 import {
   canonicalCharacterImageName,
   downloadSupabaseCharacterReference,
@@ -240,7 +241,22 @@ export async function ensureSeriesCharacterPortraits(params: {
     params.roster ? [...params.roster] : await seriesState.getSeriesCharacters(seriesId),
   );
   const dependencies = params.dependencies ?? {};
-  const generatePortrait = dependencies.generatePortrait ?? generateAnyApiSceneImage;
+  const defaultGeneratePortrait = async (prompt: string, modelName: string): Promise<Buffer> => {
+    if (CONFIG.imageProvider === "pollinations") {
+      logStep("Generating portrait via Pollinations");
+      const { bytes, model: usedModel } = await generatePollinationsImageDetailed(
+        prompt,
+        CONFIG.pollinationsModel1,
+        CONFIG.pollinationsModel2,
+        1024,
+        1024,
+      );
+      logStep(`✅ Portrait generated via Pollinations (${usedModel})`);
+      return bytes;
+    }
+    return generateAnyApiSceneImage(prompt, modelName);
+  };
+  const generatePortrait = dependencies.generatePortrait ?? defaultGeneratePortrait;
   const downloadReference = dependencies.downloadReference ?? downloadSupabaseCharacterReference;
   const uploadReference = dependencies.uploadReference ?? uploadSupabaseCharacterReference;
   const storeOptions = dependencies.storeOptions ?? configuredSupabaseCharacterReferenceStoreOptions();

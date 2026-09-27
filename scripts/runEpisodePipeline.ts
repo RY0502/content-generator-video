@@ -1,4 +1,5 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import dotenv from "dotenv";
 import { CONFIG } from "../src/config.js";
@@ -64,7 +65,7 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
     let receipt: any = {};
     try {
       receipt = JSON.parse(row.provider_receipt_json as string);
-    } catch {}
+    } catch { }
 
     const attempts = receipt.attempts ?? [];
     const lastAttempt = attempts[attempts.length - 1] ?? {};
@@ -121,13 +122,125 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
   return { completed, inProgress, pending };
 }
 
+
+/**
+ * Ensures the series exists in Turso with the specified seriesId.
+ * If not already present in Turso, parses prompt.txt to create the series,
+ * character sheets, and initial episode manifest.
+ */
+async function ensureSeriesFromPrompt(
+  seriesId: number,
+  seriesState: SeriesState,
+  customPromptPath?: string
+): Promise<void> {
+  const exists = await seriesState.seriesExists(seriesId);
+  if (exists) {
+    console.log(`[Series Check] Series ${seriesId} already exists in Turso.`);
+    return;
+  }
+
+  console.log(`[Series Check] Series ${seriesId} not found in Turso. Bootstrapping from prompt.txt...`);
+
+  const promptCandidates = [
+    customPromptPath,
+    fileURLToPath(new URL("../prompt.txt", import.meta.url)),
+    path.resolve(process.cwd(), "prompt.txt"),
+  ].filter(Boolean) as string[];
+
+  const promptPath = promptCandidates.find((p) => existsSync(p));
+  if (!promptPath) {
+    throw new Error(
+      `Cannot bootstrap series ${seriesId}: prompt.txt not found. Checked: ${promptCandidates.join(", ")}`
+    );
+  }
+
+  console.log(`[Series Check] Reading series definition from: ${promptPath}`);
+  const content = readFileSync(promptPath, "utf8");
+
+  const titleMatch = content.match(/\*\*([^*]+)\*\*\s+series/i);
+  const conceptName = titleMatch ? titleMatch[1].trim() : "Time-Travel Backpack";
+
+  const premiseMatch = content.match(/##\s*Series premise\s*\n+([\s\S]*?)(?=\n##|$)/i);
+  const premise = premiseMatch ? premiseMatch[1].trim() : "";
+
+  const characters: Array<{ name: string; description: string }> = [];
+  const castMatch = content.match(/##\s*Fixed main cast\s*\n+([\s\S]*?)(?=\n##|$)/i);
+  if (castMatch) {
+    const charRegex = /^-\s*\*\*([^:*]+):\*\*\s*(.+)$/gm;
+    let m: RegExpExecArray | null;
+    while ((m = charRegex.exec(castMatch[1])) !== null) {
+      characters.push({ name: m[1].trim(), description: m[2].trim() });
+    }
+  }
+
+  const formulaMatch = content.match(/##\s*Story design\s*\n+([\s\S]*?)(?=\n##|$)/i);
+  const episodeFormula = formulaMatch
+    ? formulaMatch[1].trim().slice(0, 500)
+    : "Children travel through time and space with Bobo to solve gentle adventures with teamwork and wonder.";
+
+  const environments = [
+    {
+      name: "Time Portal",
+      description: "A swirling magical portal through time and space connecting past, present, and future worlds.",
+    },
+  ];
+
+  // Insert series with the explicit seriesId
+  await tursoClient.execute({
+    sql: `INSERT INTO series (id, concept_name, characters_json, environments_json, episode_formula)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            concept_name = excluded.concept_name,
+            characters_json = excluded.characters_json,
+            environments_json = excluded.environments_json,
+            episode_formula = excluded.episode_formula`,
+    args: [
+      seriesId,
+      conceptName,
+      JSON.stringify(characters),
+      JSON.stringify(environments),
+      episodeFormula,
+    ],
+  });
+  console.log(`[Series Bootstrap] ✅ Created Series ${seriesId} ("${conceptName}") in Turso.`);
+
+  // Upsert character sheets
+  for (const char of characters) {
+    await seriesState.upsertCharacterSheet(
+      seriesId,
+      char.name,
+      char.description,
+      {},
+      char.description
+    );
+  }
+  console.log(`[Series Bootstrap] ✅ Upserted ${characters.length} character sheets.`);
+
+  // Seed 25-episode manifest in Turso if empty
+  const seasonEpisodes = Array.from({ length: 25 }, (_, idx) => {
+    const epNum = idx + 1;
+    return {
+      episodeNumber: epNum,
+      title: epNum === 1 ? "The First Adventure" : `Episode ${epNum}`,
+      premise:
+        epNum === 1
+          ? premise.slice(0, 300) || "The children discover Bobo and their first time-travel adventure."
+          : `Episode ${epNum} of ${conceptName}`,
+    };
+  });
+
+  await seriesState.bulkInsertEpisodesIfEmpty(seriesId, seasonEpisodes);
+  console.log(`[Series Bootstrap] ✅ Seeded 25 episode slots in Turso.`);
+}
+
 export async function runEpisodePipeline(options: {
   seriesId?: number;
   episodeNumber?: number;
   maxCycles?: number;
   cooldownMs?: number;
+  promptPath?: string;
 } = {}): Promise<void> {
-  const seriesId = options.seriesId ?? 16;
+  const seriesId = options.seriesId ?? 17;
   const episodeNumber = options.episodeNumber ?? 1;
   const maxCycles = options.maxCycles ?? 60;
   const cooldownMs = options.cooldownMs ?? 30_000;
@@ -140,6 +253,9 @@ export async function runEpisodePipeline(options: {
 
   const seriesState = new SeriesState();
   await seriesState.initialize();
+
+  // Ensure series exists in Turso or bootstrap it from prompt.txt using seriesId
+  await ensureSeriesFromPrompt(seriesId, seriesState, options.promptPath);
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
     console.log(`\n>>> [Cycle ${cycle}/${maxCycles}] State Check @ ${new Date().toISOString()}`);
