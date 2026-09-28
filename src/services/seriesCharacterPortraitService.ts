@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG } from "../config.js";
 import { buildCharacterPortraitPrompt } from "../promptBuilder.js";
+import { generateAgnesImage } from "../providers/agnesImageClient.js";
 import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
 import { generatePollinationsImageDetailed } from "../providers/pollinationsImageClient.js";
 import {
@@ -18,6 +19,12 @@ import {
   type ReferenceImage,
 } from "../state/seriesState.js";
 import { logStep } from "../utils/logger.js";
+import {
+  inferDefaultCharacterVisual,
+  type SceneCastRecord,
+} from "./sceneCastCanonicalizer.js";
+import { chatVisionFrameworkOnly } from "../providers/aiClient.js";
+import type { SceneCharacterVisual } from "../promptBuilder.js";
 
 export const MAX_SERIES_MAIN_CHARACTERS = 5;
 const CHARACTER_PORTRAIT_REQUEST_SCHEMA_VERSION = 1;
@@ -47,10 +54,18 @@ export interface EnsureSeriesCharacterPortraitsResult {
   characters: EnsuredSeriesCharacterPortrait[];
 }
 
+export type CharacterPortraitAuditor = (params: {
+  characterName: string;
+  characterDescription: string;
+  visual?: SceneCharacterVisual;
+  imageBytes: Buffer;
+}) => Promise<{ pass: boolean; reason?: string }>;
+
 export interface SeriesCharacterPortraitDependencies {
   generatePortrait?: typeof generateAnyApiSceneImage;
   downloadReference?: typeof downloadSupabaseCharacterReference;
   uploadReference?: typeof uploadSupabaseCharacterReference;
+  auditPortrait?: CharacterPortraitAuditor;
   storeOptions?: SupabaseCharacterReferenceStoreOptions;
   assetsDir?: string;
   model?: string;
@@ -223,6 +238,53 @@ function assertMatchingLocalAndPublic(params: {
  * `generation_prompt` column receives only the character name so old readers
  * cannot accidentally reuse a verbose character sheet in a video prompt.
  */
+async function defaultAuditPortrait(params: {
+  characterName: string;
+  characterDescription: string;
+  visual?: SceneCharacterVisual;
+  imageBytes: Buffer;
+}): Promise<{ pass: boolean; reason?: string }> {
+  if (!params.visual || params.visual.visualForm === "humanoid") {
+    return { pass: true };
+  }
+  // Only inspect if bytes is a valid image file (PNG/JPEG magic bytes)
+  const isPng = params.imageBytes.length > 8 && params.imageBytes[0] === 0x89 && params.imageBytes[1] === 0x50;
+  const isJpg = params.imageBytes.length > 3 && params.imageBytes[0] === 0xff && params.imageBytes[1] === 0xd8;
+  if (!isPng && !isJpg) {
+    return { pass: true };
+  }
+  try {
+    const systemPrompt =
+      "You are a quality-assurance visual auditor for animated character reference sheets. " +
+      "Verify whether the illustrated character strictly matches the intended non-human species/ontology.";
+    const userText =
+      `Character Name: "${params.characterName}"\n` +
+      `Description: "${params.characterDescription}"\n` +
+      `Required Ontology: NON-HUMAN (${params.visual.visualForm}: ${params.visual.speciesOrType || "non-human"}).\n` +
+      "Question: Does this image depict a human being (such as a human child, boy, girl, or adult person) instead of, or carrying/wearing, the object/animal?\n" +
+      'Reply in JSON only: { "hasHuman": boolean, "isExpectedNonHuman": boolean, "reason": string }';
+    const raw = await chatVisionFrameworkOnly({
+      systemPrompt,
+      userText,
+      imageBase64: params.imageBytes.toString("base64"),
+      mimeType: isPng ? "image/png" : "image/jpeg",
+    });
+    const parsed = raw.match(/\{[\s\S]*\}/);
+    if (parsed) {
+      const json = JSON.parse(parsed[0]);
+      if (json.hasHuman === true && json.isExpectedNonHuman === false) {
+        return {
+          pass: false,
+          reason: `Image depicts a human person instead of the intended non-human ${params.visual.speciesOrType || "object/creature"}: ${json.reason || "detected human"}`,
+        };
+      }
+    }
+  } catch (error) {
+    console.warn(`[seriesCharacterPortraitService] Visual audit skipped: ${(error as Error).message}`);
+  }
+  return { pass: true };
+}
+
 export async function ensureSeriesCharacterPortraits(params: {
   seriesState: SeriesState;
   seriesId: number;
@@ -242,6 +304,16 @@ export async function ensureSeriesCharacterPortraits(params: {
   );
   const dependencies = params.dependencies ?? {};
   const defaultGeneratePortrait = async (prompt: string, modelName: string): Promise<Buffer> => {
+    if (CONFIG.imageProvider === "agnes") {
+      logStep(`Generating portrait via Agnes Image (${CONFIG.agnesImageModel})`);
+      const { bytes, model: usedModel } = await generateAgnesImage(prompt, {
+        aspectRatio: "1:1",
+        size: "1K",
+        model: CONFIG.agnesImageModel,
+      });
+      logStep(`✅ Portrait generated via Agnes Image (${usedModel})`);
+      return bytes;
+    }
     if (CONFIG.imageProvider === "pollinations") {
       logStep("Generating portrait via Pollinations");
       const { bytes, model: usedModel } = await generatePollinationsImageDetailed(
@@ -259,6 +331,7 @@ export async function ensureSeriesCharacterPortraits(params: {
   const generatePortrait = dependencies.generatePortrait ?? defaultGeneratePortrait;
   const downloadReference = dependencies.downloadReference ?? downloadSupabaseCharacterReference;
   const uploadReference = dependencies.uploadReference ?? uploadSupabaseCharacterReference;
+  const auditPortrait = dependencies.auditPortrait ?? defaultAuditPortrait;
   const storeOptions = dependencies.storeOptions ?? configuredSupabaseCharacterReferenceStoreOptions();
   const assetsDir = dependencies.assetsDir ?? CONFIG.assetsDir;
   const model = dependencies.model ?? CONFIG.anyApiImageModel;
@@ -324,14 +397,42 @@ export async function ensureSeriesCharacterPortraits(params: {
       status = "uploaded_existing_local";
       logStep(`Uploaded existing ${character.name} portrait to Supabase`);
     } else {
+      const visual = inferDefaultCharacterVisual(character.name, character.description);
       const prompt = buildCharacterPortraitPrompt({
         characterDescription: `${character.name}: ${character.description}`,
+        characterVisual: visual,
       });
       logStep(`Generating one portrait with model="${model}" for ${character.name}`);
       localBytes = await generatePortrait(prompt, model);
       if (localBytes.length < 1) {
         throw new Error(`Portrait provider returned an empty image for ${character.name}.`);
       }
+
+      let audit = await auditPortrait({
+        characterName: character.name,
+        characterDescription: character.description,
+        visual,
+        imageBytes: localBytes,
+      });
+
+      if (!audit.pass) {
+        logStep(`⚠️ Portrait audit failed for ${character.name}: ${audit.reason}. Retrying with strict anti-human prompt...`);
+        const reinforcedPrompt = `${prompt} STRICT NEGATIVE: ABSOLUTELY NO HUMAN PERSON, NO HUMAN BOY, NO HUMAN GIRL, NO CHILD. RENDER ONLY THE ${visual?.speciesOrType?.toUpperCase() || "OBJECT"} ITSELF.`;
+        localBytes = await generatePortrait(reinforcedPrompt, model);
+        if (localBytes.length < 1) {
+          throw new Error(`Portrait provider returned an empty image for ${character.name}.`);
+        }
+        audit = await auditPortrait({
+          characterName: character.name,
+          characterDescription: character.description,
+          visual,
+          imageBytes: localBytes,
+        });
+        if (!audit.pass) {
+          throw new Error(`Character portrait failed visual ontology audit for ${character.name}: ${audit.reason}`);
+        }
+      }
+
       await writeAtomically(canonicalPath, localBytes);
       publicReference = await uploadReference(
         { seriesId, characterName: character.name },

@@ -816,6 +816,7 @@ function withReferenceIdentityMap(
     + "colors, clothing, accessories, markings, proportions, and silhouette in every frame. "
     + "Render each character with its complete connected body from head to feet/paws/wings as depicted in the reference; never render a floating head or headless body. Exactly one figure per reference image. "
     + "Apply each reference image strictly and exclusively to its named character; never duplicate the reference character, and never blend reference features onto other figures. "
+    + "Non-human, living-object, and animal characters must strictly preserve their non-human form across all frames; NEVER render them as a human child, boy, girl, or person. "
     + "Supporting figures not covered by a reference image must also appear exactly once; never clone or duplicate any supporting figure.";
 }
 

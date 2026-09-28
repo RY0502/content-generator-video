@@ -22,6 +22,19 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("exactly one complete figure and one pose");
     expect(prompt).toContain("no duplicate or clone");
     expect(prompt).toContain("2D only");
+    expect(prompt).toContain("anthropomorphic living backpack, not a human");
+    expect(prompt).toContain("STRICT NEGATIVE: no human child");
+  });
+
+  it("builds human portrait prompt for humanoid characters without object guards", () => {
+    const prompt = buildCharacterPortraitPrompt({
+      characterDescription: "Mia: A curious 5-year-old girl with chestnut-brown bob hair.",
+    });
+
+    expect(prompt.length).toBeLessThanOrEqual(1_000);
+    expect(prompt).toContain("head-to-toe");
+    expect(prompt).toContain("Mia");
+    expect(prompt).not.toContain("anthropomorphic living");
   });
 
   it("includes recurring supporting entities and single-moment guidance in scene prompts", () => {

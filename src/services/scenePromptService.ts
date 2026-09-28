@@ -4,7 +4,10 @@ import {
   type SceneCharacterVisual,
 } from "../promptBuilder.js";
 import type { SeriesState } from "../state/seriesState.js";
-import { canonicalizeSceneCast } from "./sceneCastCanonicalizer.js";
+import {
+  canonicalizeSceneCast,
+  inferDefaultCharacterVisual,
+} from "./sceneCastCanonicalizer.js";
 
 export const MAX_AGNES_CHARACTER_REFERENCES = 5;
 
@@ -52,6 +55,7 @@ export async function materializeScenePrompt(params: {
   const roster = await seriesState.getSeriesCharacters(params.input.seriesId);
   const castCanonicalization = canonicalizeSceneCast(params.input, {
     mainCharacterNames: roster.map(({ name }) => name),
+    mainCharacters: roster,
   });
   const ambiguousAlias = castCanonicalization.audit.unresolved.find(
     ({ kind }) => kind === "ambiguous_main_character_alias",
@@ -111,13 +115,21 @@ export async function materializeScenePrompt(params: {
     );
   }
 
+  const effectiveVisuals = (input.characterVisuals && input.characterVisuals.length > 0)
+    ? input.characterVisuals
+    : characterNames.map((name) => {
+        const charDef = roster.find((c) => c.name.toLowerCase() === name.toLowerCase());
+        return inferDefaultCharacterVisual(name, charDef?.description)
+          ?? { name, visualForm: "humanoid" as const, speciesOrType: "human child", humanoidAllowed: true };
+      });
+
   return {
     characterNames,
     characterDescriptions,
     characterReferenceSources,
     prompt: buildStylizedScenePrompt({
       characterNames,
-      characterVisuals: input.characterVisuals,
+      characterVisuals: effectiveVisuals,
       characterDescriptions,
       environmentDescription: input.environmentDescription,
       action: input.action,

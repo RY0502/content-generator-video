@@ -1,4 +1,4 @@
-﻿import { createClient } from "@libsql/client";
+import { createClient } from "@libsql/client";
 import dotenv from "dotenv";
 import { canonicalEpisodeScriptJson, SeriesState } from "../src/state/seriesState.js";
 import { buildEpisodeTtsTool } from "../src/tools/ttsTool.js";
@@ -8,6 +8,7 @@ import { CONFIG } from "../src/config.js";
 import { rm, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 dotenv.config();
 
@@ -408,7 +409,12 @@ async function main() {
   console.log("=================================================\n");
 }
 
-main().catch((err) => {
-  console.error("Failed to produce episode script & audio:", err);
-  process.exit(1);
-});
+const isDirectExecution = process.argv[1] &&
+  fileURLToPath(import.meta.url).toLowerCase() === path.resolve(process.argv[1]).toLowerCase();
+
+if (isDirectExecution) {
+  main().catch((err) => {
+    console.error("Failed to produce episode script & audio:", err);
+    process.exit(1);
+  });
+}

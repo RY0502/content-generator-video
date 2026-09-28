@@ -156,6 +156,42 @@ describe("ensureSeriesCharacterPortraits", () => {
     expect(uploadReference.mock.calls[0][1]).toEqual(bytes);
   });
 
+  it("retries portrait generation when audit detects human depiction on a non-human character", async () => {
+    const badBytes = Buffer.from("bad-human-portrait");
+    const goodBytes = Buffer.from("good-backpack-portrait");
+    const { state } = fakeSeriesState(roster);
+    const generatePortrait = vi.fn()
+      .mockResolvedValueOnce(badBytes)
+      .mockResolvedValueOnce(goodBytes);
+    const uploadReference = vi.fn(async (_identity, uploaded: Buffer) => remoteReference(uploaded));
+    const auditPortrait = vi.fn()
+      .mockResolvedValueOnce({ pass: false, reason: "Image depicts a human boy" })
+      .mockResolvedValueOnce({ pass: true });
+
+    const result = await ensureSeriesCharacterPortraits({
+      seriesState: state,
+      seriesId: 7,
+      dependencies: {
+        assetsDir,
+        model,
+        storeOptions,
+        generatePortrait,
+        downloadReference: vi.fn(async () => null),
+        uploadReference,
+        auditPortrait,
+      },
+    });
+
+    expect(result.generatedCount).toBe(1);
+    expect(generatePortrait).toHaveBeenCalledTimes(2);
+    expect(generatePortrait.mock.calls[1][0]).toContain("STRICT NEGATIVE");
+    expect(uploadReference).toHaveBeenCalledWith(
+      expect.anything(),
+      goodBytes,
+      expect.anything(),
+    );
+  });
+
   it("reuses and migrates an old portrait.png asset before publishing it", async () => {
     const bytes = Buffer.from("legacy-local-portrait");
     const { state } = fakeSeriesState(roster);

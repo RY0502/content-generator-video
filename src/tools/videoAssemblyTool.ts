@@ -1002,11 +1002,19 @@ export function buildVideoAssemblyTool(
           durationSeconds: renderedDuration,
           error: null,
         });
-        await seriesState.updateEpisodeStatus(
-          (await seriesState.getEpisodeByNumber(seriesId, episodeNumber))!.id,
-          "assembly",
-          { outputPath: finalPath },
-        );
+        if (!CONFIG.youtubeUploadEnabled && typeof (seriesState as any).completeEpisodeWithoutUpload === "function") {
+          await (seriesState as any).completeEpisodeWithoutUpload({
+            seriesId,
+            episodeNumber,
+            outputPath: finalPath,
+          });
+        } else {
+          await seriesState.updateEpisodeStatus(
+            (await seriesState.getEpisodeByNumber(seriesId, episodeNumber))!.id,
+            "assembly",
+            { outputPath: finalPath },
+          );
+        }
       }
 
       endTimer(timerName);

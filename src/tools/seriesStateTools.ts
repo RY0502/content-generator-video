@@ -542,12 +542,18 @@ export function buildSeriesStateTools(
               if (youtubeUploadEnabled) {
                 resumeAction = "youtube_upload";
               } else {
+                if (typeof (seriesState as any).completeEpisodeWithoutUpload === "function") {
+                  await (seriesState as any).completeEpisodeWithoutUpload({
+                    seriesId,
+                    episodeNumber: availability.episode.episodeNumber,
+                  });
+                }
                 resumeAction = "stop";
                 youtubeUploadValidation = {
                   status: "disabled",
                   enabled: false,
                   message:
-                    "YouTube upload is disabled. The assembled episode remains at status=assembly and is not marked complete.",
+                    "YouTube upload is disabled. The assembled episode has been completed in the database.",
                 };
               }
             } catch (error) {
@@ -642,7 +648,7 @@ export function buildSeriesStateTools(
 
   const updateEpisodeStatusSchema = z.object({
     episodeId: z.number().int().positive(),
-    status: z.enum(["pending", "audio", "assembly", "failed"]),
+    status: z.enum(["pending", "audio", "assembly", "failed", "done"]),
     outputPath: z.string().optional(),
   }).strict().catch(({ error, input }) => {
     const raw = input && typeof input === "object" && !Array.isArray(input)
@@ -658,7 +664,7 @@ export function buildSeriesStateTools(
       omittedIssueCount: Math.max(0, paths.length - 8),
     } as unknown as {
       episodeId: number;
-      status: "pending" | "audio" | "assembly" | "failed";
+      status: "pending" | "audio" | "assembly" | "failed" | "done";
       outputPath?: string;
     };
   });
@@ -671,7 +677,7 @@ export function buildSeriesStateTools(
       "refine_episode_script exclusively own draft storage, validation, and promotion to the production script. " +
       (youtubeUploadEnabled
         ? "The terminal done transition is intentionally unavailable here: upload_to_youtube records the durable receipt, marks done, and cleans per-episode Agnes tracking after a successful upload."
-        : "The terminal done transition is intentionally unavailable. YouTube upload is disabled, so a finished episode remains safely at assembly and is never marked done."),
+        : "When YouTube upload is disabled, status=done marks the assembled episode complete in the database without uploading."),
     schema: updateEpisodeStatusSchema,
     func: async (input) => {
       if (isInvalidStatusUpdate(input)) {

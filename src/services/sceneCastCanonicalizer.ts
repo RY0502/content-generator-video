@@ -39,6 +39,10 @@ export interface SceneCastCanonicalizationOptions {
   canonicalSupportingDescriptors?: CanonicalSupportingDescriptorSource;
   /** Exact immutable series roster used to heal safe object-character short aliases. */
   mainCharacterNames?: readonly string[];
+  /** Optional full series character objects with descriptions to infer character visual ontologies accurately. */
+  mainCharacters?: readonly { name: string; description?: string }[];
+  /** Optional map of character name to description. */
+  mainCharacterDescriptions?: Readonly<Record<string, string>>;
   /** Protect the script tool's production sceneDetails bound. Defaults to 2,500. */
   maximumSceneDetailsLength?: number;
 }
@@ -67,6 +71,13 @@ export type SceneCastAppliedChange =
     }
   | {
       kind: "inferred_object_character_visual";
+      field: "characterVisuals";
+      name: string;
+      index: number;
+      speciesOrType: string;
+    }
+  | {
+      kind: "inferred_character_visual";
       field: "characterVisuals";
       name: string;
       index: number;
@@ -169,23 +180,73 @@ const GENERIC_OR_GROUP_ALIAS_PATTERN =
   /\b(?:animals?|bab(?:y|ies)|backpacks?|bags?|boys?|calves?|children|companions?|creatures?|crew|crowds?|dinos?|dinosaurs?|duo|everyone|famil(?:y|ies)|flocks?|friends?|girls?|groups?|herds?|kids?|mammoths?|others?|pairs?|people|satchels?|teams?|trios?)\b/giu;
 const COLLECTIVE_SUPPORTING_IDENTITY_PATTERN =
   /\b(?:animals|babies|backpacks|bags|boys|calves|children|clusters?|companions|creatures|crew|crowds?|dinos|dinosaurs|duos?|famil(?:y|ies)|fireflies|flocks?|friends|girls|groups?|herds?|kids|mammoths|others|pairs?|people|satchels|teams?|trios?)\b/iu;
-const OBJECT_ENTITY_NOUN_PATTERN = /\b(?:backpack|bag|satchel)\b/iu;
+const OBJECT_ENTITY_NOUN_PATTERN =
+  /\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|mug|spoon|fork|lamp|lantern|candle|book|journal|box|chest|toy|doll|puppet|wagon|cart|car|truck|train|plane|boat|ship|broom|blanket|pillow|pencil|pen|crayon|guitar|drum|robot|android|machine|gadget)\b/iu;
 const OBJECT_ENTITY_DESCRIPTION_PATTERN =
-  /(?:\b(?:animated|enchanted|living|magic(?:al)?|sentient|talking)\b.{0,60}\b(?:backpack|bag|satchel)\b|\b(?:backpack|bag|satchel)\b.{0,60}\b(?:character|face|living|sentient|speaks|talking|talks)\b)/iu;
+  /(?:\b(?:animated|enchanted|living|magic(?:al)?|sentient|talking)\b.{0,60}\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|lamp|lantern|candle|book|box|chest|toy|doll|puppet|wagon|car|train|broom|pillow|pencil|robot|machine)\b|\b(?:backpack|bag|satchel|clock|watch|teapot|lamp|book|chest|toy|wagon|car|train|pencil|robot)\b.{0,60}\b(?:character|face|living|sentient|speaks|talking|talks|straps|zipper)\b)/iu;
 export const SAFE_MAIN_OBJECT_NAME_PATTERN = /^(.+?)\s+the\s+(backpack|bag|satchel)$/iu;
 export const SAFE_MAIN_CHARACTER_PATTERN = /^(.+?)\s+the\s+(.+)$/iu;
 
-export function inferDefaultCharacterVisual(name: string): SceneCastRecord | undefined {
-  const match = name.match(SAFE_MAIN_CHARACTER_PATTERN);
-  if (!match) return undefined;
-  const speciesOrType = match[2]!.toLocaleLowerCase();
-  const isObject = OBJECT_ENTITY_NOUN_PATTERN.test(speciesOrType);
-  return {
-    name,
-    visualForm: isObject ? "object_character" : "real_creature",
-    speciesOrType,
-    humanoidAllowed: false,
-  };
+export function inferDefaultCharacterVisual(name: string, description?: string): SceneCastRecord | undefined {
+  const normalizedName = normalizedText(name);
+  if (!normalizedName) return undefined;
+  const match = normalizedName.match(SAFE_MAIN_CHARACTER_PATTERN);
+  const desc = normalizedText(description);
+
+  if (match) {
+    const speciesOrType = match[2]!.toLocaleLowerCase();
+    const isObject = OBJECT_ENTITY_NOUN_PATTERN.test(speciesOrType)
+      || (desc ? OBJECT_ENTITY_NOUN_PATTERN.test(desc) || OBJECT_ENTITY_DESCRIPTION_PATTERN.test(desc) : false);
+    const isHumanoid = /\b(?:girl|boy|child|kid|human|princess|prince|knight|wizard|witch|man|woman|daughter|son)\b/iu.test(speciesOrType);
+    return {
+      name: normalizedName,
+      visualForm: isObject ? "object_character" : isHumanoid ? "humanoid" : "real_creature",
+      speciesOrType,
+      humanoidAllowed: isHumanoid,
+    };
+  }
+
+  if (desc) {
+    const isObject = OBJECT_ENTITY_DESCRIPTION_PATTERN.test(desc) || OBJECT_ENTITY_NOUN_PATTERN.test(desc);
+    if (isObject) {
+      const nounMatch = desc.match(OBJECT_ENTITY_NOUN_PATTERN);
+      return {
+        name: normalizedName,
+        visualForm: "object_character",
+        speciesOrType: nounMatch ? nounMatch[0].toLowerCase() : "object",
+        humanoidAllowed: false,
+      };
+    }
+    const isHuman = /\b(?:girl|boy|child|kid|human|daughter|son|toddler|man|woman)\b/iu.test(desc);
+    if (isHuman) {
+      return {
+        name: normalizedName,
+        visualForm: "humanoid",
+        speciesOrType: "human child",
+        humanoidAllowed: true,
+      };
+    }
+    const creatureMatch = desc.match(/\b(?:bear|mouse|dog|cat|fox|rabbit|bunny|bird|sparrow|owl|duck|frog|turtle|fish|whale|dolphin|elephant|lion|tiger|monkey|horse|triceratops|dinosaur|t-rex|dragon|unicorn)\b/iu);
+    if (creatureMatch) {
+      return {
+        name: normalizedName,
+        visualForm: "real_creature",
+        speciesOrType: creatureMatch[0].toLowerCase(),
+        humanoidAllowed: false,
+      };
+    }
+  }
+
+  if (OBJECT_ENTITY_NOUN_PATTERN.test(normalizedName)) {
+    return {
+      name: normalizedName,
+      visualForm: "object_character",
+      speciesOrType: normalizedName.toLowerCase(),
+      humanoidAllowed: false,
+    };
+  }
+
+  return undefined;
 }
 
 function normalizedText(value: unknown): string {
@@ -669,6 +730,21 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
   }>();
   const canonicalObjectTypes = new Map<string, string>();
   const canonicalCharacterTypes = new Map<string, string>();
+  const characterDescriptions = new Map<string, string>();
+  if (options.mainCharacters) {
+    for (const char of options.mainCharacters) {
+      if (char.name && char.description) {
+        characterDescriptions.set(identityKey(char.name), char.description);
+      }
+    }
+  }
+  if (options.mainCharacterDescriptions) {
+    for (const [name, desc] of Object.entries(options.mainCharacterDescriptions)) {
+      if (name && desc) {
+        characterDescriptions.set(identityKey(name), desc);
+      }
+    }
+  }
 
   // Seed exact-text rewrites from the immutable roster, not only from cast
   // arrays. This also heals `Bobo` in action/details when characterNames
@@ -911,7 +987,11 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
     const canonical = visualSources.get(identityKey(name));
     const current = currentVisualsByName.get(identityKey(name));
     const objectType = canonicalObjectTypes.get(identityKey(name));
-    const inferredVisual = inferDefaultCharacterVisual(name);
+    const desc = characterDescriptions.get(identityKey(name));
+    const inferredVisual = inferDefaultCharacterVisual(name, desc)
+      ?? (mainCharacterNames.some((m) => identityKey(m) === identityKey(name)) && !OBJECT_ENTITY_NOUN_PATTERN.test(name)
+        ? { name, visualForm: "humanoid" as const, speciesOrType: "human child", humanoidAllowed: true }
+        : undefined);
     const resolved = canonical?.value ?? current ?? (objectType ? {
       name,
       visualForm: "object_character",
@@ -923,31 +1003,64 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
       return undefined;
     }
     const aligned: SceneCastRecord = { ...resolved, name };
-    if (!canonical && !current && (objectType || inferredVisual)) {
-      applied.push({
-        kind: "inferred_object_character_visual",
-        field: "characterVisuals",
-        name,
-        index,
-        speciesOrType: objectType ?? String(inferredVisual?.speciesOrType ?? ""),
-      });
-    }
-    if (canonical && !sameValue(current, aligned)) {
-      applied.push({
-        kind: "canonical_character_visual",
-        field: "characterVisuals",
-        name,
-        index,
-        source: canonical.source,
-      });
-    }
     return aligned;
   });
-  // Metadata alignment is atomic. Never replace a malformed partial array with
-  // another partial array; the semantic validator can report unresolved names.
-  if (resolvedVisuals.every((visual): visual is SceneCastRecord => Boolean(visual))) {
-    const canonicalVisuals = resolvedVisuals;
-    if (!sameValue(input.characterVisuals, canonicalVisuals)) next.characterVisuals = canonicalVisuals;
+
+  const hasNonHuman = resolvedVisuals.some((visual) => visual && visual.visualForm !== "humanoid");
+  const shouldPersistVisuals = Boolean(input.characterVisuals) || visualSources.size > 0 || hasNonHuman;
+
+  if (shouldPersistVisuals) {
+    for (let index = 0; index < characterNames.length; index++) {
+      const name = characterNames[index]!;
+      const canonical = visualSources.get(identityKey(name));
+      const current = currentVisualsByName.get(identityKey(name));
+      const objectType = canonicalObjectTypes.get(identityKey(name));
+      const desc = characterDescriptions.get(identityKey(name));
+      const inferredVisual = inferDefaultCharacterVisual(name, desc)
+        ?? (mainCharacterNames.some((m) => identityKey(m) === identityKey(name)) && !OBJECT_ENTITY_NOUN_PATTERN.test(name)
+          ? { name, visualForm: "humanoid" as const, speciesOrType: "human child", humanoidAllowed: true }
+          : undefined);
+
+      if (!canonical && !current && (objectType || inferredVisual)) {
+        if (objectType || inferredVisual?.visualForm === "object_character") {
+          applied.push({
+            kind: "inferred_object_character_visual",
+            field: "characterVisuals",
+            name,
+            index,
+            speciesOrType: objectType ?? String(inferredVisual?.speciesOrType ?? ""),
+          });
+        } else {
+          applied.push({
+            kind: "inferred_character_visual",
+            field: "characterVisuals",
+            name,
+            index,
+            speciesOrType: String(inferredVisual?.speciesOrType ?? ""),
+          });
+        }
+      }
+      if (canonical && !sameValue(current, resolvedVisuals[index])) {
+        applied.push({
+          kind: "canonical_character_visual",
+          field: "characterVisuals",
+          name,
+          index,
+          source: canonical.source,
+        });
+      }
+    }
+
+    if (resolvedVisuals.every((visual): visual is SceneCastRecord => Boolean(visual))) {
+      const canonicalVisuals = resolvedVisuals;
+      if (!sameValue(input.characterVisuals, canonicalVisuals)) next.characterVisuals = canonicalVisuals;
+    }
+  } else {
+    for (let i = unresolved.length - 1; i >= 0; i--) {
+      if (unresolved[i]!.field === "characterVisuals") {
+        unresolved.splice(i, 1);
+      }
+    }
   }
 
   const exactCastNames = uniqueNames([...characterNames, ...supportingNames]);

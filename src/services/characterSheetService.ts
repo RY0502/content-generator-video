@@ -318,7 +318,7 @@ function buildOntologyAwareCharacterDescription(params: {
   }
 
   if (visual.visualForm === "object_character") {
-    return `${baseDescription}. Visual ontology: ${params.characterName} is an object-based character, not a human.`;
+    return `${baseDescription}. Visual ontology: ${params.characterName} is an object-based character, strictly non-human. No human face, human child body, or human person wearing or holding the object.`;
   }
 
   if (visual.visualForm === "fantasy_creature") {
@@ -354,7 +354,10 @@ export function conflictsWithCharacterVisual(params: {
   const normalizedHaystack = haystack.toLowerCase();
   if (!normalizedHaystack.trim()) return false;
 
-  if (visual.visualForm === "real_creature" && visual.humanoidAllowed !== true) {
+  if (
+    (visual.visualForm === "real_creature" && visual.humanoidAllowed !== true)
+    || visual.visualForm === "object_character"
+  ) {
     return [
       /\b(?:girl|boy|princess|fairy)\b/u,
       /\b(?:human|humanoid)(?:-child)?\b/u,

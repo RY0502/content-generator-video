@@ -309,12 +309,19 @@ function validateImageContentType(response: Response): string {
 export async function downloadSupabaseCharacterReference(
   identity: SupabaseCharacterReferenceIdentity,
   storeOptions: SupabaseCharacterReferenceStoreOptions,
+  fetchOptions?: { cacheBust?: boolean },
 ): Promise<DownloadedSupabaseCharacterReference | null> {
   const options = validateStoreOptions(storeOptions, false);
   const object = resolveObject(identity, options);
-  const response = await fetchWithTimeout(options, object.publicUrl, {
+  const fetchUrl = fetchOptions?.cacheBust
+    ? `${object.publicUrl}${object.publicUrl.includes("?") ? "&" : "?"}t=${Date.now()}`
+    : object.publicUrl;
+  const response = await fetchWithTimeout(options, fetchUrl, {
     method: "GET",
-    headers: { accept: "image/*" },
+    headers: {
+      accept: "image/*",
+      ...(fetchOptions?.cacheBust ? { "cache-control": "no-cache", pragma: "no-cache" } : {}),
+    },
   });
   if (!response.ok) {
     const detail = await safeResponseText(response);
@@ -381,7 +388,7 @@ export async function uploadSupabaseCharacterReference(
     try { await response.body.cancel(); } catch { /* best effort */ }
   }
 
-  const downloaded = await downloadSupabaseCharacterReference(identity, storeOptions);
+  const downloaded = await downloadSupabaseCharacterReference(identity, storeOptions, { cacheBust: true });
   if (!downloaded) {
     throw new Error("Supabase accepted the portrait upload but its public URL still returns 404.");
   }

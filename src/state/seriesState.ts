@@ -1852,13 +1852,16 @@ export class SeriesState {
             WHERE series_id = ?
               AND scheduler_skipped_at IS NULL
               AND (
-                status <> 'done' OR uploaded_at IS NULL OR trim(uploaded_at) = '' OR
-                youtube_video_id IS NULL OR trim(youtube_video_id) = '' OR
-                youtube_url IS NULL OR trim(youtube_url) = ''
+                status <> 'done'
+                OR (? = 1 AND (
+                  uploaded_at IS NULL OR trim(uploaded_at) = '' OR
+                  youtube_video_id IS NULL OR trim(youtube_video_id) = '' OR
+                  youtube_url IS NULL OR trim(youtube_url) = ''
+                ))
               )
             ORDER BY is_resumable DESC, episode_number ASC
             LIMIT 1`,
-      args: [seriesId],
+      args: [seriesId, CONFIG.youtubeUploadEnabled ? 1 : 0],
     });
     const candidateRow = candidateResult.rows[0] as Record<string, unknown> | undefined;
     const candidate = candidateRow ? mapEpisodeRow(candidateRow) : null;
@@ -3499,6 +3502,20 @@ export class SeriesState {
       await this.assertEpisodeAudioReady(episodeId);
     }
     if (status === "done") {
+      if (!CONFIG.youtubeUploadEnabled) {
+        const existing = await this.client.execute({
+          sql: "SELECT series_id, episode_number FROM episodes WHERE id = ? LIMIT 1",
+          args: [episodeId],
+        });
+        const row = existing.rows[0];
+        if (!row) throw new Error(`Episode id ${episodeId} was not found.`);
+        await this.completeEpisodeWithoutUpload({
+          seriesId: Number(row.series_id),
+          episodeNumber: Number(row.episode_number),
+          outputPath: fields.outputPath,
+        });
+        return;
+      }
       throw new Error(
         "Only finalizeEpisodeUpload may mark an episode done after YouTube confirms the upload.",
       );
@@ -4015,14 +4032,17 @@ export class SeriesState {
     const result = await this.client.execute({
       sql: `SELECT COUNT(*) AS episode_count,
                    SUM(CASE WHEN status = 'done'
-                              AND uploaded_at IS NOT NULL AND trim(uploaded_at) <> ''
-                              AND completed_at IS NOT NULL AND trim(completed_at) <> ''
-                              AND youtube_video_id IS NOT NULL AND trim(youtube_video_id) <> ''
-                              AND youtube_url IS NOT NULL AND trim(youtube_url) <> ''
+                              AND (
+                                (? = 1 AND uploaded_at IS NOT NULL AND trim(uploaded_at) <> ''
+                                       AND completed_at IS NOT NULL AND trim(completed_at) <> ''
+                                       AND youtube_video_id IS NOT NULL AND trim(youtube_video_id) <> ''
+                                       AND youtube_url IS NOT NULL AND trim(youtube_url) <> '')
+                                OR (? = 0 AND completed_at IS NOT NULL AND trim(completed_at) <> '')
+                              )
                             THEN 1 ELSE 0 END) AS completed_count
             FROM episodes
             WHERE series_id = ?`,
-      args: [seriesId],
+      args: [CONFIG.youtubeUploadEnabled ? 1 : 0, CONFIG.youtubeUploadEnabled ? 1 : 0, seriesId],
     });
     const episodeCount = Number(result.rows[0]?.episode_count ?? 0);
     const completedCount = Number(result.rows[0]?.completed_count ?? 0);
@@ -4195,6 +4215,49 @@ export class SeriesState {
       throw new Error("YouTube receipt finalization did not commit as expected.");
     }
     return stored;
+  }
+
+  /**
+   * Completes an episode in the database without uploading to YouTube.
+   * Keeps script_json and output_path intact so offline upload scripts can later process it.
+   */
+  async completeEpisodeWithoutUpload(params: {
+    seriesId: number;
+    episodeNumber: number;
+    outputPath?: string;
+  }): Promise<EpisodeRow> {
+    await this.initialize();
+    const episode = await this.getEpisodeByNumber(params.seriesId, params.episodeNumber);
+    if (!episode) {
+      throw new Error(`Episode ${params.episodeNumber} was not found for series ${params.seriesId}.`);
+    }
+
+    let finalOutputPath = params.outputPath?.trim() || episode.outputPath?.trim();
+    if (!finalOutputPath) {
+      const ready = await this.assertEpisodeReadyForDone(episode.id);
+      finalOutputPath = ready.outputPath;
+    }
+
+    const completionTimestamp = new Date().toISOString();
+    const completionLocalDate = localCalendarDate(
+      new Date(completionTimestamp),
+      CONFIG.episodeDailyTimezone,
+    );
+
+    await this.client.execute({
+      sql: `UPDATE episodes
+            SET status = 'done',
+                output_path = ?,
+                completed_at = COALESCE(NULLIF(trim(completed_at), ''), ?),
+                completion_local_date = COALESCE(NULLIF(trim(completion_local_date), ''), ?),
+                updated_at = datetime('now')
+            WHERE id = ?`,
+      args: [finalOutputPath, completionTimestamp, completionLocalDate, episode.id],
+    });
+
+    const updated = await this.getEpisodeByNumber(params.seriesId, params.episodeNumber);
+    if (!updated) throw new Error("Episode disappeared after completion.");
+    return updated;
   }
 
   async getCharacterSheet(seriesId: number, characterName: string): Promise<CharacterSheetRow | null> {

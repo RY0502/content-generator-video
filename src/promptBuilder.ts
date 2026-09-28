@@ -207,19 +207,62 @@ export function buildStylizedImagePrompt(spec: StylizedImageSpec): string {
  * intact while the roster description is boundary-trimmed when necessary so
  * the complete request never exceeds AnyAPI's 1,000-character prompt limit.
  */
-export function buildCharacterPortraitPrompt(params: { characterDescription: string }): string {
-  const prefix = "Create one centered, head-to-toe character reference illustration of: ";
+export function inferCharacterVisualFromText(description: string): SceneCharacterVisual {
+  const norm = description.toLowerCase();
+  const isObject = (/\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|lamp|lantern|candle|book|box|chest|toy|doll|puppet|wagon|cart|car|truck|train|broom|pillow|pencil|robot|machine)\b/iu.test(norm)
+    && /\b(?:living|magical|talking|animated|sentient|straps|zipper|button eyes|stitched smile)\b/iu.test(norm))
+    || /\b(?:backpack|bag|satchel)\b/iu.test(norm);
+  if (isObject) {
+    const noun = norm.match(/\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|lamp|lantern|candle|book|box|chest|toy|doll|puppet|wagon|car|train|broom|pillow|pencil|robot)\b/iu)?.[0] ?? "object";
+    return { name: "", visualForm: "object_character", speciesOrType: noun, humanoidAllowed: false };
+  }
+  const isCreature = /\b(?:bear|mouse|dog|cat|fox|rabbit|bunny|bird|sparrow|owl|duck|frog|turtle|fish|whale|dolphin|elephant|lion|tiger|monkey|horse|triceratops|dinosaur|t-rex|dragon|unicorn)\b/iu.test(norm);
+  if (isCreature) {
+    const noun = norm.match(/\b(?:bear|mouse|dog|cat|fox|rabbit|bunny|bird|sparrow|owl|duck|frog|turtle|fish|whale|dolphin|elephant|lion|tiger|monkey|horse|triceratops|dinosaur|t-rex|dragon|unicorn)\b/iu)?.[0] ?? "creature";
+    return { name: "", visualForm: "real_creature", speciesOrType: noun, humanoidAllowed: false };
+  }
+  return { name: "", visualForm: "humanoid", speciesOrType: "human child", humanoidAllowed: true };
+}
+
+export function buildCharacterPortraitPrompt(params: {
+  characterDescription: string;
+  characterVisual?: SceneCharacterVisual;
+}): string {
+  const normalizedDescription = params.characterDescription.replace(/\s+/gu, " ").trim();
+  const visual = params.characterVisual ?? inferCharacterVisualFromText(normalizedDescription);
+
+  let prefix = "Create one centered, head-to-toe character reference illustration of: ";
+  let styling = "matte soft-brush texture, clean rounded shapes, expressive eyes, readable silhouette, child-friendly proportions, vibrant natural colors, two-tone painterly shading";
+  let preservation = "preserve the stated age, species, face, hair or fur, body proportions, colors, markings, clothing, accessories, personality and expression";
+  let pose = "relaxed three-quarter pose, soft high-key studio light, plain light pastel background";
+  let negative = "no redesign, age, gender, or species change; no extra props, scenery, text, labels, logos, watermarks, collage, or grid";
+
+  if (visual.visualForm === "object_character") {
+    prefix = "Create one centered, freestanding character reference illustration of: ";
+    const objectNoun = visual.speciesOrType?.trim() || "living object";
+    styling = "matte soft-brush texture, clean rounded shapes, expressive cartoon eyes, readable object silhouette, vibrant natural colors, two-tone painterly shading";
+    preservation = `anthropomorphic living ${objectNoun}, not a human; preserve stated material, colors, straps, cartoon features, personality`;
+    pose = "freestanding upright three-quarter pose, soft high-key studio light, plain light pastel background";
+    negative = "STRICT NEGATIVE: no human child, boy, girl, or person; no redesign or species change; no extra props, text, labels, logos, grid";
+  } else if (visual.visualForm === "real_creature" || visual.visualForm === "anthropomorphic_creature") {
+    prefix = "Create one centered, full-body character reference illustration of: ";
+    const creatureNoun = visual.speciesOrType?.trim() || "creature";
+    preservation = `non-human ${creatureNoun}; preserve stated species anatomy, face, fur/scales/feathers, body proportions, colors, markings`;
+    pose = "natural three-quarter pose, soft high-key studio light, plain light pastel background";
+    negative = "STRICT NEGATIVE: no human child, boy, girl, person, or costume; no redesign or species change; no extra props, text, logos";
+  }
+
   const suffix = [
     "Premium modern 2D hand-painted children's storybook animation",
-    "matte soft-brush texture, clean rounded shapes, expressive eyes, readable silhouette, child-friendly proportions, vibrant natural colors, two-tone painterly shading",
-    "preserve the stated age, species, face, hair or fur, body proportions, colors, markings, clothing, accessories, personality and expression",
-    "relaxed three-quarter pose, soft high-key studio light, plain light pastel background",
+    styling,
+    preservation,
+    pose,
     "exactly one complete figure and one pose",
     "no duplicate or clone, extra, missing, or fused limbs, appendages, heads, or faces",
-    "no redesign, age, gender, or species change; no extra props, scenery, text, labels, logos, watermarks, collage, or grid",
+    negative,
     "2D only; no photorealism, live action, 3D, CGI, anime, vector art, or cel shading",
   ].join("; ");
-  const normalizedDescription = params.characterDescription.replace(/\s+/gu, " ").trim();
+
   const descriptionBudget = Math.max(1, 1_000 - prefix.length - suffix.length - 2);
   let description = normalizedDescription.slice(0, descriptionBudget);
   if (description.length < normalizedDescription.length) {
