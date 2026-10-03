@@ -100,7 +100,11 @@ export async function generateAgnesImage(
     prompt,
     n: options.n ?? 1,
     size: options.size ?? "1K",
+    ratio: options.aspectRatio ?? "1:1",
     aspect_ratio: options.aspectRatio ?? "1:1",
+    extra_body: {
+      response_format: "url",
+    },
   };
 
   const keyCount = configuredAccounts.length;

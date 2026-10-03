@@ -231,36 +231,41 @@ export function buildCharacterPortraitPrompt(params: {
   const normalizedDescription = params.characterDescription.replace(/\s+/gu, " ").trim();
   const visual = params.characterVisual ?? inferCharacterVisualFromText(normalizedDescription);
 
-  let prefix = "Create one centered, head-to-toe character reference illustration of: ";
-  let styling = "matte soft-brush texture, clean rounded shapes, expressive eyes, readable silhouette, child-friendly proportions, vibrant natural colors, two-tone painterly shading";
-  let preservation = "preserve the stated age, species, face, hair or fur, body proportions, colors, markings, clothing, accessories, personality and expression";
-  let pose = "relaxed three-quarter pose, soft high-key studio light, plain light pastel background";
-  let negative = "no redesign, age, gender, or species change; no extra props, scenery, text, labels, logos, watermarks, collage, or grid";
+  const prefix = "Character concept art of: ";
+  let subjectDetails =
+    "head-to-toe full-body reference, expressive face, detailed clothing, distinct personality";
+  let strictNegative = "no redesign, age or gender change";
 
   if (visual.visualForm === "object_character") {
-    prefix = "Create one centered, freestanding character reference illustration of: ";
     const objectNoun = visual.speciesOrType?.trim() || "living object";
-    styling = "matte soft-brush texture, clean rounded shapes, expressive cartoon eyes, readable object silhouette, vibrant natural colors, two-tone painterly shading";
-    preservation = `anthropomorphic living ${objectNoun}, not a human; preserve stated material, colors, straps, cartoon features, personality`;
-    pose = "freestanding upright three-quarter pose, soft high-key studio light, plain light pastel background";
-    negative = "STRICT NEGATIVE: no human child, boy, girl, or person; no redesign or species change; no extra props, text, labels, logos, grid";
+    subjectDetails = `freestanding reference of an anthropomorphic living ${objectNoun}, not a human; expressive features, tactile material`;
+    strictNegative = `STRICT NEGATIVE: no human child, boy, girl, or person; render only the living ${objectNoun}`;
   } else if (visual.visualForm === "real_creature" || visual.visualForm === "anthropomorphic_creature") {
-    prefix = "Create one centered, full-body character reference illustration of: ";
     const creatureNoun = visual.speciesOrType?.trim() || "creature";
-    preservation = `non-human ${creatureNoun}; preserve stated species anatomy, face, fur/scales/feathers, body proportions, colors, markings`;
-    pose = "natural three-quarter pose, soft high-key studio light, plain light pastel background";
-    negative = "STRICT NEGATIVE: no human child, boy, girl, person, or costume; no redesign or species change; no extra props, text, logos";
+    subjectDetails = `full-body reference of a non-human ${creatureNoun}; detailed anatomy, fur, feathers, or scales`;
+    strictNegative = `STRICT NEGATIVE: no human child, boy, girl, or person; render only the ${creatureNoun}`;
   }
 
+  // Official Agnes Image 2.5 Flash prompt structure:
+  // [Subject] + [Scene / Environment] + [Style] + [Lighting] + [Composition] + [Quality Requirements]
+  const environment = "isolated on clean light neutral studio background";
+  const style =
+    "hand-painted 2D storybook animation style, rich gouache painterly texture, fine brushwork, clean silhouette, high visual density";
+  const lighting = "soft studio lighting, gentle rim light";
+  const composition = "relaxed three-quarter standing pose, exactly one complete figure and one pose, centered composition";
+  const guards =
+    "no duplicate or clone, extra or missing limbs; no scenery, text, watermarks, or grid; 2D only";
+  const quality = "masterpiece quality, sharp clean details, professional model sheet";
+
   const suffix = [
-    "Premium modern 2D hand-painted children's storybook animation",
-    styling,
-    preservation,
-    pose,
-    "exactly one complete figure and one pose",
-    "no duplicate or clone, extra, missing, or fused limbs, appendages, heads, or faces",
-    negative,
-    "2D only; no photorealism, live action, 3D, CGI, anime, vector art, or cel shading",
+    subjectDetails,
+    environment,
+    style,
+    lighting,
+    composition,
+    guards,
+    strictNegative,
+    quality,
   ].join("; ");
 
   const descriptionBudget = Math.max(1, 1_000 - prefix.length - suffix.length - 2);

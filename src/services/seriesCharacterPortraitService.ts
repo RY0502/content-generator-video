@@ -21,7 +21,6 @@ import {
 import { logStep } from "../utils/logger.js";
 import {
   inferDefaultCharacterVisual,
-  type SceneCastRecord,
 } from "./sceneCastCanonicalizer.js";
 import { chatVisionFrameworkOnly } from "../providers/aiClient.js";
 import type { SceneCharacterVisual } from "../promptBuilder.js";
@@ -308,7 +307,7 @@ export async function ensureSeriesCharacterPortraits(params: {
       logStep(`Generating portrait via Agnes Image (${CONFIG.agnesImageModel})`);
       const { bytes, model: usedModel } = await generateAgnesImage(prompt, {
         aspectRatio: "1:1",
-        size: "1K",
+        size: "2K",
         model: CONFIG.agnesImageModel,
       });
       logStep(`✅ Portrait generated via Agnes Image (${usedModel})`);

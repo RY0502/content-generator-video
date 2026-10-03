@@ -4,6 +4,8 @@
  * callers can use it at authoring, persistence, or preflight boundaries.
  */
 
+import type { SceneCharacterVisual } from "../promptBuilder.js";
+
 export type SceneCastRecord = Readonly<Record<string, unknown>>;
 
 export interface SceneCastLike {
@@ -187,7 +189,7 @@ const OBJECT_ENTITY_DESCRIPTION_PATTERN =
 export const SAFE_MAIN_OBJECT_NAME_PATTERN = /^(.+?)\s+the\s+(backpack|bag|satchel)$/iu;
 export const SAFE_MAIN_CHARACTER_PATTERN = /^(.+?)\s+the\s+(.+)$/iu;
 
-export function inferDefaultCharacterVisual(name: string, description?: string): SceneCastRecord | undefined {
+export function inferDefaultCharacterVisual(name: string, description?: string): SceneCharacterVisual | undefined {
   const normalizedName = normalizedText(name);
   if (!normalizedName) return undefined;
   const match = normalizedName.match(SAFE_MAIN_CHARACTER_PATTERN);

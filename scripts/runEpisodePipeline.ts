@@ -240,10 +240,10 @@ export async function runEpisodePipeline(options: {
   cooldownMs?: number;
   promptPath?: string;
 } = {}): Promise<void> {
-  const seriesId = options.seriesId ?? 17;
+  const seriesId = options.seriesId ?? 18;
   const episodeNumber = options.episodeNumber ?? 1;
   const maxCycles = options.maxCycles ?? 60;
-  const cooldownMs = options.cooldownMs ?? 30_000;
+  const cooldownMs = options.cooldownMs ?? 120_000;
 
   console.log("=================================================");
   console.log(`[Pipeline] Autonomous Video Generation Pipeline`);
