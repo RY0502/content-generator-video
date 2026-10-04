@@ -1462,6 +1462,154 @@ describe("three-phase Agnes scene workflow", () => {
     ]);
   });
 
+  it("round-robins two key arts and 12 scenes over seven accounts with 14 total submission concurrency", async () => {
+    await addAudioFiles(outputDir, 12);
+    const { state, rows } = mockState(12);
+    Object.assign(state, {
+      getSeriesInfo: vi.fn(async () => ({
+        conceptName: "Tiny Heroes Club",
+        episodeFormula: "Small friends solve gentle problems together.",
+        charactersJson: [{ name: "Pip the Ant", description: "A small red ant." }],
+      })),
+      getSeriesCharacters: vi.fn(async () => [{ name: "Pip the Ant", description: "A small red ant." }]),
+      getCharacterSheet: vi.fn(async () => ({
+        approvedAt: "2026-09-05T00:00:00.000Z",
+        generationPrompt: "Pip the Ant",
+        referenceImagePaths: {
+          portrait: { publicUrl: "https://cdn.example.test/pip_the_ant.png" },
+        },
+      })),
+    });
+    (state.getEpisodeByNumber as any).mockResolvedValue({
+      id: 72,
+      title: "Pip's Seven Bridges",
+      premise: "Pip journeys across seven bridges.",
+      scriptJson: {
+        scenes: Array.from({ length: 12 }, (_unused, index) => ({
+          sceneNumber: index + 1,
+          narrationText: `Pip narrates scene ${index + 1}.`,
+          environmentDescription: "A warm flower-filled meadow.",
+          action: "Pip waves and takes one careful step.",
+          characterNames: ["Pip the Ant"],
+          continuityAnchors: ["The same yellow flower stands beside Pip."],
+        })),
+      },
+    });
+    const ensureKeyArtAudioAssets = vi.fn(async () => {
+      const seriesPaths = agnesKeyArtPaths({ outputDir, seriesId: 7, episodeNumber: 2, kind: "series" });
+      const episodePaths = agnesKeyArtPaths({ outputDir, seriesId: 7, episodeNumber: 2, kind: "episode" });
+      await Promise.all([
+        mkdir(seriesPaths.directory, { recursive: true }),
+        mkdir(episodePaths.directory, { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(seriesPaths.audioPath, "series-title-audio"),
+        writeFile(episodePaths.audioPath, "episode-title-audio"),
+      ]);
+      return [
+        { ...seriesPaths, text: "Tiny Heroes Club", durationSeconds: 2.25, requestDigest: "series-audio" },
+        { ...episodePaths, text: "Pip's Seven Bridges", durationSeconds: 3.25, requestDigest: "episode-audio" },
+      ] as const;
+    });
+    let aggregateActive = 0;
+    let maximumAggregateActive = 0;
+    const accountIds = ["account-a", "account-b", "account-c", "account-d", "account-e", "account-f", "account-g"];
+    const accountRecords = accountIds.map((id, index) => {
+      let active = 0;
+      let maximumActive = 0;
+      let submitted = 0;
+      const keyLabel = `key-${index + 1}`;
+      const fingerprint = (index + 1).toString(16).repeat(64);
+      const client = {
+        submitVideo: vi.fn(async () => {
+          active += 1;
+          aggregateActive += 1;
+          maximumActive = Math.max(maximumActive, active);
+          maximumAggregateActive = Math.max(maximumAggregateActive, aggregateActive);
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 15));
+            return accountTask(
+              `${id}-${++submitted}`,
+              "queued",
+              keyLabel,
+              fingerprint,
+            );
+          } finally {
+            active -= 1;
+            aggregateActive -= 1;
+          }
+        }),
+        retrieveVideo: vi.fn(),
+        downloadCompletedVideo: vi.fn(),
+      };
+      return { accountId: id, keyLabel, fingerprint, client, maximumActive: () => maximumActive };
+    });
+    const submit = buildSubmitAgnesSceneVideosTool(state as never, {
+      accounts: accountRecords.map(({ accountId, keyLabel, fingerprint, client }) => ({
+        accountId,
+        keyLabel,
+        keyFingerprint: fingerprint,
+        client,
+      })),
+      submissionBatchSize: 2,
+      submissionIntervalMs: 0,
+      statusRequestIntervalMs: 0,
+      includeKeyArt: true,
+      ensureKeyArtAudioAssets,
+      ensureSeriesCharacterPortraits: vi.fn(async ({ seriesId, roster }) => ({
+        seriesId,
+        rosterCount: roster?.length ?? 0,
+        generatedCount: 0,
+        reusedCount: roster?.length ?? 0,
+        characters: (roster ?? []).map((character: { name: string }) => ({
+          name: character.name,
+          status: "already_approved" as const,
+          referenceImagePaths: { portrait: { path: `/approved/${character.name}.png` } },
+          generationPrompt: "tiny ruby-red ant with six legs, bright eyes. Always same colors.",
+        })),
+      })),
+      probeMediaDuration: vi.fn(async () => 5.2),
+    });
+
+    const result = JSON.parse(await (submit as any).func({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result.status).toBe("submitted");
+    expect(result.accountCount).toBe(7);
+    expect(result.assetCount).toBe(14);
+    expect(result.keyArtCount).toBe(2);
+    expect(result.sceneCount).toBe(12);
+    expect(result.batchSizePerAccount).toBe(2);
+    expect(result.totalSubmissionConcurrency).toBe(14);
+    expect(maximumAggregateActive).toBe(14);
+    for (const account of accountRecords) {
+      expect(account.client.submitVideo).toHaveBeenCalledTimes(2);
+      expect(account.maximumActive()).toBe(2);
+    }
+    expect([
+      AGNES_SERIES_KEY_ART_TRACKING_SCENE,
+      AGNES_EPISODE_KEY_ART_TRACKING_SCENE,
+      ...Array.from({ length: 12 }, (_unused, index) => index + 1),
+    ].map((sceneNumber) => {
+      const receipt = rows.get(sceneNumber)?.providerReceipt as any;
+      return receipt.attempts.at(-1).accountId;
+    })).toEqual([
+      "account-a",
+      "account-b",
+      "account-c",
+      "account-d",
+      "account-e",
+      "account-f",
+      "account-g",
+      "account-a",
+      "account-b",
+      "account-c",
+      "account-d",
+      "account-e",
+      "account-f",
+      "account-g",
+    ]);
+  });
+
   it("fails over one rate-limited scene to the next account and records both account attempts", async () => {
     await addAudioFiles(outputDir, 1);
     const { state, rows } = mockState(1);

@@ -67,6 +67,32 @@ describe("loadAgnesAccounts", () => {
     expect(new Set(accounts.map(({ keyFingerprint }) => keyFingerprint)).size).toBe(5);
   });
 
+  it("loads seven independent account lanes in numeric order and ignores blank key entries", () => {
+    const accounts = loadAgnesAccounts({
+      AGNES_API_KEY_1: "first-secret",
+      AGNES_API_KEY_2: "second-secret",
+      AGNES_API_KEY_3: "third-secret",
+      AGNES_API_KEY_4: "fourth-secret",
+      AGNES_API_KEY_5: "fifth-secret",
+      AGNES_API_KEY_6: "sixth-secret",
+      AGNES_API_KEY_7: "seventh-secret",
+      AGNES_API_KEY_8: "",
+      AGNES_API_KEY_9: "   ",
+    });
+
+    expect(accounts).toHaveLength(7);
+    expect(accounts.map(({ accountId, keyLabel }) => ({ accountId, keyLabel }))).toEqual([
+      { accountId: "account-1", keyLabel: "key-1" },
+      { accountId: "account-2", keyLabel: "key-2" },
+      { accountId: "account-3", keyLabel: "key-3" },
+      { accountId: "account-4", keyLabel: "key-4" },
+      { accountId: "account-5", keyLabel: "key-5" },
+      { accountId: "account-6", keyLabel: "key-6" },
+      { accountId: "account-7", keyLabel: "key-7" },
+    ]);
+    expect(new Set(accounts.map(({ keyFingerprint }) => keyFingerprint)).size).toBe(7);
+  });
+
   it("accepts matching unsuffixed and _1 aliases", () => {
     expect(loadAgnesAccounts({
       AGNES_API_KEY: "same-secret",

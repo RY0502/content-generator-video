@@ -1,5 +1,6 @@
 import { createClient } from "@libsql/client";
 import dotenv from "dotenv";
+import { CONFIG } from "../src/config.js";
 
 dotenv.config();
 
@@ -16,13 +17,9 @@ async function main() {
 
   console.log(`Checking ${rs.rows.length} scene generation records in Turso...`);
 
-  const accounts: Record<string, string> = {
-    "account-1": process.env.AGNES_API_KEY_1 || process.env.AGNES_API_KEY!,
-    "account-2": process.env.AGNES_API_KEY_2!,
-    "account-3": process.env.AGNES_API_KEY_3!,
-    "account-4": process.env.AGNES_API_KEY_4!,
-    "account-5": process.env.AGNES_API_KEY_5!,
-  };
+  const accounts: Record<string, string> = Object.fromEntries(
+    CONFIG.agnesAccounts.map((account) => [account.accountId, account.apiKey]),
+  );
 
   let completedCount = 0;
   let inProgressCount = 0;
@@ -46,7 +43,7 @@ async function main() {
     const attempts = receipt.attempts ?? [];
     const lastAttempt = attempts[attempts.length - 1];
     const accountId = lastAttempt?.accountId || "account-1";
-    const apiKey = accounts[accountId] || accounts["account-1"];
+    const apiKey = accounts[accountId] || accounts["account-1"] || CONFIG.agnesAccounts[0]?.apiKey || "";
 
     try {
       const res = await fetch(`https://apihub.agnes-ai.com/v1/videos/${taskId}`, {

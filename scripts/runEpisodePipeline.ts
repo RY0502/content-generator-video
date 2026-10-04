@@ -24,13 +24,10 @@ const tursoClient = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
-const AGNES_ACCOUNTS: Record<string, string> = {
-  "account-1": process.env.AGNES_API_KEY_1 || process.env.AGNES_API_KEY!,
-  "account-2": process.env.AGNES_API_KEY_2 || "",
-  "account-3": process.env.AGNES_API_KEY_3 || "",
-  "account-4": process.env.AGNES_API_KEY_4 || "",
-  "account-5": process.env.AGNES_API_KEY_5 || "",
-};
+const AGNES_ACCOUNTS: Record<string, string> = Object.fromEntries(
+  CONFIG.agnesAccounts.map((account) => [account.accountId, account.apiKey]),
+);
+
 
 /** Directly synchronizes remote Agnes video task completions into Turso DB. */
 async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Promise<{
@@ -69,8 +66,7 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
 
     const attempts = receipt.attempts ?? [];
     const lastAttempt = attempts[attempts.length - 1] ?? {};
-    const accountId = lastAttempt.accountId || "account-1";
-    const apiKey = AGNES_ACCOUNTS[accountId] || AGNES_ACCOUNTS["account-1"];
+    const apiKey = AGNES_ACCOUNTS[accountId] || AGNES_ACCOUNTS["account-1"] || CONFIG.agnesAccounts[0]?.apiKey || "";
 
     try {
       const res = await fetch(`https://apihub.agnes-ai.com/v1/videos/${taskId}`, {
