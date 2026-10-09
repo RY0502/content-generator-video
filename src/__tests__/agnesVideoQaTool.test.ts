@@ -17,8 +17,8 @@ afterEach(() => {
   (CONFIG as { outputDir: string }).outputDir = originalOutputDir;
 });
 
-const portraitUrl = "https://project.supabase.co/storage/v1/object/public/characters/series_7/characters/mia.png";
-const boboPortraitUrl = "https://project.supabase.co/storage/v1/object/public/characters/series_7/characters/bobo.png";
+const portraitUrl = "https://project.convex.cloud/api/storage/characters/series_7/characters/mia.png";
+const boboPortraitUrl = "https://project.convex.cloud/api/storage/characters/series_7/characters/bobo.png";
 
 function keyPrompt(label: string): string {
   return `${label}. EXACT ON-SCREEN CAST LEDGER — 1 TOTAL CHARACTER FIGURE, AND NO OTHERS: [Mia] × 1. ` +
@@ -241,7 +241,7 @@ describe("qa_agnes_episode_videos static audit", () => {
   it("rejects mismatched visible-character references and prompt mappings", async () => {
     const { state, rows, probeMedia } = await fixture();
     const current = rows.get(1)!;
-    const wrongUrl = "https://project.supabase.co/storage/v1/object/public/characters/wrong.png";
+    const wrongUrl = "https://project.convex.cloud/api/storage/characters/wrong.png";
     const wrongPrompt = current.prompt.replace("approved portrait of Mia", "approved portrait of Unknown");
     rows.set(1, {
       ...current,

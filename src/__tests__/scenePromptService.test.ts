@@ -55,7 +55,7 @@ describe("scenePromptService production character gate", () => {
         approvedAt: "2026-09-04T00:00:00.000Z",
         generationPrompt: "Tiny ruby-red ant, round black eyes, yellow leaf vest. Always same colors.",
         referenceImagePaths: {
-          portrait: { publicUrl: "https://example.supabase.co/storage/v1/object/public/refs/pip_the_ant.png" },
+          portrait: { publicUrl: "https://example.convex.cloud/api/storage/refs/pip_the_ant.png" },
         },
       })),
     };
@@ -71,7 +71,7 @@ describe("scenePromptService production character gate", () => {
     expect(result.prompt).not.toContain("A red ant");
     expect(result.characterReferenceSources).toEqual([{
       name: "Pip the Ant",
-      source: "https://example.supabase.co/storage/v1/object/public/refs/pip_the_ant.png",
+      source: "https://example.convex.cloud/api/storage/refs/pip_the_ant.png",
     }]);
   });
 
@@ -88,7 +88,7 @@ describe("scenePromptService production character gate", () => {
           : "Tiny ruby-red ant, round black eyes, yellow leaf vest.",
         referenceImagePaths: {
           portrait: {
-            publicUrl: `https://example.supabase.co/storage/v1/object/public/refs/${name === "Bobo the Backpack" ? "bobo_the_backpack" : "pip_the_ant"}.png`,
+            publicUrl: `https://example.convex.cloud/api/storage/refs/${name === "Bobo the Backpack" ? "bobo_the_backpack" : "pip_the_ant"}.png`,
           },
         },
       })),

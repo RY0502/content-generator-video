@@ -10,7 +10,7 @@ const { materializeScenePromptMock } = vi.hoisted(() => ({
     characterDescriptions: ["Pip the Ant"],
     characterReferenceSources: [{
       name: "Pip the Ant",
-      source: "https://example.supabase.co/storage/v1/object/public/refs/series_7/characters/pip_the_ant.png",
+      source: "https://example.convex.cloud/api/storage/series_7/characters/pip_the_ant.png",
     }] as Array<{ name: string; source: string }>,
   })),
 }));
@@ -1004,7 +1004,7 @@ describe("three-phase Agnes scene workflow", () => {
     expect(state.getOrCreateSeriesAgnesSeed).toHaveBeenNthCalledWith(2, 7, undefined);
   });
 
-  it("submits every visible approved Supabase portrait directly in ordered Agnes reference mode", async () => {
+  it("submits every visible approved Convex portrait directly in ordered Agnes reference mode", async () => {
     await addAudioFiles(outputDir, 2);
     const { state, rows } = mockState(2);
     const portraitUrl = "https://cdn.example.test/series-7/pip.png";
@@ -1077,7 +1077,7 @@ describe("three-phase Agnes scene workflow", () => {
     });
 
     await expect((tool as any).func({ seriesId: 7, episodeNumber: 2 }))
-      .rejects.toThrow("credential-free HTTPS Supabase public URL");
+      .rejects.toThrow("credential-free HTTPS Convex public URL");
     expect(requests).toEqual([]);
     expect(rows.size).toBe(0);
   });

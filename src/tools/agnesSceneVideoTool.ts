@@ -20,7 +20,7 @@ import {
   type AgnesVideoMode,
   type AgnesVideoTask,
 } from "../providers/agnes/index.js";
-import { canonicalCharacterImageName } from "../providers/supabaseCharacterReferenceStore.js";
+import { canonicalCharacterImageName } from "../providers/convexCharacterReferenceStore.js";
 import {
   buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtVideoPrompt,
@@ -1466,7 +1466,7 @@ function isPublicHttpsReference(source: string): boolean {
 
 /**
  * Enables reference mode only when every visible main character has one
- * durable public Supabase portrait URL. New work fails closed instead of
+ * durable public Convex portrait URL. New work fails closed instead of
  * silently losing identity conditioning. Accepted legacy work remains bound
  * to its exact persisted mode, prompt, and URL set.
  */
@@ -1524,13 +1524,13 @@ async function resolveReferenceConditioning(params: {
   }));
   if (orderedSources.some(({ source }) => !source)) {
     throw new Error(
-      "At least one visible main character has no approved public Supabase portrait URL. " +
+      "At least one visible main character has no approved public Convex portrait URL. " +
       "Run ensure_series_character_portraits before Agnes submission.",
     );
   }
   if (orderedSources.some(({ source }) => !isPublicHttpsReference(source))) {
     throw new Error(
-      "Every visible main-character reference must be an anonymous credential-free HTTPS Supabase public URL.",
+      "Every visible main-character reference must be an anonymous credential-free HTTPS Convex public URL.",
     );
   }
   const referenceImageUrls = orderedSources.map(({ source }) => source);
@@ -3072,7 +3072,7 @@ function submitTool(runtime: WorkflowRuntime): DynamicStructuredTool {
   return new DynamicStructuredTool({
     name: "submit_agnes_scene_videos",
     description:
-      "Before the first durable provider claim, verifies that the complete stored 1-5 character roster has public Supabase portraits; after claims begin, preserves frozen references and fails closed if one is missing. The series key-art title card uses every canonical roster portrait, while episode key art uses one story-relevant protagonist. Then submits both key-art videos plus one image-reference Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
+      "Before the first durable provider claim, verifies that the complete stored 1-5 character roster has public Convex portraits; after claims begin, preserves frozen references and fails closed if one is missing. The series key-art title card uses every canonical roster portrait, while episode key art uses one story-relevant protagonist. Then submits both key-art videos plus one image-reference Agnes job per <=12-second narration scene, with at most two workers per configured account. " +
       "Only definite account rate/quota/credit limits fail over; all intents/receipts are durable, and queue-full or ambiguous failures stay pending until another invocation. " +
       "An invalid persisted script returns repair_required before any provider call, or repair_blocked when durable submission evidence already exists. " +
       "Typed local narration drift returns audio_repair_required before any provider call.",

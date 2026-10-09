@@ -11,7 +11,7 @@ export function buildEnsureSeriesCharacterPortraitsTool(
   return new DynamicStructuredTool({
     name: "ensure_series_character_portraits",
     description:
-      "Ensures the complete stored 1-5 character roster has one local portrait and one verified public Supabase reference URL. " +
+      "Ensures the complete stored 1-5 character roster has one local portrait and one verified public Convex reference URL. " +
       "It reuses local or public images before generating, uploads missing public objects, and performs no character-sheet vision analysis. " +
       "Call exactly once before episode script/audio/video work.",
     schema: z.object({

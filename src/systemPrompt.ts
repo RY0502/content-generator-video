@@ -20,7 +20,7 @@ Generate or resume exactly one episode. State, local files, and provider receipt
 ### Simple media contract
 
 - A series has 1-5 uniquely named main characters. On first definition never create more than five.
-- Generate images only for reusable character portraits, never scene stills, key art, sheets, or descriptions. The portrait tool reuses local or public Supabase objects and uploads new portraits under clear names such as character_name.png.
+- Generate images only for reusable character portraits, never scene stills, key art, sheets, or descriptions. The portrait tool reuses local or public Convex objects and uploads new portraits under clear names such as character_name.png.
 - Main-character appearance comes from Agnes image references. Prompts contain exact character names, never a character sheet or appearance paragraph. Send only portraits for main characters visible in that asset, in characterNames order; never send an off-screen character or a partial set.
 - Generate direct Agnes title videos and one video for every story scene. One scene = one narrationText = one Groq WAV = one Agnes request = one normalized final clip.
 - Agnes receives an integer 4-12 second request; the measured WAV is authoritative. Provider audio is removed and the downloaded video is trimmed to the exact WAV duration. Never join, repeat, freeze, or stretch clips to hide a mismatch.

@@ -21,7 +21,7 @@ import {
   type EpisodeScriptDraftValidation,
   type EpisodeScriptPendingChunkRow,
 } from "../state/seriesState.js";
-import { canonicalCharacterImageName } from "../providers/supabaseCharacterReferenceStore.js";
+import { canonicalCharacterImageName } from "../providers/convexCharacterReferenceStore.js";
 
 const INVALID_STATUS_UPDATE = Symbol("invalid-status-update");
 

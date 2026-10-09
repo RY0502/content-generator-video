@@ -8,11 +8,11 @@ import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
 import { generatePollinationsImageDetailed } from "../providers/pollinationsImageClient.js";
 import {
   canonicalCharacterImageName,
-  downloadSupabaseCharacterReference,
-  uploadSupabaseCharacterReference,
-  type DownloadedSupabaseCharacterReference,
-  type SupabaseCharacterReferenceStoreOptions,
-} from "../providers/supabaseCharacterReferenceStore.js";
+  downloadConvexCharacterReference,
+  uploadConvexCharacterReference,
+  type DownloadedConvexCharacterReference,
+  type ConvexCharacterReferenceStoreOptions,
+} from "../providers/convexCharacterReferenceStore.js";
 import {
   SeriesState,
   type CharacterDef,
@@ -30,7 +30,7 @@ const CHARACTER_PORTRAIT_REQUEST_SCHEMA_VERSION = 1;
 
 export type SeriesCharacterPortraitStatus =
   | "already_available"
-  | "restored_from_supabase"
+  | "restored_from_convex"
   | "uploaded_existing_local"
   | "generated";
 
@@ -62,23 +62,23 @@ export type CharacterPortraitAuditor = (params: {
 
 export interface SeriesCharacterPortraitDependencies {
   generatePortrait?: typeof generateAnyApiSceneImage;
-  downloadReference?: typeof downloadSupabaseCharacterReference;
-  uploadReference?: typeof uploadSupabaseCharacterReference;
+  downloadReference?: typeof downloadConvexCharacterReference;
+  uploadReference?: typeof uploadConvexCharacterReference;
   auditPortrait?: CharacterPortraitAuditor;
-  storeOptions?: SupabaseCharacterReferenceStoreOptions;
+  storeOptions?: ConvexCharacterReferenceStoreOptions;
   assetsDir?: string;
   model?: string;
   now?: () => Date;
 }
 
 /** Shared production settings for ensure and terminal series cleanup hooks. */
-export function configuredSupabaseCharacterReferenceStoreOptions(): SupabaseCharacterReferenceStoreOptions {
+export function configuredConvexCharacterReferenceStoreOptions(): ConvexCharacterReferenceStoreOptions {
   return {
-    projectUrl: CONFIG.supabaseUrl,
-    bucket: CONFIG.supabaseStorageBucket,
-    serviceRoleKey: CONFIG.supabaseServiceRoleKey,
-    objectPrefix: CONFIG.supabaseCharacterReferencePrefix,
-    requestTimeoutMs: CONFIG.supabaseStorageRequestTimeoutMs,
+    convexUrl: CONFIG.convexUrl,
+    bucket: CONFIG.convexStorageBucket,
+    deployKey: CONFIG.convexDeployKey,
+    objectPrefix: CONFIG.convexCharacterReferencePrefix,
+    requestTimeoutMs: CONFIG.convexStorageRequestTimeoutMs,
   };
 }
 
@@ -214,7 +214,7 @@ async function findLocalPortrait(params: {
 function assertMatchingLocalAndPublic(params: {
   characterName: string;
   localBytes: Buffer;
-  publicReference: DownloadedSupabaseCharacterReference;
+  publicReference: DownloadedConvexCharacterReference;
 }): void {
   const localSha256 = sha256(params.localBytes);
   if (localSha256 !== params.publicReference.sha256) {
@@ -229,7 +229,7 @@ function assertMatchingLocalAndPublic(params: {
  *
  * The operation is deliberately simple and resumable:
  * 1. reuse a matching local portrait when present;
- * 2. otherwise restore the deterministic public Supabase object locally;
+ * 2. otherwise restore the deterministic public Convex object locally;
  * 3. otherwise generate exactly one portrait;
  * 4. upload (when needed), publicly re-download, hash-verify, then persist.
  *
@@ -328,10 +328,10 @@ export async function ensureSeriesCharacterPortraits(params: {
     return generateAnyApiSceneImage(prompt, modelName);
   };
   const generatePortrait = dependencies.generatePortrait ?? defaultGeneratePortrait;
-  const downloadReference = dependencies.downloadReference ?? downloadSupabaseCharacterReference;
-  const uploadReference = dependencies.uploadReference ?? uploadSupabaseCharacterReference;
+  const downloadReference = dependencies.downloadReference ?? downloadConvexCharacterReference;
+  const uploadReference = dependencies.uploadReference ?? uploadConvexCharacterReference;
   const auditPortrait = dependencies.auditPortrait ?? defaultAuditPortrait;
-  const storeOptions = dependencies.storeOptions ?? configuredSupabaseCharacterReferenceStoreOptions();
+  const storeOptions = dependencies.storeOptions ?? configuredConvexCharacterReferenceStoreOptions();
   const assetsDir = dependencies.assetsDir ?? CONFIG.assetsDir;
   const model = dependencies.model ?? CONFIG.anyApiImageModel;
   const now = dependencies.now ?? (() => new Date());
@@ -378,8 +378,8 @@ export async function ensureSeriesCharacterPortraits(params: {
     if (!localBytes && publicReference) {
       localBytes = publicReference.bytes;
       await writeAtomically(canonicalPath, localBytes);
-      status = "restored_from_supabase";
-      logStep(`Restored ${character.name} portrait from its public Supabase URL`);
+      status = "restored_from_convex";
+      logStep(`Restored ${character.name} portrait from its public Convex URL`);
     } else if (localBytes && publicReference) {
       assertMatchingLocalAndPublic({
         characterName: character.name,
@@ -394,7 +394,7 @@ export async function ensureSeriesCharacterPortraits(params: {
         storeOptions,
       );
       status = "uploaded_existing_local";
-      logStep(`Uploaded existing ${character.name} portrait to Supabase`);
+      logStep(`Uploaded existing ${character.name} portrait to Convex`);
     } else {
       const visual = inferDefaultCharacterVisual(character.name, character.description);
       const prompt = buildCharacterPortraitPrompt({
@@ -499,7 +499,7 @@ export async function ensureSeriesCharacterPortraits(params: {
     seriesId,
     rosterCount: characters.length,
     generatedCount: characters.filter(({ status }) => status === "generated").length,
-    restoredCount: characters.filter(({ status }) => status === "restored_from_supabase").length,
+    restoredCount: characters.filter(({ status }) => status === "restored_from_convex").length,
     reusedCount: characters.filter(({ status }) => status !== "generated").length,
     characters,
   };

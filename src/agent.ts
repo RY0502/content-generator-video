@@ -42,8 +42,8 @@ import {
   buildYoutubeSeriesMetadataTool,
 } from "./tools/youtubeMetadataTool.js";
 import { buildYoutubeUploadTool } from "./tools/youtubeUploadTool.js";
-import { deleteSupabaseSeriesCharacterReferences } from "./providers/supabaseCharacterReferenceStore.js";
-import { configuredSupabaseCharacterReferenceStoreOptions } from "./services/seriesCharacterPortraitService.js";
+import { deleteConvexSeriesCharacterReferences } from "./providers/convexCharacterReferenceStore.js";
+import { configuredConvexCharacterReferenceStoreOptions } from "./services/seriesCharacterPortraitService.js";
 
 /** Runs one canonical episode-agent invocation after bootstrap cleanup. */
 export async function runAgent(args: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -74,11 +74,11 @@ export async function runAgent(args: readonly string[] = process.argv.slice(2)):
       const cleanupCompletedSeriesPortraits = async (seriesId: number): Promise<void> => {
         if (!(await seriesState.isSeriesFullyCompleted(seriesId))) return;
         const roster = await seriesState.getSeriesCharacters(seriesId);
-        const deleted = await deleteSupabaseSeriesCharacterReferences(
+        const deleted = await deleteConvexSeriesCharacterReferences(
           { seriesId, characterNames: roster.map(({ name }) => name) },
-          configuredSupabaseCharacterReferenceStoreOptions(),
+          configuredConvexCharacterReferenceStoreOptions(),
         );
-        console.log("[SupabasePortraits] completed_series_cleanup", {
+        console.log("[ConvexPortraits] completed_series_cleanup", {
           seriesId,
           deletedObjectCount: deleted.deletedObjectKeys.length,
         });

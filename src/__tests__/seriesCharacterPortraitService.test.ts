@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CharacterDef, CharacterSheetRow, SeriesState } from "../state/seriesState.js";
-import type { DownloadedSupabaseCharacterReference } from "../providers/supabaseCharacterReferenceStore.js";
+import type { DownloadedConvexCharacterReference } from "../providers/convexCharacterReferenceStore.js";
 import {
   ensureSeriesCharacterPortraits,
   validateSeriesMainCharacterRoster,
@@ -16,9 +16,9 @@ import {
 
 const model = "google/gemini-3.1-flash-image";
 const storeOptions = {
-  projectUrl: "https://project.supabase.co",
+  convexUrl: "https://project.convex.cloud",
   bucket: "character-refs",
-  serviceRoleKey: "service-role-secret",
+  deployKey: "deploy-key-secret",
   objectPrefix: "series-characters",
 };
 
@@ -29,7 +29,7 @@ function digest(bytes: Buffer): string {
 function remoteReference(
   bytes: Buffer,
   characterName = "Bobo the Backpack",
-): DownloadedSupabaseCharacterReference {
+): DownloadedConvexCharacterReference {
   const slug = characterName.toLowerCase().replaceAll(" ", "_");
   const objectKey = `series-characters/series_7/characters/${slug}.png`;
   return {
@@ -37,7 +37,7 @@ function remoteReference(
     sha256: digest(bytes),
     contentType: "image/png",
     objectKey,
-    publicUrl: `https://project.supabase.co/storage/v1/object/public/character-refs/${objectKey}`,
+    publicUrl: `https://project.convex.cloud/api/storage/character-refs/${objectKey}`,
   };
 }
 
@@ -108,7 +108,7 @@ describe("ensureSeriesCharacterPortraits", () => {
     expect(result.restoredCount).toBe(1);
     expect(result.characters[0]).toMatchObject({
       imageName: "bobo_the_backpack.png",
-      status: "restored_from_supabase",
+      status: "restored_from_convex",
       publicUrl: publicReference.publicUrl,
     });
     expect(generatePortrait).not.toHaveBeenCalled();

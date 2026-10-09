@@ -147,17 +147,15 @@ export const CONFIG = {
     process.env.ANYAPI_IMAGE_MODEL,
     process.env.ANYAPI_MODEL,
   ),
-  // Public character-reference storage. The bucket must already exist and be
-  // public: Agnes reads the anonymous URL, while this server alone receives
-  // the service-role key used to upload and clean up deterministic objects.
-  supabaseUrl: process.env.SUPABASE_URL?.trim() || undefined,
-  supabaseStorageBucket:
-    process.env.SUPABASE_STORAGE_BUCKET?.trim() || "agnes-character-references",
-  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || undefined,
-  supabaseCharacterReferencePrefix:
-    process.env.SUPABASE_CHARACTER_REFERENCE_PREFIX?.trim() || "series-characters",
-  supabaseStorageRequestTimeoutMs: positiveInteger(
-    "SUPABASE_STORAGE_REQUEST_TIMEOUT_MS",
+  // Public character-reference storage backed by Convex File Storage and Convex DB.
+  convexUrl: process.env.CONVEX_URL?.trim() || undefined,
+  convexStorageBucket:
+    process.env.CONVEX_STORAGE_BUCKET?.trim() || "agnes-character-references",
+  convexDeployKey: process.env.CONVEX_DEPLOY_KEY?.trim() || process.env.CONVEX_AUTH_TOKEN?.trim() || undefined,
+  convexCharacterReferencePrefix:
+    process.env.CONVEX_CHARACTER_REFERENCE_PREFIX?.trim() || "series-characters",
+  convexStorageRequestTimeoutMs: positiveInteger(
+    "CONVEX_STORAGE_REQUEST_TIMEOUT_MS",
     60_000,
   ),
   sceneQaAnyApiRegenAttempts: Math.max(0, Number.parseInt(process.env.SCENE_QA_ANYAPI_REGEN_ATTEMPTS ?? "0", 10) || 0),

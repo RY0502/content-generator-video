@@ -10,7 +10,7 @@ are videos generated directly by Agnes.
 1. Create or resume a series and its fixed 25-episode manifest in Turso.
 2. Select the unfinished episode, subject to the per-series daily completion gate.
 3. Ensure one portrait for each of the series' 1-5 main characters. A portrait is
-   reused locally, restored from Supabase Storage, or generated once and uploaded.
+   reused locally, restored from Convex Storage, or generated once and uploaded.
 4. Author 40-60 sequential scenes in resumable chunks.
 5. Generate one Groq narration WAV per scene plus the two title narration WAVs.
 6. Submit both title videos and every scene video to Agnes. Each asset receives
@@ -22,7 +22,7 @@ are videos generated directly by Agnes.
    scenes, narration, captions, and outro.
 10. When YouTube upload is enabled, only a durable successful upload marks the
     episode complete. Completing the final manifest episode also removes that
-    series' character portraits from Supabase.
+    series' character portraits from Convex.
 
 Every phase stores durable state. A fresh process resumes missing portraits,
 script chunks, audio, Agnes tasks, downloads, QA, assembly, or upload without
@@ -38,8 +38,8 @@ object names such as `bobo_the_backpack.png`.
 The portrait lookup order is:
 
 1. Verified local portrait metadata and file.
-2. The deterministic public Supabase URL for the series and character name.
-3. A new AnyAPI portrait generation followed by Supabase upload and public
+2. The deterministic public Convex URL for the series and character name.
+3. A new AnyAPI portrait generation followed by Convex upload and public
    re-download verification.
 
 Scene and title prompts do not include full character sheets, extracted visual
@@ -49,8 +49,8 @@ listed in that scene's `characterNames`; off-screen character portraits are not
 sent. A missing, non-public, or incomplete reference set fails before submission
 instead of silently switching identity strategy.
 
-Create `SUPABASE_STORAGE_BUCKET` as a public bucket. The service-role key stays
-server-side and is used only for exact portrait upload and cleanup operations.
+Portraits are stored in Convex File Storage and indexed in the Convex database
+`storedFiles` table by bucket and virtual path for segregation.
 
 ```dotenv
 ANYAPI_BASE_URL=https://api.anyapi.ai
@@ -58,11 +58,11 @@ ANYAPI_KEY=
 # ANYAPI_KEY_2=
 ANYAPI_IMAGE_MODEL=google/gemini-3.1-flash-image-preview
 
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_STORAGE_BUCKET=agnes-character-references
-SUPABASE_SERVICE_ROLE_KEY=
-SUPABASE_CHARACTER_REFERENCE_PREFIX=series-characters
-SUPABASE_STORAGE_REQUEST_TIMEOUT_MS=60000
+CONVEX_URL=https://your-project.convex.cloud
+CONVEX_STORAGE_BUCKET=agnes-character-references
+CONVEX_DEPLOY_KEY=
+CONVEX_CHARACTER_REFERENCE_PREFIX=series-characters
+CONVEX_STORAGE_REQUEST_TIMEOUT_MS=60000
 ```
 
 ## Scene and audio contract
@@ -199,7 +199,7 @@ Required groups in `.env` are:
 
 - Neon for framework/checkpoint state and Turso for durable production state;
 - AnyAPI for portrait generation;
-- Supabase public Storage for portrait references;
+- Convex File Storage & database for portrait references;
 - Groq Orpheus for narration;
 - one or more independently approved Agnes accounts; and
 - YouTube OAuth only when uploads are enabled.

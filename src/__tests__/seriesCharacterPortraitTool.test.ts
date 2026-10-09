@@ -22,9 +22,9 @@ describe("ensure_series_character_portraits tool", () => {
       characters: [{
         name: "Bobo the Backpack",
         imageName: "bobo_the_backpack.png",
-        status: "restored_from_supabase",
+        status: "restored_from_convex",
         localPath: "/assets/bobo_the_backpack.png",
-        publicUrl: "https://project.supabase.co/bobo_the_backpack.png",
+        publicUrl: "https://project.convex.cloud/api/storage/bobo_the_backpack.png",
         publicObjectKey: "series_7/characters/bobo_the_backpack.png",
         sha256: "abc",
       }],
@@ -44,7 +44,7 @@ describe("ensure_series_character_portraits tool", () => {
       characters: [{
         name: "Bobo the Backpack",
         imageName: "bobo_the_backpack.png",
-        publicUrl: "https://project.supabase.co/bobo_the_backpack.png",
+        publicUrl: "https://project.convex.cloud/api/storage/bobo_the_backpack.png",
       }],
     });
   });
