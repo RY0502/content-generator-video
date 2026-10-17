@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS episodes (
   completion_local_date TEXT,
   scheduler_skipped_at TEXT,
   scheduler_skip_reason TEXT,
+  audio_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (audio_status IN ('pending', 'ready', 'failed')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (series_id, episode_number)
 );

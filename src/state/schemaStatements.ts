@@ -49,6 +49,8 @@ export const DOMAIN_SCHEMA_STATEMENTS = [
       CHECK (audio_mutation_scene_number IS NULL OR audio_mutation_scene_number > 0),
     audio_mutation_expires_at_ms INTEGER
       CHECK (audio_mutation_expires_at_ms IS NULL OR audio_mutation_expires_at_ms >= 0),
+    audio_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (audio_status IN ('pending', 'ready', 'failed')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (series_id, episode_number)
   )`,

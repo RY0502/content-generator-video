@@ -1554,6 +1554,9 @@ async function prepareEpisode(runtime: WorkflowRuntime, seriesId: number, episod
     episodeNumber,
   );
   await runtime.seriesState.assertEpisodeAudioReady(episode.id);
+  if (typeof (runtime.seriesState as any).markEpisodeAudioReady === "function") {
+    await (runtime.seriesState as any).markEpisodeAudioReady(episode.id);
+  }
   const existingRows = await runtime.seriesState.listAgnesSceneGenerations(seriesId, episodeNumber);
   const agnesSubmissionStarted = existingRows.some(hasStartedAgnesSubmission);
   if (agnesSubmissionStarted) {

@@ -95,6 +95,7 @@ export interface EpisodeRow {
   /** Administrative opt-out from automatic scheduling; this is not completion. */
   schedulerSkippedAt: string | null;
   schedulerSkipReason: string | null;
+  audioStatus?: "pending" | "ready" | "failed";
 }
 
 export interface BeginEpisodeNarrationAudioMutationInput {
@@ -773,6 +774,7 @@ function mapEpisodeRow(row: Record<string, unknown>): EpisodeRow {
     completionLocalDate: (row.completion_local_date as string | null) ?? null,
     schedulerSkippedAt: (row.scheduler_skipped_at as string | null) ?? null,
     schedulerSkipReason: (row.scheduler_skip_reason as string | null) ?? null,
+    audioStatus: (row.audio_status as EpisodeRow["audioStatus"]) ?? "pending",
   };
 }
 
@@ -1425,6 +1427,11 @@ export class SeriesState {
       "episodes",
       "audio_mutation_expires_at_ms",
       "INTEGER CHECK (audio_mutation_expires_at_ms IS NULL OR audio_mutation_expires_at_ms >= 0)",
+    );
+    await ensureColumn(
+      "episodes",
+      "audio_status",
+      "TEXT NOT NULL DEFAULT 'pending' CHECK (audio_status IN ('pending', 'ready', 'failed'))",
     );
     await ensureColumn("episodes", "updated_at", "TEXT");
 
@@ -3689,16 +3696,34 @@ export class SeriesState {
     await this.client.execute({
       sql: `UPDATE episodes
             SET status = ?,
+                audio_status = CASE WHEN ? = 'audio' THEN 'ready' ELSE audio_status END,
                 script_json = COALESCE(?, script_json),
                 output_path = COALESCE(?, output_path),
                 updated_at = datetime('now')
             WHERE id = ?`,
       args: [
         status,
+        status,
         fields.scriptJson !== undefined ? canonicalJsonString(fields.scriptJson) : null,
         canonicalOutputPath ?? null,
         episodeId,
       ],
+    });
+  }
+
+  /**
+   * Explicitly marks an episode's audio as ready and updates status to 'audio'
+   * if it has not already progressed to 'assembly' or 'done'.
+   */
+  async markEpisodeAudioReady(episodeId: number): Promise<void> {
+    await this.initialize();
+    await this.client.execute({
+      sql: `UPDATE episodes
+            SET audio_status = 'ready',
+                status = CASE WHEN status IN ('assembly', 'done') THEN status ELSE 'audio' END,
+                updated_at = datetime('now')
+            WHERE id = ?`,
+      args: [episodeId],
     });
   }
 

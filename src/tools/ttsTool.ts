@@ -881,6 +881,9 @@ export function buildEpisodeTtsTool(
       // value that the durable audio preflight correctly rejects.
       const measuredTotal = measuredTotalNarrationSeconds;
       const repairRequired = durationExceededScenes.length > 0;
+      if (!repairRequired && typeof (seriesState as any).markEpisodeAudioReady === "function") {
+        await (seriesState as any).markEpisodeAudioReady(episode.id);
+      }
       progressLogger(
         `[NarrationAudio] Episode ${episodeNumber}: complete; ${scenes.length} scene(s), ` +
         `${measuredTotal.toFixed(3)}s total, ${durationExceededScenes.length} over 12s.`,
