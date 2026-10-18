@@ -7,10 +7,10 @@ import {
 export function buildSystemPromptExtension(youtubeUploadEnabled = false): string {
   const youtubeResumeInstruction = youtubeUploadEnabled
     ? "- youtube_upload: skip all earlier work and finish metadata/upload from persisted state."
-    : "- youtube_upload is disabled and upload_to_youtube is not available. If an assembled episode is ready, resumeAction=stop; leave it at status=assembly and make no metadata or upload calls.";
+    : "- youtube_upload is disabled and upload_to_youtube is not available. If an assembled episode is ready on disk, resumeAction=stop so the next run generates the next episode; make no metadata or upload calls.";
   const youtubeCompletionInstruction = youtubeUploadEnabled
     ? "After static media QA passes, assemble the episode and set status=assembly. Generate both YouTube metadata records, then call upload_to_youtube once with the canonical seriesId and episodeNumber and assembled path. Only its durable success receipt may mark the episode done and record completion time."
-    : "After static media QA passes, assemble and set status=assembly. YouTube upload is disabled: do not generate YouTube metadata or mark the episode done; preserve the assembled output for a later run with YOUTUBE_UPLOAD_ENABLED=true.";
+    : "After static media QA passes, call assemble_episode_video to generate the episode on disk. YouTube upload is disabled: do not generate YouTube metadata or mark the episode done manually; assemble completes it offline so subsequent runs advance to the next episode.";
 
   return `
 ## Kids story episode production (ages 4-8)
@@ -74,6 +74,7 @@ Run media in order:
 2. verify_agnes_scene_videos polls with the submitting account and resubmits only safely missing/retryable work. Stop while queued/running/pending.
 3. download_agnes_scene_videos waits for completions, then downloads and exact-normalizes every clip.
 4. qa_agnes_episode_videos performs deterministic static integrity validation. Follow its actionable failure; it never visually judges or rerenders a clip.
+5. assemble_episode_video renders the final episode MP4 on disk from validated clips and audio. Always call assemble_episode_video even when YouTube upload is disabled.
 
 Queue-full, busy, network, and timeout results remain durable for a later run. Rotate accounts only for key-scoped rate/quota/daily/credit errors. Never resubmit an accepted request.
 

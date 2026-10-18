@@ -3700,7 +3700,7 @@ export class SeriesState {
                 script_json = COALESCE(?, script_json),
                 output_path = COALESCE(?, output_path),
                 updated_at = datetime('now')
-            WHERE id = ?`,
+            WHERE id = ? AND status <> 'done'`,
       args: [
         status,
         status,

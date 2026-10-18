@@ -561,6 +561,7 @@ export function buildSeriesStateTools(
               assemblyValidation = {
                 status: "repair_required",
                 message: message.length <= 300 ? message : `${message.slice(0, 297)}...`,
+                nextAction: "Call assemble_episode_video to assemble and generate the episode MP4 on disk.",
               };
               // Re-entering the idempotent Agnes/download path also repairs a
               // missing normalized input before assembly is attempted again.
