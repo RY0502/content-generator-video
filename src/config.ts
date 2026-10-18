@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { chmodSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
@@ -90,6 +91,22 @@ export function resolveAnyApiImageModel(
 }
 
 const agnesAccounts = loadAgnesAccounts();
+
+function ensureBinaryExecutable(binaryPath: string | undefined): void {
+  if (process.platform === "win32" || !binaryPath) return;
+  try {
+    if (existsSync(binaryPath)) {
+      chmodSync(binaryPath, 0o755);
+    }
+  } catch {
+    // Non-fatal if filesystem is read-only or permissions cannot be modified
+  }
+}
+
+const resolvedFfmpegPath = process.env.FFMPEG_PATH ?? ffmpegInstaller.path;
+const resolvedFfprobePath = process.env.FFPROBE_PATH ?? ffprobeInstaller.path;
+ensureBinaryExecutable(resolvedFfmpegPath);
+ensureBinaryExecutable(resolvedFfprobePath);
 
 /** Central, typed configuration for the content-generator project. */
 export const CONFIG = {
@@ -195,8 +212,8 @@ export const CONFIG = {
 
   outputDir: path.resolve(process.env.OUTPUT_DIR ?? path.join(projectRoot, "output")),
   assetsDir: path.resolve(process.env.ASSETS_DIR ?? path.join(projectRoot, "assets")),
-  ffmpegPath: process.env.FFMPEG_PATH ?? ffmpegInstaller.path,
-  ffprobePath: process.env.FFPROBE_PATH ?? ffprobeInstaller.path,
+  ffmpegPath: resolvedFfmpegPath,
+  ffprobePath: resolvedFfprobePath,
 
   // Subtitle burn-in toggle: if false (default), videos are created clean without hardcoded subtitles.
   // When false, YouTube uses its automatic/uploaded closed captions (CC).
