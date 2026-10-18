@@ -275,7 +275,9 @@ export async function runEpisodePipeline(options: {
 
     // 2. Query Turso for current asset status
     const agnesRows = await seriesState.listAgnesSceneGenerations(seriesId, episodeNumber);
-    const totalScenes = 26; // 24 scenes + 2 key-art videos
+    const scriptObj = typeof episode.scriptJson === "string" ? JSON.parse(episode.scriptJson) : episode.scriptJson;
+    const scriptSceneCount = Array.isArray(scriptObj?.scenes) ? scriptObj.scenes.length : 24;
+    const totalScenes = scriptSceneCount + 2; // script scenes + 2 key-art videos
     const completedScenes = agnesRows.filter((r) => r.status === "completed" && Boolean(r.providerVideoUrl));
     const downloadedScenes = agnesRows.filter((r) => r.downloadStatus === "downloaded" && r.normalizedOutputPath && existsSync(r.normalizedOutputPath));
     const pendingScenes = agnesRows.filter((r) => !r.providerTaskId || r.status === "pending" || r.status === "failed");

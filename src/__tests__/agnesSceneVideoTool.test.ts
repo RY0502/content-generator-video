@@ -2437,4 +2437,63 @@ describe("three-phase Agnes scene workflow", () => {
     expect(prompt.match(/\[Bobo the Backpack\]/gu)?.length).toBeGreaterThanOrEqual(3);
     expect(prompt).toContain("Mia opens Bobo the Backpack while Bobo the Backpack smiles");
   });
+
+  it("safely loads receipts with non-contiguous attempt numbers without error", async () => {
+    await addAudioFiles(outputDir, 1, 5);
+    const { state, rows } = mockState(1);
+    const client = {
+      submitVideo: vi.fn(async () => task("video-with-attempt-gap", "queued")),
+      retrieveVideo: vi.fn(async () => task("video-with-attempt-gap", "completed")),
+      downloadCompletedVideo: vi.fn(async () => Buffer.from("dummy-video")),
+    };
+    const submit = buildSubmitAgnesSceneVideosTool(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+    await (submit as any).func({ seriesId: 7, episodeNumber: 2 });
+
+    const digest = rows.get(1)!.requestDigest;
+    rows.set(1, {
+      ...rows.get(1)!,
+      status: "queued",
+      providerTaskId: "video-with-attempt-gap",
+      providerReceipt: {
+        schemaVersion: 3,
+        kind: "agnes-single-scene",
+        requestDigest: digest,
+        providerSeconds: 5,
+        attempts: [
+          {
+            attemptNumber: 1,
+            claimToken: "token-1",
+            state: "definite_rejection",
+            startedAt: new Date(1000).toISOString(),
+            retrySafe: true,
+          },
+          {
+            attemptNumber: 11,
+            claimToken: "token-11",
+            state: "accepted",
+            startedAt: new Date(2000).toISOString(),
+            task: task("video-with-attempt-gap", "queued"),
+          },
+        ],
+      },
+    });
+
+    const verify = buildVerifyAgnesSceneVideosTool(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5),
+    });
+
+    const result = JSON.parse(await (verify as any).func({ seriesId: 7, episodeNumber: 2 }));
+    expect(result.status).toBe("ready_to_download");
+    expect(client.retrieveVideo).toHaveBeenCalledWith(
+      expect.objectContaining({ video_id: "video-with-attempt-gap" }),
+    );
+  });
 });
+
+

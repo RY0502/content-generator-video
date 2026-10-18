@@ -448,9 +448,12 @@ function cloneEnvelope(envelope: AgnesSceneReceiptEnvelope): AgnesSceneReceiptEn
 }
 
 function parseAttempt(value: unknown, index: number): AgnesAttemptReceipt | undefined {
-  if (!isRecord(value)
-    || value.attemptNumber !== index + 1
-    || typeof value.claimToken !== "string" || !value.claimToken
+  if (!isRecord(value)) return undefined;
+  const rawAttemptNumber = Number(value.attemptNumber);
+  const attemptNumber = Number.isSafeInteger(rawAttemptNumber) && rawAttemptNumber > 0
+    ? rawAttemptNumber
+    : index + 1;
+  if (typeof value.claimToken !== "string" || !value.claimToken
     || !["submitting", "accepted", "definite_rejection", "ambiguous"].includes(String(value.state))
     || typeof value.startedAt !== "string" || !value.startedAt) return undefined;
   const task = value.task === undefined ? undefined : taskFromUnknown(value.task);
@@ -478,7 +481,7 @@ function parseAttempt(value: unknown, index: number): AgnesAttemptReceipt | unde
     : undefined;
   if (value.errorKind !== undefined && errorKind === undefined) return undefined;
   return {
-    attemptNumber: value.attemptNumber,
+    attemptNumber,
     claimToken: value.claimToken,
     state: value.state as AttemptState,
     startedAt: value.startedAt,
