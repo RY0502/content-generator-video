@@ -2126,10 +2126,12 @@ function measuredNarrationTargetWords(
   const projected = Math.floor(
     currentWords * (NARRATION_MAX_AUDIO_SECONDS / measuredSeconds) * 0.88,
   );
+  // Ensure target allows at least 13 words for natural phrasing when possible
+  const effectiveTarget = Math.max(projected, 13);
   return Math.max(1, Math.min(
     currentWords > 1 ? currentWords - 1 : 1,
     NARRATION_MAX_SPOKEN_WORDS,
-    projected,
+    effectiveTarget,
   ));
 }
 
@@ -2183,8 +2185,9 @@ async function requestMeasuredNarrationReplacement(params: {
   );
   const systemPrompt =
     "Shorten exactly one children's-story narration that measured longer than the video limit. " +
+    `CRITICAL HARD LIMIT: The narrationText MUST contain at most ${targetWords} words. ` +
     "Return ONLY one JSON object with exactly: {\"sceneNumber\": number, \"narrationText\": string}. " +
-    "Preserve the same visible moment, story fact, character names, emotional intent, quoted dialogue, and age-appropriate voice. " +
+    "Preserve the same visible moment, story fact, character names (or refer to them collectively if names exceed the word limit), emotional intent, quoted dialogue, and age-appropriate voice. " +
     "Keep useful vocal expression when it fits, but remove long pauses or expendable wording first. " +
     "Do not add events, characters, props, metadata, markdown, or commentary.";
   const userText = JSON.stringify({

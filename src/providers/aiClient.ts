@@ -173,10 +173,9 @@ class NarrationRepairProvider implements Provider<StructuredNarrationInvocation,
 
     try {
       return input.parse(raw);
-    } catch {
-      // Never attach the raw model output or parser error. Besides keeping
-      // diagnostics compact, this prevents a malformed response from leaking
-      // a large partial script into logs or the parent agent transcript.
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[Narration-Repair] Provider "${this.name}" output rejected: ${reason}`);
       throw new InvalidNarrationRepairOutputError(this.name);
     }
   }
