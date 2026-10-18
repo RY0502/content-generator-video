@@ -23,6 +23,7 @@ import {
   AGNES_SERIES_KEY_ART_TRACKING_SCENE,
 } from "../services/agnesKeyArtService.js";
 import { canonicalizeSceneCast } from "../services/sceneCastCanonicalizer.js";
+import { canonicalCharacterImageName } from "../providers/convexCharacterReferenceStore.js";
 import type { AgnesSceneGenerationRow, SeriesState } from "../state/seriesState.js";
 import { AGNES_MAX_REFERENCE_IMAGES } from "../providers/agnes/index.js";
 import {
@@ -297,6 +298,35 @@ function approvedPublicUrl(sheet: unknown): string | null {
   try { return new URL(value).href; } catch { return null; }
 }
 
+function matchesApprovedPortraitUrl(
+  receivedUrl: string | undefined,
+  expectedPublicUrl: string | undefined,
+  sheet?: unknown,
+): boolean {
+  if (!receivedUrl || !expectedPublicUrl) return false;
+  if (receivedUrl === expectedPublicUrl) return true;
+  if (!sheet || typeof sheet !== "object" || Array.isArray(sheet)) return false;
+  const referenceImagePaths = (sheet as Record<string, unknown>).referenceImagePaths;
+  if (!referenceImagePaths || typeof referenceImagePaths !== "object" || Array.isArray(referenceImagePaths)) return false;
+  const portrait = (referenceImagePaths as Record<string, unknown>).portrait;
+  if (!portrait || typeof portrait !== "object" || Array.isArray(portrait)) return false;
+  const record = portrait as Record<string, unknown>;
+  const publicObjectKey = typeof record.publicObjectKey === "string" ? record.publicObjectKey : null;
+  if (publicObjectKey && receivedUrl.includes(publicObjectKey)) return true;
+
+  const characterName = typeof (sheet as Record<string, unknown>).characterName === "string"
+    ? ((sheet as Record<string, unknown>).characterName as string)
+    : "";
+  const seriesId = (sheet as Record<string, unknown>).seriesId;
+  if (characterName && seriesId !== undefined) {
+    const stem = canonicalCharacterImageName(characterName);
+    if (receivedUrl.includes(`series_${seriesId}`) && receivedUrl.includes(stem)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function addCheck(
   asset: QaAsset,
   code: string,
@@ -331,8 +361,11 @@ async function buildQaAssets(params: {
     throw new Error(`Static video QA requires a series roster of 1-${AGNES_MAX_REFERENCE_IMAGES} main characters.`);
   }
   const approvedUrls = new Map<string, string>();
+  const characterSheets = new Map<string, unknown>();
   for (const name of rosterNames) {
-    const publicUrl = approvedPublicUrl(await params.seriesState.getCharacterSheet(params.seriesId, name));
+    const sheet = await params.seriesState.getCharacterSheet(params.seriesId, name);
+    if (sheet) characterSheets.set(name, sheet);
+    const publicUrl = approvedPublicUrl(sheet);
     if (publicUrl) approvedUrls.set(name, publicUrl);
   }
   const scenes = parseScriptScenes(episode.scriptJson, rosterNames);
@@ -438,8 +471,10 @@ async function buildQaAssets(params: {
     );
     const wrongApprovedUrls = expectedMainCast.flatMap((name, index) => {
       const expected = approvedUrls.get(name);
-      return expected && expected !== reference.urls[index]
-        ? [`${name}: expected ${expected}, received ${reference.urls[index] ?? "none"}`]
+      const sheet = characterSheets.get(name);
+      const received = reference.urls[index];
+      return expected && !matchesApprovedPortraitUrl(received, expected, sheet)
+        ? [`${name}: expected ${expected}, received ${received ?? "none"}`]
         : [];
     });
     addCheck(

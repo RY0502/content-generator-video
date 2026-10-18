@@ -334,6 +334,35 @@ describe("qa_agnes_episode_videos static audit", () => {
     expect(result).toMatchObject({ status: "passed", passed: 3, failed: 0 });
   });
 
+  it("accepts historical Supabase public reference URL when matching character canonical name", async () => {
+    const { state, rows, probeMedia } = await fixture();
+    state.getCharacterSheet.mockResolvedValue({
+      seriesId: 7,
+      characterName: "Mia",
+      approvedAt: "2026-09-01T00:00:00.000Z",
+      referenceImagePaths: {
+        portrait: {
+          path: "/tmp/mia.png",
+          publicUrl: portraitUrl,
+          publicObjectKey: "series_7/characters/mia.png",
+        },
+      },
+    });
+    const supabaseUrl = "https://usdiugdjvlmeteiwsrwg.supabase.co/storage/v1/object/public/character-references/series_7/characters/mia.png";
+    const priorScene = rows.get(1)!;
+    rows.set(1, row({
+      sceneNumber: 1,
+      videoPath: priorScene.normalizedOutputPath!,
+      prompt: scenePrompt(),
+      publicReferenceUrl: JSON.stringify([supabaseUrl]),
+    }));
+
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    expect(result).toMatchObject({ status: "passed" });
+  });
+
   it("rejects a visible cast member without an approved public portrait URL", async () => {
     const { state, probeMedia } = await fixture();
     state.getCharacterSheet.mockResolvedValue({
