@@ -1323,7 +1323,7 @@ function pathIsInside(directory: string, candidate: string): boolean {
 }
 
 export function createResilientTursoFetch(maxRetries = 3) {
-  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  return async (input: any, init?: any): Promise<any> => {
     const isRequest = typeof Request !== "undefined" && input instanceof Request;
     const url = isRequest ? input.url : input;
     const method = isRequest ? input.method : init?.method ?? "GET";
