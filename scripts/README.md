@@ -24,8 +24,6 @@ The following utilities retain bespoke recovery or diagnostic logic, but they
 are not production entry points and their scene/key-art images are not consumed
 by Agnes-only assembly:
 
-- `regenerateSeries28Media.ts` archives/removes and regenerates legacy Series 28
-  key art and scene images.
 - `generateConceptTestSet.ts` creates historical concept key art and scene-image
   test sets.
 - `manualEdit.ts` sends one legacy scene PNG to paid image-edit providers.
@@ -33,7 +31,7 @@ by Agnes-only assembly:
   images across several episodes.
 - `testAnyApiImage.ts` makes a direct paid scene-image smoke-test request.
 
-All five fail before database, filesystem, or provider work unless the operator
+All four fail before database, filesystem, or provider work unless the operator
 deliberately supplies `--allow-legacy-image-flow`. Supplying the flag does not
 make their outputs production-compatible; it only acknowledges the historical
 diagnostic and its possible provider cost.

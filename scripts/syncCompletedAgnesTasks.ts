@@ -10,12 +10,15 @@ const client = createClient({
 });
 
 async function main() {
+  const seriesId = Number(process.argv[2] || 16);
+  const episodeNumber = Number(process.argv[3] || 1);
+
   const rs = await client.execute({
-    sql: "SELECT scene_number, status, provider_task_id, provider_receipt_json FROM agnes_scene_generations WHERE series_id = 16 AND episode_number = 1 ORDER BY scene_number ASC",
-    args: [],
+    sql: "SELECT scene_number, status, provider_task_id, provider_receipt_json FROM agnes_scene_generations WHERE series_id = ? AND episode_number = ? ORDER BY scene_number ASC",
+    args: [seriesId, episodeNumber],
   });
 
-  console.log(`Checking ${rs.rows.length} scene generation records in Turso...`);
+  console.log(`Checking ${rs.rows.length} scene generation records in Turso for Series ${seriesId}, Episode ${episodeNumber}...`);
 
   const accounts: Record<string, string> = Object.fromEntries(
     CONFIG.agnesAccounts.map((account) => [account.accountId, account.apiKey]),
@@ -81,8 +84,8 @@ async function main() {
             url: videoUrl,
           };
           await client.execute({
-            sql: "UPDATE agnes_scene_generations SET status = 'completed', provider_video_url = ?, provider_receipt_json = ?, error = NULL, completed_at = CURRENT_TIMESTAMP WHERE series_id = 16 AND episode_number = 1 AND scene_number = ?",
-            args: [videoUrl, JSON.stringify(receipt), sceneNumber],
+            sql: "UPDATE agnes_scene_generations SET status = 'completed', provider_video_url = ?, provider_receipt_json = ?, error = NULL, completed_at = CURRENT_TIMESTAMP WHERE series_id = ? AND episode_number = ? AND scene_number = ?",
+            args: [videoUrl, JSON.stringify(receipt), seriesId, episodeNumber, sceneNumber],
           });
           console.log(`  -> Updated Scene ${sceneNumber} to status='completed' in Turso DB!`);
         }
