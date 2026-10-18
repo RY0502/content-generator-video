@@ -1322,6 +1322,38 @@ function pathIsInside(directory: string, candidate: string): boolean {
   return relative.length > 0 && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
+export function createResilientTursoFetch(maxRetries = 3) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const isRequest = typeof Request !== "undefined" && input instanceof Request;
+    const url = isRequest ? input.url : input;
+    const method = isRequest ? input.method : init?.method ?? "GET";
+    const headers = new Headers(isRequest ? input.headers : init?.headers);
+    const bodyBuffer = isRequest && input.body ? Buffer.from(await input.arrayBuffer()) : (init?.body as any);
+
+    let attempts = 0;
+    while (true) {
+      attempts++;
+      try {
+        return await fetch(url, {
+          method,
+          headers,
+          body: bodyBuffer,
+          signal: isRequest ? input.signal : init?.signal,
+        });
+      } catch (err: any) {
+        const isSocketError =
+          err?.name === "TypeError" ||
+          err?.cause?.code === "UND_ERR_SOCKET" ||
+          err?.cause?.message?.includes("other side closed") ||
+          err?.code === "ECONNRESET" ||
+          err?.code === "ETIMEDOUT";
+        if (attempts >= maxRetries || !isSocketError) throw err;
+        await new Promise((r) => setTimeout(r, 250 * attempts));
+      }
+    }
+  };
+}
+
 /**
  * Data-access layer for the kids-video-agent series/episode/character-sheet
  * tables, stored in Turso (libSQL). Kept separate from the deep-agent
@@ -1336,6 +1368,7 @@ export class SeriesState {
     this.client = createClient({
       url: url ?? CONFIG.tursoDatabaseUrl(),
       authToken: authToken ?? CONFIG.tursoAuthToken(),
+      fetch: createResilientTursoFetch(),
     });
   }
 

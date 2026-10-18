@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import dotenv from "dotenv";
 import { CONFIG } from "../src/config.js";
-import { SeriesState } from "../src/state/seriesState.js";
+import { SeriesState, createResilientTursoFetch } from "../src/state/seriesState.js";
 import {
   buildSubmitAgnesSceneVideosTool,
   buildVerifyAgnesSceneVideosTool,
@@ -22,6 +22,7 @@ function sleep(ms: number): Promise<void> {
 const tursoClient = createClient({
   url: process.env.TURSO_DATABASE_URL!,
   authToken: process.env.TURSO_AUTH_TOKEN,
+  fetch: createResilientTursoFetch(),
 });
 
 const AGNES_ACCOUNTS: Record<string, string> = Object.fromEntries(
