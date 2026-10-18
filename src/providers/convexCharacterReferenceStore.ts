@@ -516,18 +516,14 @@ export async function uploadConvexCharacterReference(
     throw new Error("Convex saved file record did not include a public serve URL.");
   }
 
-  // Step 4: Verify public read & integrity
-  const downloaded = await downloadConvexCharacterReference(identity, storeOptions, { cacheBust: true });
-  if (!downloaded) {
-    throw new Error("Convex accepted the portrait upload but its public URL returned 404.");
-  }
-  if (downloaded.sha256 !== expectedSha256) {
-    throw new Error(
-      "Convex public character portrait does not match the uploaded bytes; refusing to bind Agnes to stale CDN content.",
-    );
-  }
-
-  return downloaded;
+  return {
+    objectKey,
+    publicUrl: savedRecord.url,
+    storageId,
+    bytes,
+    sha256: expectedSha256,
+    contentType: savedRecord.contentType || "image/png",
+  };
 }
 
 /**

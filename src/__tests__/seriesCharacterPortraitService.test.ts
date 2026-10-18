@@ -249,7 +249,7 @@ describe("ensureSeriesCharacterPortraits", () => {
     expect(generatePortrait).not.toHaveBeenCalled();
   });
 
-  it("fails closed when local and public bytes describe different identities", async () => {
+  it("fails closed when local and registered public bytes describe different identities", async () => {
     const localBytes = Buffer.from("local-identity");
     const { state, rows } = fakeSeriesState(roster);
     const requestDigest = createCharacterPortraitRequestDigest({
@@ -265,6 +265,23 @@ describe("ensureSeriesCharacterPortraits", () => {
     await mkdir(storage.destDir, { recursive: true });
     await writeFile(storage.portraitPath, localBytes);
 
+    rows.set(roster[0].name, {
+      id: 1,
+      seriesId: 7,
+      characterName: roster[0].name,
+      description: roster[0].description,
+      generationPrompt: roster[0].name,
+      approvedAt: "2026-09-15T10:00:00.000Z",
+      referenceImagePaths: {
+        portrait: {
+          path: storage.portraitPath,
+          publicUrl: "https://project.convex.cloud/api/storage/character-refs/other",
+          sha256: digest(Buffer.from("other-identity")),
+        },
+      },
+    });
+
+    const downloadReference = vi.fn();
     await expect(ensureSeriesCharacterPortraits({
       seriesState: state,
       seriesId: 7,
@@ -273,11 +290,101 @@ describe("ensureSeriesCharacterPortraits", () => {
         model,
         storeOptions,
         generatePortrait: vi.fn(),
-        downloadReference: vi.fn(async () => remoteReference(Buffer.from("other-identity"))),
+        downloadReference,
         uploadReference: vi.fn(),
       },
     })).rejects.toThrow("differ");
-    expect(rows.size).toBe(0);
+    expect(downloadReference).not.toHaveBeenCalled();
+  });
+
+  it("does not query Convex backend when portrait is already present on disk and registered", async () => {
+    const localBytes = Buffer.from("local-portrait-bytes");
+    const { state, rows } = fakeSeriesState(roster);
+    const requestDigest = createCharacterPortraitRequestDigest({
+      characterDescription: roster[0].description,
+      model,
+    });
+    const storage = characterPortraitStorage({
+      assetsDir,
+      seriesId: 7,
+      characterName: roster[0].name,
+      requestDigest,
+    });
+    await mkdir(storage.destDir, { recursive: true });
+    await writeFile(storage.portraitPath, localBytes);
+
+    const publicUrl = "https://project.convex.cloud/api/storage/character-refs/bobo.png";
+    const localSha = digest(localBytes);
+    rows.set(roster[0].name, {
+      id: 1,
+      seriesId: 7,
+      characterName: roster[0].name,
+      description: roster[0].description,
+      generationPrompt: roster[0].name,
+      approvedAt: "2026-09-15T10:00:00.000Z",
+      referenceImagePaths: {
+        portrait: {
+          path: storage.portraitPath,
+          canonicalFileName: "bobo_the_backpack.png",
+          publicUrl,
+          sha256: localSha,
+        },
+      },
+    });
+
+    const downloadReference = vi.fn();
+    const uploadReference = vi.fn();
+    const generatePortrait = vi.fn();
+
+    const result = await ensureSeriesCharacterPortraits({
+      seriesState: state,
+      seriesId: 7,
+      dependencies: {
+        assetsDir,
+        model,
+        storeOptions,
+        generatePortrait,
+        downloadReference,
+        uploadReference,
+      },
+    });
+
+    expect(result.characters[0].status).toBe("already_available");
+    expect(result.characters[0].publicUrl).toBe(publicUrl);
+    expect(downloadReference).not.toHaveBeenCalled();
+    expect(uploadReference).not.toHaveBeenCalled();
+    expect(generatePortrait).not.toHaveBeenCalled();
+  });
+
+  it("compresses generated portrait bytes before uploading to Convex", async () => {
+    const rawBytes = Buffer.from("raw-generated-bytes");
+    const compressedBytes = Buffer.from("compressed-bytes");
+    const { state } = fakeSeriesState(roster);
+    const generatePortrait = vi.fn(async () => rawBytes);
+    const compressPortrait = vi.fn(() => compressedBytes);
+    const uploadReference = vi.fn(async (_identity, uploaded: Buffer) => remoteReference(uploaded));
+
+    const result = await ensureSeriesCharacterPortraits({
+      seriesState: state,
+      seriesId: 7,
+      dependencies: {
+        assetsDir,
+        model,
+        storeOptions,
+        generatePortrait,
+        compressPortrait,
+        downloadReference: vi.fn(async () => null),
+        uploadReference,
+      },
+    });
+
+    expect(compressPortrait).toHaveBeenCalledWith(rawBytes);
+    expect(uploadReference).toHaveBeenCalledWith(
+      expect.anything(),
+      compressedBytes,
+      expect.anything(),
+    );
+    await expect(readFile(result.characters[0].localPath)).resolves.toEqual(compressedBytes);
   });
 });
 

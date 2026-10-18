@@ -152,6 +152,7 @@ describe("Convex character-reference storage", () => {
     expect(result.publicUrl).toBe(publicUrl);
     expect(result.objectKey).toBe("production/portraits/series_12/characters/bobo_the_backpack.png");
     expect(result.storageId).toBe("stored_abc");
+    expect(fetch.mock.calls.some(([input]) => String(input).startsWith(publicUrl))).toBe(false);
   });
 
   it("deletes canonical objects for the completed series via Convex mutations", async () => {

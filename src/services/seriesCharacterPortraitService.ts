@@ -7,6 +7,7 @@ import { generateAgnesImage } from "../providers/agnesImageClient.js";
 import { generateAnyApiSceneImage } from "../providers/anyApiImageClient.js";
 import { generatePollinationsImageDetailed } from "../providers/pollinationsImageClient.js";
 import {
+  buildConvexCharacterReferenceObjectKey,
   canonicalCharacterImageName,
   downloadConvexCharacterReference,
   uploadConvexCharacterReference,
@@ -24,6 +25,7 @@ import {
 } from "./sceneCastCanonicalizer.js";
 import { chatVisionFrameworkOnly } from "../providers/aiClient.js";
 import type { SceneCharacterVisual } from "../promptBuilder.js";
+import { compressPortraitImage } from "../utils/imageCompressor.js";
 
 export const MAX_SERIES_MAIN_CHARACTERS = 5;
 const CHARACTER_PORTRAIT_REQUEST_SCHEMA_VERSION = 1;
@@ -65,6 +67,7 @@ export interface SeriesCharacterPortraitDependencies {
   downloadReference?: typeof downloadConvexCharacterReference;
   uploadReference?: typeof uploadConvexCharacterReference;
   auditPortrait?: CharacterPortraitAuditor;
+  compressPortrait?: typeof compressPortraitImage;
   storeOptions?: ConvexCharacterReferenceStoreOptions;
   assetsDir?: string;
   model?: string;
@@ -331,6 +334,7 @@ export async function ensureSeriesCharacterPortraits(params: {
   const downloadReference = dependencies.downloadReference ?? downloadConvexCharacterReference;
   const uploadReference = dependencies.uploadReference ?? uploadConvexCharacterReference;
   const auditPortrait = dependencies.auditPortrait ?? defaultAuditPortrait;
+  const compressPortrait = dependencies.compressPortrait ?? compressPortraitImage;
   const storeOptions = dependencies.storeOptions ?? configuredConvexCharacterReferenceStoreOptions();
   const assetsDir = dependencies.assetsDir ?? CONFIG.assetsDir;
   const model = dependencies.model ?? CONFIG.anyApiImageModel;
@@ -369,77 +373,109 @@ export async function ensureSeriesCharacterPortraits(params: {
       ],
       canonicalPath,
     });
-    let publicReference = await downloadReference(
-      { seriesId, characterName: character.name },
-      storeOptions,
-    );
+    let publicReference: DownloadedConvexCharacterReference | null = null;
     let status: SeriesCharacterPortraitStatus;
 
-    if (!localBytes && publicReference) {
-      localBytes = publicReference.bytes;
-      await writeAtomically(canonicalPath, localBytes);
-      status = "restored_from_convex";
-      logStep(`Restored ${character.name} portrait from its public Convex URL`);
-    } else if (localBytes && publicReference) {
-      assertMatchingLocalAndPublic({
-        characterName: character.name,
-        localBytes,
-        publicReference,
-      });
-      status = "already_available";
-    } else if (localBytes) {
-      publicReference = await uploadReference(
+    if (localBytes) {
+      const localSha256 = sha256(localBytes);
+      if (
+        existingPortrait?.publicUrl
+        && (!existingPortrait.sha256 || existingPortrait.sha256 === localSha256)
+      ) {
+        publicReference = {
+          objectKey:
+            existingPortrait.publicObjectKey
+            || buildConvexCharacterReferenceObjectKey(
+              { seriesId, characterName: character.name },
+              storeOptions.objectPrefix,
+            ),
+          publicUrl: existingPortrait.publicUrl,
+          bytes: localBytes,
+          sha256: localSha256,
+          contentType: existingPortrait.contentType || "image/png",
+        };
+        status = "already_available";
+      } else if (
+        existingPortrait?.publicUrl
+        && existingPortrait.sha256
+        && existingPortrait.sha256 !== localSha256
+      ) {
+        throw new Error(
+          `Local and public portraits for "${character.name}" differ. Refusing to overwrite a stable character identity; restore the intended image or remove the incorrect object explicitly.`,
+        );
+      } else {
+        const compressed = compressPortrait(localBytes);
+        if (compressed.length < localBytes.length) {
+          localBytes = compressed;
+          await writeAtomically(canonicalPath, localBytes);
+        }
+        publicReference = await uploadReference(
+          { seriesId, characterName: character.name },
+          localBytes,
+          storeOptions,
+        );
+        status = "uploaded_existing_local";
+        logStep(`Uploaded existing ${character.name} portrait to Convex`);
+      }
+    } else {
+      // Asset is absent on disk: query Convex backend to restore it.
+      publicReference = await downloadReference(
         { seriesId, characterName: character.name },
-        localBytes,
         storeOptions,
       );
-      status = "uploaded_existing_local";
-      logStep(`Uploaded existing ${character.name} portrait to Convex`);
-    } else {
-      const visual = inferDefaultCharacterVisual(character.name, character.description);
-      const prompt = buildCharacterPortraitPrompt({
-        characterDescription: `${character.name}: ${character.description}`,
-        characterVisual: visual,
-      });
-      logStep(`Generating one portrait with model="${model}" for ${character.name}`);
-      localBytes = await generatePortrait(prompt, model);
-      if (localBytes.length < 1) {
-        throw new Error(`Portrait provider returned an empty image for ${character.name}.`);
-      }
 
-      let audit = await auditPortrait({
-        characterName: character.name,
-        characterDescription: character.description,
-        visual,
-        imageBytes: localBytes,
-      });
-
-      if (!audit.pass) {
-        logStep(`⚠️ Portrait audit failed for ${character.name}: ${audit.reason}. Retrying with strict anti-human prompt...`);
-        const reinforcedPrompt = `${prompt} STRICT NEGATIVE: ABSOLUTELY NO HUMAN PERSON, NO HUMAN BOY, NO HUMAN GIRL, NO CHILD. RENDER ONLY THE ${visual?.speciesOrType?.toUpperCase() || "OBJECT"} ITSELF.`;
-        localBytes = await generatePortrait(reinforcedPrompt, model);
+      if (publicReference) {
+        localBytes = publicReference.bytes;
+        await writeAtomically(canonicalPath, localBytes);
+        status = "restored_from_convex";
+        logStep(`Restored ${character.name} portrait from its public Convex URL`);
+      } else {
+        const visual = inferDefaultCharacterVisual(character.name, character.description);
+        const prompt = buildCharacterPortraitPrompt({
+          characterDescription: `${character.name}: ${character.description}`,
+          characterVisual: visual,
+        });
+        logStep(`Generating one portrait with model="${model}" for ${character.name}`);
+        localBytes = await generatePortrait(prompt, model);
         if (localBytes.length < 1) {
           throw new Error(`Portrait provider returned an empty image for ${character.name}.`);
         }
-        audit = await auditPortrait({
+
+        let audit = await auditPortrait({
           characterName: character.name,
           characterDescription: character.description,
           visual,
           imageBytes: localBytes,
         });
-        if (!audit.pass) {
-          throw new Error(`Character portrait failed visual ontology audit for ${character.name}: ${audit.reason}`);
-        }
-      }
 
-      await writeAtomically(canonicalPath, localBytes);
-      publicReference = await uploadReference(
-        { seriesId, characterName: character.name },
-        localBytes,
-        storeOptions,
-      );
-      status = "generated";
-      logStep(`Generated and published ${character.name} portrait`);
+        if (!audit.pass) {
+          logStep(`⚠️ Portrait audit failed for ${character.name}: ${audit.reason}. Retrying with strict anti-human prompt...`);
+          const reinforcedPrompt = `${prompt} STRICT NEGATIVE: ABSOLUTELY NO HUMAN PERSON, NO HUMAN BOY, NO HUMAN GIRL, NO CHILD. RENDER ONLY THE ${visual?.speciesOrType?.toUpperCase() || "OBJECT"} ITSELF.`;
+          localBytes = await generatePortrait(reinforcedPrompt, model);
+          if (localBytes.length < 1) {
+            throw new Error(`Portrait provider returned an empty image for ${character.name}.`);
+          }
+          audit = await auditPortrait({
+            characterName: character.name,
+            characterDescription: character.description,
+            visual,
+            imageBytes: localBytes,
+          });
+          if (!audit.pass) {
+            throw new Error(`Character portrait failed visual ontology audit for ${character.name}: ${audit.reason}`);
+          }
+        }
+
+        localBytes = compressPortrait(localBytes);
+        await writeAtomically(canonicalPath, localBytes);
+        publicReference = await uploadReference(
+          { seriesId, characterName: character.name },
+          localBytes,
+          storeOptions,
+        );
+        status = "generated";
+        logStep(`Generated and published ${character.name} portrait`);
+      }
     }
 
     if (!publicReference) {
