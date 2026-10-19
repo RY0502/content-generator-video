@@ -100,6 +100,21 @@ export function resolveCdnUrl(url: string | undefined | null, cdnUrl?: string): 
   return url.replace(/^https?:\/\/[^/]+/u, cdn);
 }
 
+export function toCanonicalConvexUrl(
+  url: string | undefined | null,
+  cdnUrl?: string,
+  convexUrl?: string,
+): string {
+  if (!url) return "";
+  const cdn = (cdnUrl || process.env.CONVEX_CDN_URL)?.trim().replace(/\/+$/gu, "");
+  const origin = (convexUrl || process.env.CONVEX_URL)?.trim().replace(/\/+$/gu, "");
+  if (cdn && origin && url.startsWith(cdn)) {
+    return url.replace(cdn, origin);
+  }
+  return url;
+}
+
+
 function validateStoreOptions(
   options: ConvexCharacterReferenceStoreOptions,
   _requireWriteAccess = false,

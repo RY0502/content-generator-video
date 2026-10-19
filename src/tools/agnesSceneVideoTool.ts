@@ -20,7 +20,7 @@ import {
   type AgnesVideoMode,
   type AgnesVideoTask,
 } from "../providers/agnes/index.js";
-import { canonicalCharacterImageName } from "../providers/convexCharacterReferenceStore.js";
+import { canonicalCharacterImageName, toCanonicalConvexUrl } from "../providers/convexCharacterReferenceStore.js";
 import {
   buildEpisodeKeyArtVideoPrompt,
   buildSeriesKeyArtVideoPrompt,
@@ -604,7 +604,7 @@ export function createAgnesVideoRequestDigest(params: {
     seed: params.seed,
     targetDurationSeconds: params.duration,
     ...(params.mode === "reference"
-      ? { images: [...(params.referenceImageUrls ?? [])] }
+      ? { images: [...(params.referenceImageUrls ?? []).map((u) => toCanonicalConvexUrl(u))] }
       : {}),
   })).digest("hex");
 }

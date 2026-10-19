@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { toCanonicalConvexUrl } from "../providers/convexCharacterReferenceStore.js";
 
 /**
  * The static QA contract deliberately has no model/provider dependency. Bump
@@ -89,7 +90,7 @@ export function createAgnesStaticVideoQaRequestDigest(
     videoSha256: input.videoSha256,
     episodeAssetSetDigest: input.episodeAssetSetDigest,
     expectedMainCast: [...input.expectedMainCast],
-    referenceImageUrls: [...input.referenceImageUrls],
+    referenceImageUrls: [...input.referenceImageUrls].map((u) => toCanonicalConvexUrl(u)),
     media: input.media,
   })).digest("hex");
 }
