@@ -78,6 +78,7 @@ export interface SeriesCharacterPortraitDependencies {
 export function configuredConvexCharacterReferenceStoreOptions(): ConvexCharacterReferenceStoreOptions {
   return {
     convexUrl: CONFIG.convexUrl,
+    cdnUrl: CONFIG.convexCdnUrl,
     bucket: CONFIG.convexStorageBucket,
     deployKey: CONFIG.convexDeployKey,
     objectPrefix: CONFIG.convexCharacterReferencePrefix,

@@ -23,3 +23,5 @@ scripts/inspectSeriesInfo.ts
 scripts/produceRefreshedEpisode1.ts
 scripts/repairEpisode1CastAndResetScenes.ts
 scripts/inspectEpisode1Script.ts
+
+.env.local

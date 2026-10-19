@@ -13,6 +13,7 @@ export type ConvexCharacterReferenceFetch = (
 export interface ConvexCharacterReferenceStoreOptions {
   convexUrl?: string;
   projectUrl?: string; // Alias for convexUrl for flexibility
+  cdnUrl?: string; // Cloudflare CDN proxy URL for public downloads
   bucket?: string;
   deployKey?: string;
   serviceRoleKey?: string; // Alias for deployKey
@@ -41,6 +42,7 @@ export interface DownloadedConvexCharacterReference
 
 type ValidatedStoreOptions = {
   convexUrl: URL;
+  cdnUrl?: string;
   bucket: string;
   deployKey?: string;
   objectPrefix: string;
@@ -91,6 +93,13 @@ function validateObjectPrefix(value: string | undefined): string {
   return segments.join("/");
 }
 
+export function resolveCdnUrl(url: string | undefined | null, cdnUrl?: string): string {
+  if (!url) return "";
+  const cdn = (cdnUrl || process.env.CONVEX_CDN_URL)?.trim().replace(/\/+$/gu, "");
+  if (!cdn) return url;
+  return url.replace(/^https?:\/\/[^/]+/u, cdn);
+}
+
 function validateStoreOptions(
   options: ConvexCharacterReferenceStoreOptions,
   _requireWriteAccess = false,
@@ -121,6 +130,7 @@ function validateStoreOptions(
     );
   }
   const deployKey = (options.deployKey || options.serviceRoleKey)?.trim();
+  const cdnUrl = options.cdnUrl?.trim() || process.env.CONVEX_CDN_URL?.trim();
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new Error("Convex character-reference requestTimeoutMs must be a positive integer.");
@@ -128,6 +138,7 @@ function validateStoreOptions(
 
   return {
     convexUrl,
+    ...(cdnUrl ? { cdnUrl } : {}),
     bucket,
     ...(deployKey ? { deployKey } : {}),
     objectPrefix: validateObjectPrefix(options.objectPrefix),
@@ -394,9 +405,10 @@ export async function downloadConvexCharacterReference(
     return null;
   }
 
+  const publicUrl = resolveCdnUrl(fileRecord.url, options.cdnUrl);
   const fetchUrl = fetchOptions?.cacheBust
-    ? `${fileRecord.url}${fileRecord.url.includes("?") ? "&" : "?"}t=${Date.now()}`
-    : fileRecord.url;
+    ? `${publicUrl}${publicUrl.includes("?") ? "&" : "?"}t=${Date.now()}`
+    : publicUrl;
 
   const response = await fetchWithTimeout(options, fetchUrl, {
     method: "GET",
@@ -430,7 +442,7 @@ export async function downloadConvexCharacterReference(
 
   return {
     objectKey,
-    publicUrl: fileRecord.url,
+    publicUrl,
     storageId: fileRecord.storageId,
     bytes,
     sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -516,9 +528,11 @@ export async function uploadConvexCharacterReference(
     throw new Error("Convex saved file record did not include a public serve URL.");
   }
 
+  const publicUrl = resolveCdnUrl(savedRecord.url, options.cdnUrl);
+
   return {
     objectKey,
-    publicUrl: savedRecord.url,
+    publicUrl,
     storageId,
     bytes,
     sha256: expectedSha256,

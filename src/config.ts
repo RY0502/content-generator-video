@@ -166,6 +166,7 @@ export const CONFIG = {
   ),
   // Public character-reference storage backed by Convex File Storage and Convex DB.
   convexUrl: process.env.CONVEX_URL?.trim() || undefined,
+  convexCdnUrl: process.env.CONVEX_CDN_URL?.trim() || undefined,
   convexStorageBucket:
     process.env.CONVEX_STORAGE_BUCKET?.trim() || "agnes-character-references",
   convexDeployKey: process.env.CONVEX_DEPLOY_KEY?.trim() || process.env.CONVEX_AUTH_TOKEN?.trim() || undefined,
