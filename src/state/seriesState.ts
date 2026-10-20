@@ -1503,7 +1503,8 @@ export class SeriesState {
 
     // Builds predating durable YouTube receipts sometimes marked an episode
     // done without enough identity to prove that it was published. Put those
-    // rows back into the resumable queue instead of silently skipping them.
+    // rows back into the resumable queue instead of silently skipping them,
+    // but preserve offline-completed episodes that have output_path and completed_at.
     await this.client.execute(
       `UPDATE episodes
        SET status = 'pending', updated_at = datetime('now')
@@ -1512,6 +1513,10 @@ export class SeriesState {
            uploaded_at IS NULL OR trim(uploaded_at) = '' OR
            youtube_video_id IS NULL OR trim(youtube_video_id) = '' OR
            youtube_url IS NULL OR trim(youtube_url) = ''
+         )
+         AND (
+           output_path IS NULL OR trim(output_path) = '' OR
+           completed_at IS NULL OR trim(completed_at) = ''
          )`,
     );
 
@@ -3542,20 +3547,6 @@ export class SeriesState {
       await this.assertEpisodeAudioReady(episodeId);
     }
     if (status === "done") {
-      if (!CONFIG.youtubeUploadEnabled) {
-        const existing = await this.client.execute({
-          sql: "SELECT series_id, episode_number FROM episodes WHERE id = ? LIMIT 1",
-          args: [episodeId],
-        });
-        const row = existing.rows[0];
-        if (!row) throw new Error(`Episode id ${episodeId} was not found.`);
-        await this.completeEpisodeWithoutUpload({
-          seriesId: Number(row.series_id),
-          episodeNumber: Number(row.episode_number),
-          outputPath: fields.outputPath,
-        });
-        return;
-      }
       throw new Error(
         "Only finalizeEpisodeUpload may mark an episode done after YouTube confirms the upload.",
       );

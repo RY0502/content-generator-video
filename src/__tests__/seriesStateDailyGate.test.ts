@@ -6,6 +6,7 @@ vi.mock("freetier-deepagent-framework", () => ({
   }),
 }));
 
+import { CONFIG } from "../config.js";
 import {
   ONE_EPISODE_PER_DAY_MESSAGE,
   SeriesState,
@@ -204,23 +205,29 @@ describe("SeriesState one-episode-per-day selection", () => {
   });
 
   it("does not count a local done flag without a complete YouTube identity", async () => {
-    const { state, seriesId } = await createState();
-    await stateClient(state).execute({
-      sql: `UPDATE episodes
-            SET status = 'done', uploaded_at = '2026-09-04T06:00:00.000Z',
-                youtube_video_id = 'video-1', youtube_url = NULL
-            WHERE series_id = ? AND episode_number = 1`,
-      args: [seriesId],
-    });
+    const originalSetting = CONFIG.youtubeUploadEnabled;
+    try {
+      (CONFIG as any).youtubeUploadEnabled = true;
+      const { state, seriesId } = await createState();
+      await stateClient(state).execute({
+        sql: `UPDATE episodes
+              SET status = 'done', uploaded_at = '2026-09-04T06:00:00.000Z',
+                  youtube_video_id = 'video-1', youtube_url = NULL
+              WHERE series_id = ? AND episode_number = 1`,
+        args: [seriesId],
+      });
 
-    const availability = await state.getNextEpisodeAvailability(seriesId, {
-      now: new Date("2026-09-04T12:00:00.000Z"),
-      timeZone: "UTC",
-    });
-    expect(availability).toMatchObject({
-      kind: "ready",
-      episode: { episodeNumber: 1 },
-    });
+      const availability = await state.getNextEpisodeAvailability(seriesId, {
+        now: new Date("2026-09-04T12:00:00.000Z"),
+        timeZone: "UTC",
+      });
+      expect(availability).toMatchObject({
+        kind: "ready",
+        episode: { episodeNumber: 1 },
+      });
+    } finally {
+      (CONFIG as any).youtubeUploadEnabled = originalSetting;
+    }
   });
 
   it("distinguishes a missing manifest, a missing series, and a completed season", async () => {

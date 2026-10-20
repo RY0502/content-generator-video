@@ -7,10 +7,10 @@ import {
 export function buildSystemPromptExtension(youtubeUploadEnabled = false): string {
   const youtubeResumeInstruction = youtubeUploadEnabled
     ? "- youtube_upload: skip all earlier work and finish metadata/upload from persisted state."
-    : "- youtube_upload is disabled and upload_to_youtube is not available. If an assembled episode is ready on disk, resumeAction=stop so the next run generates the next episode; make no metadata or upload calls.";
+    : "- youtube_upload is disabled and upload_to_youtube is not available. If an assembled episode is ready on disk, resumeAction=stop; make no metadata or upload calls.";
   const youtubeCompletionInstruction = youtubeUploadEnabled
     ? "After static media QA passes, assemble the episode and set status=assembly. Generate both YouTube metadata records, then call upload_to_youtube once with the canonical seriesId and episodeNumber and assembled path. Only its durable success receipt may mark the episode done and record completion time."
-    : "After static media QA passes, call assemble_episode_video to generate the episode on disk. YouTube upload is disabled: do not generate YouTube metadata or mark the episode done manually; assemble completes it offline so subsequent runs advance to the next episode.";
+    : "After static media QA passes, call assemble_episode_video to generate the episode on disk. YouTube upload is disabled: do not generate YouTube metadata or mark the episode done; assemble completes it offline. Stop immediately on completion.";
 
   return `
 ## Kids story episode production (ages 4-8)
@@ -56,7 +56,7 @@ Always begin with:
 2. bulk_insert_episode_list with seriesId only. If manifest_required, submit the complete numbered 25-episode manifest once.
 3. get_next_episode and obey resumeAction/nextAction exactly.
 
-For daily_limit make no more calls and reply exactly: Only 2 episodes per day can be generated. Stop on series_complete, no_episodes, series_missing, resumeAction=stop, retryThisInvocation=false, pending provider work, or deferred audio. ${youtubeResumeInstruction}
+For daily_limit make no more calls and reply exactly: Only 2 episodes per day can be generated. Stop on series_complete, no_episodes, series_missing, resumeAction=stop, stopRun=true, retryThisInvocation=false, pending provider work, or deferred audio. ${youtubeResumeInstruction}
 
 - script_and_audio: call ensure_series_character_portraits once for the full stored roster. Then author only when no valid script exists.
 - script_authoring: do not redo portraits or media. Resume the exact next range using the durable plan, completed beat ledger, previous-scene handoff, and draft revision.

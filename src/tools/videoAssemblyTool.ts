@@ -1019,6 +1019,7 @@ export function buildVideoAssemblyTool(
 
       endTimer(timerName);
 
+      const offlineComplete = !CONFIG.youtubeUploadEnabled;
       return JSON.stringify({
         path: finalPath,
         variant: outputVariant,
@@ -1032,6 +1033,14 @@ export function buildVideoAssemblyTool(
         allowedDurationDeltaSeconds: allowedDurationDelta,
         captionsEmbedded,
         warning: assemblyWarning,
+        ...(offlineComplete
+          ? {
+              stopRun: true,
+              episodeStatus: "done",
+              nextAction: "The episode is complete on disk and in database. Stop this invocation; do not call get_next_episode or start authoring the next episode in the same run.",
+              note: "YouTube upload is disabled. Episode assembly and offline completion are finished. Stop this run now.",
+            }
+          : {}),
       });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
