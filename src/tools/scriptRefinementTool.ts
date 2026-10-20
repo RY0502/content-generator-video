@@ -472,7 +472,7 @@ const completeChunkSceneSchema = z.object({
     "Write actual narration with at least one spoken letter or digit outside vocal directions; never use ellipses, field labels, TODOs, or scene-number placeholders. Keep vocal directions only when useful.",
   ),
   environmentDescription: boundedRequiredText("environmentDescription", 1_500).describe(
-    "TARGET: 120-260 characters of concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500. Never submit ellipses or a scene-number/field-label placeholder.",
+    "TARGET: 120-260 characters. Always prefix with the persistent macro container/room (e.g. 'Inside the refrigerator: ...', 'At the laundry basket: ...') so standalone video clips retain the parent environment. Concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500. Never submit ellipses or a scene-number/field-label placeholder.",
   ),
   action: boundedRequiredText("action", 1_500).describe(
     "TARGET: 70-180 characters for one continuous visible action/emotion progression with a clear start, one movement/change, and a readable end state that fits within 12 seconds; hard maximum 1500. No cuts or montage. Do not repeat environment or camera prose. Never submit ellipses or a scene-number/field-label placeholder.",

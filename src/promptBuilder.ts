@@ -519,7 +519,13 @@ export function buildStylizedScenePrompt(params: {
   objectInteractions?: string;
 }): string {
   const environment = params.environmentDescription.replace(/\s+/g, " ").trim();
-  const envLayer = `SETTING — ${environment}`;
+  const rawContinuityAnchors = (params.continuityAnchors ?? [])
+    .map((anchor) => anchor.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const anchorSettingSummary = rawContinuityAnchors.length > 0
+    ? ` | PERSISTENT SCENE ANCHORS: ${rawContinuityAnchors.join("; ")}.`
+    : "";
+  const envLayer = `SETTING — ${environment}${anchorSettingSummary}`;
 
   const normalizedSupportingEntities = (params.supportingEntities ?? [])
     .map((entity) => entity.replace(/\s+/g, " ").trim())
@@ -591,9 +597,7 @@ export function buildStylizedScenePrompt(params: {
     : "";
 
   // CONSISTENCY — episode-local recurring props/setup and environment continuity.
-  const continuityAnchors = params.continuityAnchors
-    ?.map((anchor, index) => anchor.replace(/\s+/g, " ").trim())
-    .filter(Boolean)
+  const continuityAnchors = rawContinuityAnchors
     .map((anchor, index) => `[Anchor ${index + 1}]: ${anchor}`)
     .join(" | ");
   const continuityLayer = continuityAnchors

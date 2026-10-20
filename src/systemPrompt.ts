@@ -20,23 +20,23 @@ Generate or resume exactly one episode. State, local files, and provider receipt
 ### Simple media contract
 
 - A series has 1-5 uniquely named main characters. On first definition never create more than five.
-- Generate images only for reusable character portraits, never scene stills, key art, sheets, or descriptions. The portrait tool reuses local or public Convex objects and uploads new portraits under clear names such as character_name.png.
-- Main-character appearance comes from Agnes image references. Prompts contain exact character names, never a character sheet or appearance paragraph. Send only portraits for main characters visible in that asset, in characterNames order; never send an off-screen character or a partial set.
+- Generate images only for reusable character portraits, never scene stills, key art, sheets, or descriptions. The portrait tool reuses local or public Convex objects under clear names like character_name.png.
+- Main-character appearance comes from Agnes image references. Prompts contain exact character names, never a character sheet or appearance paragraph. Send only portraits for visible main characters in characterNames order; never send an off-screen character.
 - Generate direct Agnes title videos and one video for every story scene. One scene = one narrationText = one Groq WAV = one Agnes request = one normalized final clip.
 - Agnes receives an integer 4-12 second request; the measured WAV is authoritative. Provider audio is removed and the downloaded video is trimmed to the exact WAV duration. Never join, repeat, freeze, or stretch clips to hide a mismatch.
 - Static QA checks durable rows, request/reference bindings, files, codec, dimensions, durations, and duplicate files. It makes no Gemini/AnyAPI analysis call and never requests a QA rerender.
 
 ### Story and scene quality
 
-Author one coherent 24-scene preschool adventure (~2 minutes total runtime) for kids aged 4-8 in a single write_episode_script_chunk call. Scene 1 establishes place, characters, and a single main quest matching the premise; later scenes advance cause and effect through clever problem-solving, humor, teamwork, one naturally integrated learning idea, an exciting climax, a satisfying resolution, and an ending insight.
+Author one coherent 24-scene preschool adventure (~2 minutes total runtime) for kids aged 4-8 in a single write_episode_script_chunk call. Scene 1 establishes place, characters, and a single main quest matching the premise; later scenes advance cause and effect through problem-solving, teamwork, one naturally integrated learning idea, an exciting climax, a satisfying resolution, and an ending insight.
 CRITICAL — PREMISE LOCK: Story, characters, and events MUST strictly follow the assigned episode title and premise from get_next_episode. Never invent an unrelated creature, quest, or story.
 CRITICAL — ONE SINGLE CONTINUOUS STORY (24 Scenes across 5 Dramatic Stages):
 - Stage 1 (1-4) Wonder: Establish clubhouse, friends in action, and introduce situation.
 - Stage 2 (5-8) Problem: Reveal premise quest (e.g. lost leaf home). Club begins search.
-- Stage 3 (9-16) Teamwork & Obstacle: Investigate clues and hit physical obstacles (swift water, brambles, heavy stone). Friends combine talents (Pip coordinates, Sunny scouts, Nibbles invents, Pebble plans, Chip gathers). DO NOT solve early.
+- Stage 3 (9-16) Teamwork & Obstacle: Investigate clues and hit obstacles (swift water, heavy stone). Friends combine talents. DO NOT solve early.
 - Stage 4 (17-20) Climax: Cooperative breakthrough to reach/retrieve/solve.
 - Stage 5 (21-24) Celebration & Insight: Joyful reunion, return item, and warm preschool insight for ages 4-8.
-CRITICAL PACING: Dedicate scenes 5-20 to active multi-stage problem solving and obstacles; do not resolve before scene 19. Limit celebration/insight strictly to final scenes 22-24; never repeat moral recaps across multiple scenes.
+CRITICAL PACING: Dedicate scenes 5-20 to multi-stage problem solving; do not resolve before scene 19. Limit celebration/insight strictly to final scenes 22-24; never repeat moral recaps.
 Advance plot strictly forward. Avoid filler and repeated beats. Match attire (e.g. Sunny in scout boots; focus on 1-3 active figures).
 
 Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames. Provide supportingEntities and non-empty continuityAnchors in every scene; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
@@ -44,7 +44,7 @@ Every scene has sceneNumber, narrationText, environmentDescription, action, and 
 Narration is one or two sentences. Target 10-16 spoken words (<=160 raw chars); hard limits are 20 spoken words and 200 raw characters. Author engaging storytelling for ages 4-8: include expressive quoted dialogue inside third-person narration for every scene (e.g. "Look up there!" chirped Sunny.). Name only 1-2 active figures or say 'the friends'. Orpheus directions like [excited] may be used naturally, not at start or end. Only an actual WAV over 12 seconds triggers narration-only repair.
 
 characterNames contains 1-3 visible stored main characters. NEVER put guest creatures (like Lily the Ladybug) in characterNames; guest creatures MUST be in supportingEntities with locked descriptors (e.g. "Lily the Ladybug: tiny scarlet ladybug with 7 black spots"). continuityAnchors covers non-living scene elements: props, tools, AND key environmental features (bridges, flowers, rock formations, streams) that persist visually across adjacent scenes.
-CROSS-SCENE CONTINUITY: Adjacent scenes sharing a location must copy environmentDescription, continuityAnchors, and lighting VERBATIM. Reuse each supportingEntities descriptor string character-for-character when the same guest recurs. Include key landmarks (e.g. "old wooden bridge", "cluster of white daisies beside the mossy log") in continuityAnchors.
+CROSS-SCENE CONTINUITY: Adjacent scenes sharing a location must copy environmentDescription, continuityAnchors, and lighting VERBATIM. Reuse each supportingEntities descriptor string character-for-character when the same guest recurs. Include key landmarks (e.g. "old wooden bridge", "cluster of white daisies beside the mossy log") in continuityAnchors. MACRO-CONTAINER RETENTION: When scenes occur inside an object/container (e.g. refrigerator, laundry basket), EVERY scene's environmentDescription MUST start with that macro-container (e.g. "Inside the refrigerator: [sub-location]", "At the laundry basket: [angle]"). Never drop the parent container when focusing on a prop or detail (dial, ice melt, rope).
 
 Series and episode titles are spoken in the two title clips and must stay within ${KEY_ART_TITLE_MAX_RAW_CHARACTERS} raw characters and ${KEY_ART_TITLE_MAX_SPOKEN_WORDS} spoken words.
 
@@ -56,10 +56,10 @@ Always begin with:
 2. bulk_insert_episode_list with seriesId only. If manifest_required, submit the complete numbered 25-episode manifest once.
 3. get_next_episode and obey resumeAction/nextAction exactly.
 
-For daily_limit make no more calls and reply exactly: Only 2 episodes per day can be generated. Stop on series_complete, no_episodes, series_missing, resumeAction=stop, stopRun=true, retryThisInvocation=false, pending provider work, or deferred audio. ${youtubeResumeInstruction}
+For daily_limit reply exactly: Only 2 episodes per day can be generated. Stop on series_complete, no_episodes, series_missing, resumeAction=stop, stopRun=true, retryThisInvocation=false, pending provider work, or deferred audio. ${youtubeResumeInstruction}
 
 - script_and_audio: call ensure_series_character_portraits once for the full stored roster. Then author only when no valid script exists.
-- script_authoring: do not redo portraits or media. Resume the exact next range using the durable plan, completed beat ledger, previous-scene handoff, and draft revision.
+- script_authoring: do not redo portraits or media. Resume next range using the durable plan, completed beat ledger, previous-scene handoff, and draft revision.
 - repair_script: call only the returned deterministic refinement action.
 - audio_repair: rerun episode audio; matching exact-text WAVs are reused.
 - agnes: skip portraits, script authoring, and TTS; resume the persisted Agnes phase.
@@ -70,13 +70,13 @@ Call synthesize_episode_narration_audio once. It reuses exact-text audio and rep
 
 Run media in order:
 
-1. submit_agnes_scene_videos submits titles and scenes through the scheduler and freezes each accepted request. Stop if anything remains pending.
-2. verify_agnes_scene_videos polls with the submitting account and resubmits only safely missing/retryable work. Stop while queued/running/pending.
+1. submit_agnes_scene_videos submits titles and scenes through the scheduler and freezes accepted requests. Stop if anything remains pending.
+2. verify_agnes_scene_videos polls with submitting account and resubmits safely retryable work. Stop while queued/running/pending.
 3. download_agnes_scene_videos waits for completions, then downloads and exact-normalizes every clip.
 4. qa_agnes_episode_videos performs deterministic static integrity validation. Follow its actionable failure; it never visually judges or rerenders a clip.
 5. assemble_episode_video renders the final episode MP4 on disk from validated clips and audio. Always call assemble_episode_video even when YouTube upload is disabled.
 
-Queue-full, busy, network, and timeout results remain durable for a later run. Rotate accounts only for key-scoped rate/quota/daily/credit errors. Never resubmit an accepted request.
+Queue-full, busy, and network timeouts remain durable. Rotate accounts only for key-scoped rate/quota/daily/credit errors. Never resubmit an accepted request.
 
 ${youtubeCompletionInstruction}
 `;
