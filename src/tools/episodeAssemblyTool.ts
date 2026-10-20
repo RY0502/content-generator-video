@@ -22,7 +22,8 @@ export function buildEpisodeAssemblyTool(
   return new DynamicStructuredTool({
     name: "assemble_episode_video",
     description:
-      "Assembles both persisted Agnes title clips and every persisted scene/WAV pair in canonical script order. " +
+      "Step 5 (Final Assembly): Assembles both persisted Agnes title clips and every persisted scene/WAV pair in canonical script order into the final episode MP4. " +
+      "PREREQUISITE: Must ONLY be called after all title and scene videos are downloaded and qa_agnes_episode_videos has passed. " +
       "Pass only seriesId and episodeNumber, plus optional music/subtitle settings; never send a scene manifest.",
     schema: z.object({
       seriesId: z.number().int().positive(),

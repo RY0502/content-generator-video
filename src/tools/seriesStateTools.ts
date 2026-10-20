@@ -638,7 +638,13 @@ export function buildSeriesStateTools(
                     `${scriptAuthoringProgress.nextSceneNumber}-${scriptAuthoringProgress.nextSceneEnd} ` +
                     `to draft revision ${privateDraft!.revision}. Continue the SAME single quest from scene 1 without resolving early or starting a second adventure. Do not call refinement yet.`,
               }
-          : scriptValidation,
+          : resumeAction === "agnes"
+            ? {
+                ...scriptValidation,
+                nextAction:
+                  "Resume Agnes video pipeline in order: 1. Call verify_agnes_scene_videos to check progress and retry pending clips. 2. When all are completed, call download_agnes_scene_videos. 3. Call qa_agnes_episode_videos. 4. Call assemble_episode_video only after QA passes.",
+              }
+            : scriptValidation,
         scriptDraft,
         ...(audioValidation === null ? {} : { audioValidation }),
         ...(assemblyValidation === null ? {} : { assemblyValidation }),
