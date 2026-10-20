@@ -46,6 +46,7 @@ import {
 import {
   FINAL_DURATION_TOLERANCE_SECONDS,
   buildVideoAssemblyTool,
+  scaleSrtTimestamps,
 } from "../tools/videoAssemblyTool.js";
 import {
   NARRATION_METADATA_KIND,
@@ -129,6 +130,51 @@ describe("videoAssemblyTool", () => {
     });
 
     expect(parsedCustom).not.toHaveProperty("transitionSeconds");
+  });
+
+  it("accepts optional playbackSpeed in schema within valid range", () => {
+    const tool = buildVideoAssemblyTool();
+
+    const parsed = (tool as any).schema.parse({
+      seriesId: 1,
+      seriesTitle: "Tiny Heroes Club",
+      episodeNumber: 1,
+      scenes: [
+        {
+          sceneNumber: 1,
+          narrationAudioPath: "/tmp/scene_001.wav",
+        },
+      ],
+      playbackSpeed: 0.95,
+    });
+
+    expect(parsed.playbackSpeed).toBe(0.95);
+  });
+
+  it("scales SRT timestamps accurately by 1/speedFactor", () => {
+    const originalSrt = [
+      "1",
+      "00:00:01,000 --> 00:00:03,500",
+      "Hello little explorers!",
+      "",
+      "2",
+      "00:01:10,250 --> 00:01:15,750",
+      "Look inside the basket.",
+      "",
+    ].join("\n");
+
+    // At 0.5x speed (slowed down to half speed), durations double
+    const slowedHalf = scaleSrtTimestamps(originalSrt, 0.5);
+    expect(slowedHalf).toContain("00:00:02,000 --> 00:00:07,000");
+    expect(slowedHalf).toContain("00:02:20,500 --> 00:02:31,500");
+
+    // At 1.0x speed, identical
+    const untouched = scaleSrtTimestamps(originalSrt, 1.0);
+    expect(untouched).toBe(originalSrt);
+
+    // At 0.95x speed, 1s / 0.95 ~= 1.0526s (1053ms)
+    const slowed95 = scaleSrtTimestamps(originalSrt, 0.95);
+    expect(slowed95).toContain("00:00:01,053 --> 00:00:03,684");
   });
 
   it("rejects a caller scene order that differs from the persisted script and records failure", async () => {

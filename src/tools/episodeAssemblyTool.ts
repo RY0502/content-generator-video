@@ -29,8 +29,9 @@ export function buildEpisodeAssemblyTool(
       episodeNumber: z.number().int().positive(),
       musicPath: z.string().nullable().optional(),
       burnSubtitles: z.boolean().default(CONFIG.burnSubtitles ?? false),
+      playbackSpeed: z.number().min(0.5).max(1.5).optional(),
     }).strict(),
-    func: async ({ seriesId, episodeNumber, musicPath, burnSubtitles }) => {
+    func: async ({ seriesId, episodeNumber, musicPath, burnSubtitles, playbackSpeed }) => {
       const [seriesInfo, episode] = await Promise.all([
         seriesState.getSeriesInfo(seriesId),
         seriesState.getEpisodeByNumber(seriesId, episodeNumber),
@@ -94,6 +95,7 @@ export function buildEpisodeAssemblyTool(
         musicPath: musicPath ?? null,
         captionsSrtPath: path.join(episodeDir, "captions.srt"),
         burnSubtitles,
+        playbackSpeed,
       });
     },
   });

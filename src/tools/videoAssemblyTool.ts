@@ -139,6 +139,17 @@ async function createOffsetCaptions(
   return destinationPath;
 }
 
+export function scaleSrtTimestamps(content: string, speedFactor: number): string {
+  if (Math.abs(speedFactor - 1.0) <= 0.001) return content;
+  return content.replace(
+    /(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/gu,
+    (_match, start: string, end: string) => (
+      `${formatSrtTimestamp(parseSrtTimestamp(start) / speedFactor)} --> ` +
+      formatSrtTimestamp(parseSrtTimestamp(end) / speedFactor)
+    ),
+  );
+}
+
 function resolveSceneAssetPath(params: {
   providedPath: string;
   seriesId: number;
@@ -341,6 +352,8 @@ export interface VideoAssemblyToolOptions {
   includeOutro?: boolean;
   /** Production prepends the series and episode Agnes key-art clips. */
   includeKeyArt?: boolean;
+  /** Playback speed factor. Defaults to CONFIG.assemblyPlaybackSpeed (1.0). Set e.g. 0.95 for calmer pacing. */
+  playbackSpeed?: number;
 }
 
 interface PreparedSceneInput extends SceneInput {
@@ -443,6 +456,7 @@ export function buildVideoAssemblyTool(
       musicPath: z.string().nullable().optional().describe("Optional background music track for the episode. If omitted or null, a random soothing, gentle track from the YouTube Audio Library (assets/music) is automatically selected and mixed at a low volume/frequency."),
       captionsSrtPath: z.string().nullable().optional(),
       burnSubtitles: z.boolean().default(CONFIG.burnSubtitles ?? false).describe("Whether to burn subtitles directly into video frames. Defaults to CONFIG.burnSubtitles (false)."),
+      playbackSpeed: z.number().min(0.5).max(1.5).optional().describe("Optional playback speed multiplier. Defaults to CONFIG.assemblyPlaybackSpeed (1.0). Set e.g. 0.95 to slow both audio and video by 5% with exact frame sync and pitch lock."),
     }),
     func: async ({
       seriesId,
@@ -452,6 +466,7 @@ export function buildVideoAssemblyTool(
       musicPath,
       captionsSrtPath,
       burnSubtitles = CONFIG.burnSubtitles,
+      playbackSpeed,
     }: {
       seriesId: number;
       seriesTitle: string;
@@ -460,6 +475,7 @@ export function buildVideoAssemblyTool(
       musicPath?: string | null;
       captionsSrtPath?: string | null;
       burnSubtitles?: boolean;
+      playbackSpeed?: number;
     }) => {
       const outputVariant = "agnes_text" as const;
       const timerName = `video_assembly_episode_${episodeNumber}_${outputVariant}`;
@@ -895,6 +911,11 @@ export function buildVideoAssemblyTool(
       }
       const shouldBurnCaptions = burnSubtitles && Boolean(effectiveCaptionsPath && existsSync(effectiveCaptionsPath));
 
+      const effectiveSpeed = playbackSpeed ?? options.playbackSpeed ?? CONFIG.assemblyPlaybackSpeed ?? 1.0;
+      const preSpeedCandidatePath = Math.abs(effectiveSpeed - 1.0) > 0.001
+        ? path.join(workDir, "pre_speed_final.mp4")
+        : temporaryFinalPath;
+
       if (shouldBurnCaptions) {
         try {
           logStep("Burning in captions onto video frames (visible by default on YouTube and all players)");
@@ -915,7 +936,7 @@ export function buildVideoAssemblyTool(
             "copy",
             "-video_track_timescale",
             "90000",
-            temporaryFinalPath,
+            preSpeedCandidatePath,
           ]);
           captionsEmbedded = true;
           logStep("✅ Subtitles successfully burned into video frames");
@@ -923,8 +944,8 @@ export function buildVideoAssemblyTool(
           const message = error instanceof Error ? error.message : String(error);
           logStep(`Caption burn-in failed: ${message}`);
           assemblyWarning = `Captions could not be burned in (${message}); video created without burned-in captions.`;
-          await rm(temporaryFinalPath, { force: true });
-          await runFfmpeg(["-i", withMusicPath, "-c", "copy", temporaryFinalPath]);
+          await rm(preSpeedCandidatePath, { force: true });
+          await runFfmpeg(["-i", withMusicPath, "-c", "copy", preSpeedCandidatePath]);
         }
       } else {
         if (!burnSubtitles) {
@@ -932,19 +953,51 @@ export function buildVideoAssemblyTool(
         } else {
           logStep("No captions.srt found to burn; generating clean video.");
         }
-        await runFfmpeg(["-i", withMusicPath, "-c", "copy", temporaryFinalPath]);
+        await runFfmpeg(["-i", withMusicPath, "-c", "copy", preSpeedCandidatePath]);
+      }
+
+      if (Math.abs(effectiveSpeed - 1.0) > 0.001) {
+        logStep(
+          `Applying subtle pacing retiming (playback speed: ${effectiveSpeed.toFixed(2)}x, video/audio sync locked)`
+        );
+        await runFfmpeg([
+          "-i",
+          preSpeedCandidatePath,
+          "-filter_complex",
+          `[0:v]setpts=PTS/${effectiveSpeed},fps=${OUTPUT_FPS}[vout];[0:a]atempo=${effectiveSpeed}[aout]`,
+          "-map",
+          "[vout]",
+          "-map",
+          "[aout]",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "medium",
+          "-crf",
+          "18",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-video_track_timescale",
+          "90000",
+          temporaryFinalPath,
+        ]);
+        await rm(preSpeedCandidatePath, { force: true });
       }
 
       const storyDuration = preparedScenes.reduce(
         (sum, scene) => sum + scene.measuredDurationSeconds,
         0,
       );
-      const expectedDuration = keyArtDurationSeconds + storyDuration + outroDurationSeconds;
+      const expectedDuration = (keyArtDurationSeconds + storyDuration + outroDurationSeconds) / effectiveSpeed;
       const renderedDuration = await getMediaDuration(temporaryFinalPath);
       const durationDelta = Math.abs(renderedDuration - expectedDuration);
-      const clipRoundingDelta = Math.abs(encodedClipTimelineSeconds - expectedDuration);
+      const clipRoundingDelta = Math.abs((encodedClipTimelineSeconds / effectiveSpeed) - expectedDuration);
       const allowedDurationDelta = clipRoundingDelta + FINAL_DURATION_TOLERANCE_SECONDS;
-      const concatDelta = Math.abs(renderedDuration - encodedClipTimelineSeconds);
+      const concatDelta = Math.abs(renderedDuration - (encodedClipTimelineSeconds / effectiveSpeed));
       if (
         durationDelta > allowedDurationDelta ||
         concatDelta > FINAL_DURATION_TOLERANCE_SECONDS
@@ -965,19 +1018,23 @@ export function buildVideoAssemblyTool(
       // from superseded clips.
       if (seriesState
         && typeof (seriesState as Partial<SeriesState>).assertAgnesVideoQaReady === "function") {
-        await seriesState.assertAgnesVideoQaReady(seriesId, episodeNumber);
+      await seriesState.assertAgnesVideoQaReady(seriesId, episodeNumber);
       }
 
       // Persist the aligned captions alongside the final video for media players and YouTube
-      if (offsetCaptionsCreated && effectiveCaptionsPath && existsSync(effectiveCaptionsPath)) {
+      if (effectiveCaptionsPath && existsSync(effectiveCaptionsPath) && (offsetCaptionsCreated || Math.abs(effectiveSpeed - 1.0) > 0.001)) {
         const alignedSrtPath = finalPath.replace(/\.mp4$/i, ".srt");
-        await copyFile(effectiveCaptionsPath, alignedSrtPath);
+        let srtContent = await readFile(effectiveCaptionsPath, "utf8");
+        if (Math.abs(effectiveSpeed - 1.0) > 0.001) {
+          srtContent = scaleSrtTimestamps(srtContent, effectiveSpeed);
+        }
+        await writeFile(alignedSrtPath, srtContent, "utf8");
         if (captionsSrtPath && existsSync(captionsSrtPath)) {
           const zeroOffsetPath = path.join(path.dirname(captionsSrtPath), "captions_zero_offset.srt");
           if (!existsSync(zeroOffsetPath)) {
             await copyFile(captionsSrtPath, zeroOffsetPath);
           }
-          await copyFile(effectiveCaptionsPath, captionsSrtPath);
+          await writeFile(captionsSrtPath, srtContent, "utf8");
         }
       }
 

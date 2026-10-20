@@ -220,6 +220,15 @@ export const CONFIG = {
   // When false, YouTube uses its automatic/uploaded closed captions (CC).
   burnSubtitles: process.env.BURN_SUBTITLES === "true",
 
+  // Playback speed factor during final video assembly. Defaults to 1.0.
+  // Set e.g. 0.95 (5% slower) for calmer preschool pacing while locking frame-accurate video/audio sync.
+  assemblyPlaybackSpeed: (() => {
+    const raw = process.env.ASSEMBLY_PLAYBACK_SPEED?.trim();
+    if (!raw) return 1.0;
+    const val = Number.parseFloat(raw);
+    return Number.isFinite(val) && val >= 0.5 && val <= 1.5 ? val : 1.0;
+  })(),
+
   // YouTube Data API v3 credentials for video upload
   // Obtain from Google Cloud Console: https://console.cloud.google.com/apis/credentials
   // Fail closed: merely configuring credentials never exposes the irreversible
