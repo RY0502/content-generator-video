@@ -592,14 +592,26 @@ async function runStaticQa(
   if (!Number.isSafeInteger(minimumVideoBytes) || minimumVideoBytes <= 0) {
     throw new Error("Static video QA minimum video size must be a positive integer.");
   }
-  const assets = await buildQaAssets({
-    seriesState,
-    seriesId,
-    episodeNumber,
-    probeMedia: options.probeMedia ?? probeStaticMedia,
-    durationToleranceSeconds,
-    minimumVideoBytes,
-  });
+  let assets: QaAsset[];
+  try {
+    assets = await buildQaAssets({
+      seriesState,
+      seriesId,
+      episodeNumber,
+      probeMedia: options.probeMedia ?? probeStaticMedia,
+      durationToleranceSeconds,
+      minimumVideoBytes,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return JSON.stringify({
+      status: "not_ready",
+      phase: "static_video_qa",
+      stopRun: true,
+      message,
+      note: "Static video QA cannot run until all required key-art and scene videos are completed and downloaded. Call verify_agnes_scene_videos or download_agnes_scene_videos first.",
+    });
+  }
   const episodeAssetSetDigest = createAgnesStaticEpisodeAssetSetDigest(
     assets.map(({ sceneNumber, row, videoSha256 }) => ({
       sceneNumber,

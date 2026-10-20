@@ -2806,6 +2806,7 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
   return JSON.stringify({
     status: failed ? "blocked" : ready === scenes.length ? "ready_to_download" : "awaiting_generation",
     phase: "verify",
+    stopRun: ready !== scenes.length,
     assetCount: scenes.length,
     sceneCount: scenes.filter(({ assetKind }) => assetKind === "scene").length,
     keyArtCount: scenes.filter(({ assetKind }) => assetKind !== "scene").length,
@@ -2840,6 +2841,7 @@ async function runDownload(runtime: WorkflowRuntime, seriesId: number, episodeNu
     return JSON.stringify({
       status: "not_ready",
       phase: "download",
+      stopRun: true,
       missingSceneNumbers: scenes
         .filter((scene, index) => !readiness[index] && scene.assetKind === "scene")
         .map((scene) => scene.input.sceneNumber),
