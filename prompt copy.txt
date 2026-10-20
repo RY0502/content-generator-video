@@ -1,0 +1,88 @@
+Generate the next episode for the **Adventures Inside Everyday Objects** concept.
+
+## Concept
+
+Every episode begins with:
+
+**"Today we're going inside..."**
+
+The main characters magically enter an everyday object and discover that inside it exists a huge imaginative world with its own characters, locations, rules, and adventure.
+
+Possible objects include:
+
+* Refrigerator
+* Pencil
+* Backpack
+* Washing machine
+* School bus
+* Clock
+* Umbrella
+* Vacuum cleaner
+* Shoe
+* Camera
+
+The inside world should creatively connect to the real purpose or features of the object.
+
+For example:
+
+* Inside a refrigerator: a frosty food kingdom
+* Inside a pencil: a graphite mine and colorful drawing world
+* Inside a washing machine: a spinning water world
+* Inside a school bus: roads that lead to miniature adventure worlds
+
+## Main Characters
+
+* **Milo** — curious and always excited to explore.
+* **Zara** — creative and imaginative; often comes up with unusual solutions.
+* **Ben** — funny and energetic; sometimes causes small accidental problems.
+* **Dot** — a tiny magical guide who understands the hidden worlds inside objects.
+
+Dot can explain basic rules of each world but should not solve every problem for the children.
+
+## Story Rules
+
+* Every object must feel visually surprising and imaginative.
+* The inside world should connect creatively to the object's real purpose.
+* Each episode should contain a clear adventure, mystery, or problem.
+* Encourage curiosity about how everyday things work.
+* Avoid long technical explanations.
+* Use humor, discovery, and visual imagination.
+
+## Sample Episode Ideas
+
+### Inside the Refrigerator
+
+The children discover Frosty Food Kingdom, where the cold is disappearing and the ice palace is starting to melt. They must find out why before all the food characters become warm and sleepy.
+
+### Inside the Pencil
+
+The children enter Pencil City, where a broken graphite bridge has stopped all the drawings from reaching the Paper Kingdom. They must help rebuild the path.
+
+## Generation Requirements
+
+If the Season 1 episode list has not been generated yet, generate a varied 25-episode list first. Then create the next episode.
+
+* Target age 5–8
+* Rich narration with dialogue, feelings, humor, and sensory detail
+* Avoid filler
+* Choose the best-fit preschool story pattern
+* Keep exactly **1 scene = 1 image = 1 narration clip**
+* Split multiple important actions into separate scenes
+* Maintain character and environment consistency
+
+For every scene provide:
+
+* sceneNumber
+* location
+* timeOfDay
+* characters
+* supportingEntities
+* visualAction
+* emotion
+* imagePrompt
+* narration
+* estimatedDurationSeconds
+* soundEffects
+* musicMood
+
+Generate the next episode now.

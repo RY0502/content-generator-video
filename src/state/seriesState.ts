@@ -3547,6 +3547,20 @@ export class SeriesState {
       await this.assertEpisodeAudioReady(episodeId);
     }
     if (status === "done") {
+      if (!CONFIG.youtubeUploadEnabled) {
+        const episodeResult = await this.client.execute({
+          sql: "SELECT series_id, episode_number FROM episodes WHERE id = ? LIMIT 1",
+          args: [episodeId],
+        });
+        const ep = episodeResult.rows[0];
+        if (!ep) throw new Error(`Episode id ${episodeId} was not found.`);
+        await this.completeEpisodeWithoutUpload({
+          seriesId: Number(ep.series_id),
+          episodeNumber: Number(ep.episode_number),
+          outputPath: canonicalOutputPath,
+        });
+        return;
+      }
       throw new Error(
         "Only finalizeEpisodeUpload may mark an episode done after YouTube confirms the upload.",
       );
