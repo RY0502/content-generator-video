@@ -242,8 +242,8 @@ export function buildCharacterPortraitPrompt(params: {
     strictNegative = `STRICT NEGATIVE: no human child, boy, girl, or person; render only the living ${objectNoun}`;
   } else if (visual.visualForm === "real_creature" || visual.visualForm === "anthropomorphic_creature") {
     const creatureNoun = visual.speciesOrType?.trim() || "creature";
-    subjectDetails = `full-body reference of a non-human ${creatureNoun}; detailed anatomy, fur, feathers, or scales`;
-    strictNegative = `STRICT NEGATIVE: no human child, boy, girl, or person; render only the ${creatureNoun}`;
+    subjectDetails = `appealing stylized animated character design of a friendly ${creatureNoun}, charming expressive face, large emotive eyes, warm personality, cute preschool proportions, distinctive miniature clothing and explorer gear, soft tactile textures`;
+    strictNegative = `STRICT NEGATIVE: no human child, boy, girl, or person; no realistic creepy bug anatomy, no frightening insect mandibles, no horror claws; render only the cute ${creatureNoun} character`;
   }
 
   // Official Agnes Image 2.5 Flash prompt structure:

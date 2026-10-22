@@ -8,7 +8,8 @@ async function main() {
   const seriesState = new SeriesState();
 
   try {
-    const seriesResult = await (seriesState as any).pool.query(
+    await seriesState.initialize();
+    const seriesResult = await (seriesState as any).client.execute(
       "SELECT id, concept_name FROM series ORDER BY id DESC LIMIT 10"
     );
 
@@ -16,10 +17,10 @@ async function main() {
     for (const series of seriesResult.rows) {
       console.log(`Series ${series.id}: ${series.concept_name}`);
 
-      const episodesResult = await (seriesState as any).pool.query(
-        "SELECT episode_number, title, status FROM episodes WHERE series_id = $1 ORDER BY episode_number",
-        [series.id]
-      );
+      const episodesResult = await (seriesState as any).client.execute({
+        sql: "SELECT episode_number, title, status FROM episodes WHERE series_id = ? ORDER BY episode_number",
+        args: [series.id],
+      });
 
       if (episodesResult.rows.length > 0) {
         for (const ep of episodesResult.rows) {
