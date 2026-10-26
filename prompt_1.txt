@@ -1,0 +1,33 @@
+npm run dev -- 'Generate the next episode for the Tiny Heroes Club concept and upload it on youtube.
+
+Concept:
+Tiny Heroes Club
+
+Premise:
+Instead of superheroes saving the world, tiny animals solve everyday problems.
+
+Characters:
+- Pip the Ant (leader)
+- Nibbles the Hamster (inventor)
+- Sunny the Sparrow (scout)
+- Pebble the Turtle (planner)
+- Luna the Firefly (night expert)
+
+If the Season 1 episode list has not been generated yet, generate it first.
+Then create the next episode.
+
+Choose the best-fit pattern for this episode.
+Do not force the standard 8-beat formula unless it is clearly the best fit.
+
+Important requirements:
+- Target age 5-8 years
+- Write rich, engaging narration with feelings, dialogue, and sensory detail
+- Split any overloaded beat into multiple single-moment scenes
+- Keep exactly 1 scene = 1 image = 1 narration clip
+- Use supportingEntities for recurring non-main figures when needed
+- Avoid thin filler scenes; deepen narration instead
+
+Sample episode ideas:
+- The Firefly Lights the Way Home
+- The Team Builds a Bridge Over the Creek
+- The Turtle Teaches Patience in a Race'

@@ -604,6 +604,10 @@ export function buildStylizedScenePrompt(params: {
     ? `INANIMATE CONTINUITY — ${continuityAnchors}. These anchors never authorize another figure.`
     : "";
 
+  const focalPropLock = rawContinuityAnchors.length > 0
+    ? "FOCAL PROP & STRUCTURE LOCK — preserve the exact materials, architecture, colors, textures, and construction stage of every described anchor; never alter materials, redesign, morph, or substitute a different structure style between shots."
+    : "";
+
   // ENVIRONMENT CONTINUITY — lock the setting so secondary environmental
   // features (bridges, flowers, rock formations, streams) stay stable.
   const environmentContinuityLock =
@@ -677,6 +681,7 @@ export function buildStylizedScenePrompt(params: {
     castIsolationLock,
     figureCountLayer,
     continuityLayer,
+    focalPropLock,
     environmentContinuityLock,
     TEMPORAL_STABILITY_NEGATIVE_BIBLE,
     negativeLayer,

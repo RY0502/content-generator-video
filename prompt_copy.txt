@@ -1,0 +1,68 @@
+Generate the next episode for the **What If Toys Came Alive at Midnight?** concept.
+
+## Concept
+
+Every night after children fall asleep, their toys secretly come alive.
+
+While the children sleep, the toys explore the house, solve small problems, help forgotten toys, and complete secret missions before morning.
+
+The world should feel magical from the toys' tiny perspective.
+
+A bedroom becomes a huge world of furniture, blankets, drawers, shelves, and toys.
+
+## Main Characters
+
+- **Toby the Teddy Bear** — kind, brave, and the natural leader.
+- **Pip the Toy Robot** — clever and loves building or fixing things.
+- **Lulu the Doll** — caring, imaginative, and good at understanding feelings.
+- **Zoom the Toy Car** — energetic, funny, and extremely fast.
+- **Buttons the Plush Bunny** — small, nervous, but surprisingly courageous.
+- **Mr. Tick-Tock** — an old wind-up toy who knows the secrets of the house.
+
+The toys should have distinct personalities and solve problems by combining their different abilities.
+
+## Story Rules
+
+- Adventures happen at night while the child sleeps.
+- Everyday household objects should feel enormous and exciting.
+- Problems should be gentle and relatable.
+- Focus on friendship, kindness, teamwork, courage, and helping others.
+- The toys must return to their places before morning.
+- Occasionally include the suspense of hearing the child move or waking up, but keep it playful rather than scary.
+
+## Sample Episode Ideas
+
+### The Missing Sock
+A tiny toy sock disappears before a doll's bedtime party. The toys search under the bed, behind furniture, and inside the laundry basket, discovering that the "missing sock" has become a cozy sleeping bag for a tiny toy mouse.
+
+### The Broken Kite
+A toy kite brought home from the park has a broken tail. The toys secretly repair it using ribbon, string, and craft supplies before morning.
+
+## Generation Requirements
+
+If the Season 1 episode list has not been generated yet, generate a varied 25-episode list first. Then create the next episode.
+
+- Rich narration with dialogue, feelings, humor, and sensory detail
+- Use the best-fit story pattern
+- Avoid filler
+- Use supportingEntities for important toys or household characters
+- Maintain consistent character appearance and bedroom/house geography
+- Keep exactly **1 scene = 1 image = 1 narration clip**
+- Split overloaded actions into separate scenes
+
+For every scene provide:
+
+- sceneNumber
+- location
+- timeOfDay
+- characters
+- supportingEntities
+- visualAction
+- emotion
+- imagePrompt
+- narration
+- estimatedDurationSeconds
+- soundEffects
+- musicMood
+
+Generate the next episode now.

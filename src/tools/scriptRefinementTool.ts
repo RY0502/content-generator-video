@@ -23,6 +23,7 @@ import {
   ProductionScriptContractError,
   inspectProductionScript,
   supportingEntityName,
+  validateFocalPropContinuity,
 } from "../services/productionScriptContract.js";
 import {
   buildCompletedSceneBeatLedger,
@@ -1169,6 +1170,7 @@ export function validateEpisodeScript(
       }
     }
     validateOptionalStringArray(scene.continuityAnchors, "continuityAnchors", label);
+    validateFocalPropContinuity(scene as Record<string, unknown>, label, issues);
   });
 
   return { pass: issues.length === 0, issues };

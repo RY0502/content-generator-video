@@ -281,6 +281,7 @@ export function inspectProductionScript(
       issues,
       false,
     );
+    validateFocalPropContinuity(scene, label, issues);
   });
 
   return {
@@ -290,3 +291,44 @@ export function inspectProductionScript(
     issues,
   };
 }
+
+export const FOCAL_CONTINUITY_PATTERNS: Array<{ noun: string; pattern: RegExp }> = [
+  { noun: "bridge", pattern: /\bbridges?\b/i },
+  { noun: "raft", pattern: /\brafts?\b/i },
+  { noun: "ladder", pattern: /\bladders?\b/i },
+  { noun: "treehouse", pattern: /\btreehouses?\b/i },
+  { noun: "shelter", pattern: /\bshelters?\b/i },
+  { noun: "refrigerator", pattern: /\b(?:refrigerator|fridge|freezer)s?\b/i },
+  { noun: "laundry basket", pattern: /\b(?:laundry|clothes)\s+baskets?\b/i },
+];
+
+export function validateFocalPropContinuity(
+  scene: Record<string, unknown>,
+  label: string,
+  issues: string[],
+): void {
+  const actionText = typeof scene.action === "string" ? scene.action.trim() : "";
+  const narrationText = typeof scene.narrationText === "string" ? scene.narrationText.trim() : "";
+  const combinedActionNarration = `${actionText} ${narrationText}`;
+  if (!combinedActionNarration) return;
+
+  const envText = (typeof scene.environmentDescription === "string" ? scene.environmentDescription : "").toLowerCase();
+  const rawAnchors = Array.isArray(scene.continuityAnchors)
+    ? scene.continuityAnchors.filter((a): a is string => typeof a === "string")
+    : [];
+  const anchorsText = rawAnchors.join(" ").toLowerCase();
+  const combinedEnvAndAnchors = `${envText} ${anchorsText}`;
+
+  for (const { noun, pattern } of FOCAL_CONTINUITY_PATTERNS) {
+    if (pattern.test(combinedActionNarration)) {
+      const nounTokens = noun.split(/\s+/);
+      const hasNoun = nounTokens.every((token) => combinedEnvAndAnchors.includes(token));
+      if (!hasNoun) {
+        issues.push(
+          `${label} action/narration features focal structure/container "${noun}", but neither continuityAnchors nor environmentDescription defines it. Multi-scene structures and containers must have a locked visual descriptor in continuityAnchors to prevent visual morphing across scenes.`,
+        );
+      }
+    }
+  }
+}
+
