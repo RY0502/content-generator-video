@@ -1800,6 +1800,57 @@ describe("three-phase Agnes scene workflow", () => {
     }
   });
 
+  it("resets retry-safe task failures to pending so they can be resubmitted afresh", async () => {
+    await addAudioFiles(outputDir, 1);
+    const { state, rows } = mockState(1);
+    let submitCount = 0;
+    const client = {
+      submitVideo: vi.fn(async () => {
+        submitCount += 1;
+        return task(`video-${submitCount}`, "queued");
+      }),
+      retrieveVideo: vi.fn(async () => ({
+        ...task("video-1", "failed"),
+        error: {
+          code: "task_failed",
+          message: "queue group dispatch failed after 1 attempts: media URL could not be downloaded or did not return valid supported media.",
+        },
+      })),
+      downloadCompletedVideo: vi.fn(),
+    };
+    const [submit, verify] = buildAgnesSceneVideoTools(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    });
+
+    // 1. Initial submission
+    const submitted = JSON.parse(await (submit as any).func({ seriesId: 7, episodeNumber: 2 }));
+    expect(submitted.status).toBe("submitted");
+    expect(client.submitVideo).toHaveBeenCalledTimes(1);
+
+    // 2. Verify: provider returns queue group dispatch failure -> classified as retrySafe and reset to pending
+    const verified = JSON.parse(await (verify as any).func({ seriesId: 7, episodeNumber: 2 }));
+    expect(verified.status).toBe("awaiting_generation");
+    expect(verified.failed).toBe(0);
+    expect(verified.results[0].status).toBe("pending");
+    expect(verified.results[0].retrySafe).toBe(true);
+
+    const rowAfterVerify = rows.get(1);
+    expect(rowAfterVerify?.status).toBe("pending");
+
+    // 3. Next invocation (new tool instance): picks up the reset scene and submits fresh
+    const [submitNext] = buildAgnesSceneVideoTools(state as never, {
+      client,
+      submissionIntervalMs: 0,
+      probeMediaDuration: vi.fn(async () => 5.2),
+    });
+    client.retrieveVideo.mockImplementationOnce(async () => task("video-2", "completed"));
+    const resubmitted = JSON.parse(await (submitNext as any).func({ seriesId: 7, episodeNumber: 2 }));
+    expect(resubmitted.status).toBe("submitted");
+    expect(client.submitVideo).toHaveBeenCalledTimes(2);
+  });
+
   it("submits one request per scene with a maximum concurrency of two, then verifies and downloads separately", async () => {
     await addAudioFiles(outputDir, 6);
     const { state, rows } = mockState(6);

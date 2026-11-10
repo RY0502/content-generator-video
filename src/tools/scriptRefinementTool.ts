@@ -55,6 +55,7 @@ export type EpisodeScene = {
   environmentDescription: string;
   action: string;
   characterNames: string[];
+  settingId?: string;
   characterVisuals?: SceneCharacterVisual[];
   supportingEntities?: string[];
   continuityAnchors?: string[];
@@ -468,12 +469,15 @@ const chunkCharacterVisualSchema = z.object({
  */
 const completeChunkSceneSchema = z.object({
   sceneNumber: z.number().int().positive(),
+  settingId: z.string().max(64).optional().describe(
+    "Optional setting ID referencing an entry in authoringPlan.settingRegistry. When provided, the environmentDescription and lighting default to the locked setting registry.",
+  ),
   narrationText: boundedRequiredText("narrationText", NARRATION_MAX_RAW_CHARACTERS).describe(
     "TARGET: 10-16 spoken words and at most 170 characters; hard maximum 20 spoken words and 200 characters. " +
     "Write actual narration with at least one spoken letter or digit outside vocal directions; never use ellipses, field labels, TODOs, or scene-number placeholders. Keep vocal directions only when useful.",
   ),
   environmentDescription: boundedRequiredText("environmentDescription", 1_500).describe(
-    "TARGET: 120-260 characters. Always prefix with the persistent macro container/room (e.g. 'Inside the refrigerator: ...', 'At the laundry basket: ...') so standalone video clips retain the parent environment. Concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500. Never submit ellipses or a scene-number/field-label placeholder.",
+    "TARGET: 120-260 characters. Always prefix with the persistent macro container/room (e.g. 'Inside the refrigerator: ...', 'At the laundry basket: ...') so standalone video clips retain the parent environment. Concrete location, layout, weather/time, and stable background details. Reuse verbatim while unchanged; hard maximum 1500. Never submit ellipses or a scene-number/field-label placeholder. Should match settingRegistry when settingId is provided.",
   ),
   action: boundedRequiredText("action", 1_500).describe(
     "TARGET: 70-180 characters for one continuous visible action/emotion progression with a clear start, one movement/change, and a readable end state that fits within 12 seconds; hard maximum 1500. No cuts or montage. Do not repeat environment or camera prose. Never submit ellipses or a scene-number/field-label placeholder.",
@@ -543,7 +547,22 @@ const authoringPlanBeatSchema = z.object({
   ),
 });
 
+export const authoringPlanSettingSchema = z.object({
+  id: z.string().max(64).describe("Unique identifier for this setting, e.g. 'living_room', 'creek_bridge', 'meadow_clearing'"),
+  name: z.string().max(120).describe("Descriptive name of the setting"),
+  environmentDescription: boundedRequiredText("setting environmentDescription", 1_500).describe(
+    "Locked, detailed background elements (e.g. 'Inside the living room: a brown velvet sofa on the left, an ancient brown television with rabbit-ear antenna in the center, a white refrigerator with a long silver handle on the right, and a wooden door leading outside on the far wall. Warm afternoon sunlight streaming through the lace curtains.') Reused across scenes in this location.",
+  ),
+  defaultLighting: z.string().max(500).optional().describe("Default lighting profile for this setting."),
+  continuityAnchors: z.array(boundedRequiredText("setting continuityAnchors entry", 1_000)).max(8).optional().describe("Default background anchors for this setting."),
+}).strict();
+
+export type AuthoringPlanSetting = z.infer<typeof authoringPlanSettingSchema>;
+
 export const episodeScriptChunkAuthoringPlanSchema = z.object({
+  narrativeScript: z.string().max(10_000).optional().describe(
+    "TARGET: 400-800 words prose story covering the complete continuous narrative from start to finish before scene decomposition. Resolves storyline continuity, character interactions, and prevents repetitive scene beats.",
+  ),
   storyArc: z.string().max(2_000).default("").describe(
     "TARGET: 500-900 characters covering ONE single continuous preschool adventure from scene 1 to targetSceneCount strictly matching the episode title and premise. Never combine multiple adventures.",
   ),
@@ -553,12 +572,15 @@ export const episodeScriptChunkAuthoringPlanSchema = z.object({
   endingInsight: z.string().max(600).default("").describe(
     "TARGET: at most 240 characters for the final takeaway or insight for ages 4-8.",
   ),
+  settingRegistry: z.array(authoringPlanSettingSchema).max(10).optional().describe(
+    "Locked registry of 3-5 distinct settings/backgrounds with detailed elements used throughout the episode. Reused verbatim across scenes until the setting changes.",
+  ),
   beats: z.array(authoringPlanBeatSchema).max(12).default([]),
   supportingEntityBible: z.array(
     z.string().max(1_000).describe(
       "TARGET: at most 220 characters for one reusable stable name + locked visual descriptor.",
     ),
-  ).max(12).default([]).describe("Optional advisory identities for recurring supporting entities."),
+  ).max(12).default([]).describe("Optional advisory identities for recurring supporting entities (3-4 key guest entities or focal construction objects identified from the narrative script)."),
   continuityBible: z.array(
     z.string().max(1_000).describe(
       "TARGET: at most 220 characters for one episode-wide prop/layout/state rule.",
@@ -1046,6 +1068,7 @@ export function validateEpisodeScript(
     productionSceneContract?: boolean;
     deferAggregateMinimums?: boolean;
     knownSupportingEntityNames?: readonly string[];
+    settingRegistry?: readonly AuthoringPlanSetting[];
   } = {},
 ): ScriptValidationResult {
   const issues: string[] = [];
@@ -1091,6 +1114,14 @@ export function validateEpisodeScript(
     }
     if (typeof scene.environmentDescription !== "string" || !scene.environmentDescription.trim()) {
       issues.push(`${label} is missing environmentDescription.`);
+    }
+    if (scene.settingId && options.settingRegistry && options.settingRegistry.length > 0) {
+      const exists = options.settingRegistry.some((s) => s.id === scene.settingId);
+      if (!exists) {
+        issues.push(
+          `${label} references unknown settingId "${scene.settingId}". It must match an id in authoringPlan.settingRegistry.`,
+        );
+      }
     }
     if (typeof scene.action !== "string" || !scene.action.trim()) {
       issues.push(`${label} is missing action.`);
@@ -1950,6 +1981,24 @@ function canonicalizeChunkScenes(params: {
   const scenes: EpisodeScene[] = [];
   const audits: SceneCastCanonicalizationAudit[] = [];
   for (const scene of params.submittedScenes) {
+    if (scene.settingId && params.authoringPlan.settingRegistry?.length) {
+      const setting = params.authoringPlan.settingRegistry.find((s) => s.id === scene.settingId);
+      if (setting) {
+        if (!scene.environmentDescription || !scene.environmentDescription.trim()) {
+          scene.environmentDescription = setting.environmentDescription;
+        }
+        if (!scene.lighting && setting.defaultLighting) {
+          scene.lighting = setting.defaultLighting;
+        }
+        if (
+          (!scene.continuityAnchors || scene.continuityAnchors.length === 0)
+          && setting.continuityAnchors
+          && setting.continuityAnchors.length > 0
+        ) {
+          scene.continuityAnchors = [...setting.continuityAnchors];
+        }
+      }
+    }
     const normalized = canonicalizeSceneCast(scene, {
       durableAcceptedScenes: durableContext,
       supportingEntityBible: params.authoringPlan.supportingEntityBible,
@@ -2641,6 +2690,7 @@ function validateEpisodeScriptChunkPrefix(params: {
     {
       productionSceneContract: true,
       deferAggregateMinimums: true,
+      settingRegistry: params.authoringPlan.settingRegistry,
     },
   );
 }

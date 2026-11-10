@@ -9,6 +9,7 @@ import { CONFIG } from "../config.js";
 import {
   AgnesError,
   AgnesVideoClient,
+  isRetrySafeAgnesTaskError,
   AGNES_MAX_REFERENCE_IMAGES,
   AGNES_MAX_SECONDS,
   AGNES_MIN_SECONDS,
@@ -1959,7 +1960,7 @@ async function persistState(
     prompt: scene.providerPrompt, requestDigest: scene.requestDigest, seed: scene.seed,
     requestedDurationSeconds: scene.durationSeconds, providerDurationSeconds: scene.providerSeconds,
     publicReferenceUrl: scene.publicReferenceValue,
-    providerTaskId: task?.video_id, providerReceipt: cloneEnvelope(envelope),
+    providerTaskId: task?.video_id ?? null, providerReceipt: cloneEnvelope(envelope),
     providerVideoUrl: task?.metadata?.url, rawOutputPath: extra.rawOutputPath,
     normalizedOutputPath: extra.normalizedOutputPath, downloadStatus: extra.downloadStatus,
     error: extra.error, completedAt: extra.completedAt,
@@ -2721,6 +2722,26 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       return { sceneNumber: scene.input.sceneNumber, status: "missing_receipt", downloadReady: false };
     }
     if (task.status === "failed") {
+      const isRetrySafe = isRetrySafeAgnesTaskError(task.error);
+      const attempt = latestAttempt(envelope);
+      if (isRetrySafe && attempt) {
+        attempt.state = "definite_rejection";
+        attempt.retrySafe = true;
+        attempt.error = safeError(task.error);
+        attempt.task = undefined;
+        // Reset row status to pending and clear providerTaskId so next submit picks it up afresh
+        await persistState(runtime, scene, seriesId, episodeNumber, envelope, "pending", {
+          error: safeError(task.error),
+        });
+        logAgnesProgress("verify_status_result", {
+          ...assetProgressMetadata(scene),
+          providerStatus: "failed",
+          progress: task.progress,
+          retrySafe: true,
+          action: "reset_for_fresh_submission",
+        }, "warn");
+        return { sceneNumber: scene.input.sceneNumber, status: "pending", downloadReady: false, retrySafe: true };
+      }
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, "failed", { error: safeError(task.error) });
       logAgnesProgress("verify_status_result", {
         ...assetProgressMetadata(scene),
@@ -2766,6 +2787,33 @@ async function runVerify(runtime: WorkflowRuntime, seriesId: number, episodeNumb
       const latest = await retrieveTaskWithOwningAccount(runtime, envelope, task);
       if (!latest) throw new Error("The Agnes status lane could not reserve a request slot.");
       latestAttempt(envelope)!.task = latest;
+      const isRetrySafe = latest.status === "failed" && isRetrySafeAgnesTaskError(latest.error);
+      const attempt = latestAttempt(envelope);
+      if (isRetrySafe && attempt) {
+        attempt.state = "definite_rejection";
+        attempt.retrySafe = true;
+        attempt.error = safeError(latest.error);
+        attempt.task = undefined;
+        await persistState(runtime, scene, seriesId, episodeNumber, envelope, "pending", {
+          error: safeError(latest.error),
+        });
+        logAgnesProgress("verify_status_result", {
+          ...assetProgressMetadata(scene),
+          accountId,
+          providerStatus: latest.status,
+          progress: latest.progress,
+          retrySafe: true,
+          action: "reset_for_fresh_submission",
+        }, "warn");
+        return {
+          sceneNumber: scene.input.sceneNumber,
+          status: "pending",
+          progress: latest.progress,
+          providerVideoId: latest.video_id,
+          downloadReady: false,
+          retrySafe: true,
+        };
+      }
       await persistState(runtime, scene, seriesId, episodeNumber, envelope, dbStatus(latest), {
         error: latest.status === "failed" ? safeError(latest.error) : null,
       });

@@ -186,6 +186,10 @@ const OBJECT_ENTITY_NOUN_PATTERN =
   /\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|mug|spoon|fork|lamp|lantern|candle|book|journal|box|chest|toy|doll|puppet|wagon|cart|car|truck|train|plane|boat|ship|broom|blanket|pillow|pencil|pen|crayon|guitar|drum|robot|android|machine|gadget)\b/iu;
 const OBJECT_ENTITY_DESCRIPTION_PATTERN =
   /(?:\b(?:animated|enchanted|living|magic(?:al)?|sentient|talking)\b.{0,60}\b(?:backpack|bag|satchel|clock|watch|teapot|kettle|cup|lamp|lantern|candle|book|box|chest|toy|doll|puppet|wagon|car|train|broom|pillow|pencil|robot|machine)\b|\b(?:backpack|bag|satchel|clock|watch|teapot|lamp|book|chest|toy|wagon|car|train|pencil|robot)\b.{0,60}\b(?:character|face|living|sentient|speaks|talking|talks|straps|zipper)\b)/iu;
+const GROUP_FRIENDS_PATTERN =
+  /\b(?:(?:all\s+(?:of\s+)?)?(?:the\s+)?friends|everyone|the\s+(?:whole\s+)?(?:gang|crew|team|club))\b/iu;
+const DIALOGUE_INTERACTION_PATTERN =
+  /\b([A-Za-z]+(?:\s+the\s+[A-Za-z]+)?)\s+(?:said\s+to|says\s+to|spoke\s+to|speaks\s+to|asked|asks|told|tells|whispered\s+to|whispers\s+to|replied\s+to|replies\s+to|called\s+to|calls\s+to|smiled\s+at|smiles\s+at|talked\s+to|talks\s+to)\s+([A-Za-z]+(?:\s+the\s+[A-Za-z]+)?)\b/iu;
 export const SAFE_MAIN_OBJECT_NAME_PATTERN = /^(.+?)\s+the\s+(backpack|bag|satchel)$/iu;
 export const SAFE_MAIN_CHARACTER_PATTERN = /^(.+?)\s+the\s+(.+)$/iu;
 
@@ -652,14 +656,19 @@ function auditGenericAliases(
   field: "action" | "sceneDetails",
   exactCastNames: readonly string[],
   unresolved: SceneCastUnresolvedIssue[],
+  mainCharacterNames: readonly string[] = [],
 ): void {
   if (typeof rawText !== "string") return;
   const hasSpecializedObjectAliasIssue = unresolved.some((issue) => (
     issue.kind === "ambiguous_object_alias" && issue.field === field
   ));
-  const aliases = findGenericVisualCastAliases(rawText, exactCastNames).filter((alias) => (
-    !hasSpecializedObjectAliasIssue || !OBJECT_ENTITY_NOUN_PATTERN.test(alias)
-  ));
+  const allMainCharactersPresent = mainCharacterNames.length > 0 &&
+    mainCharacterNames.every((name) => exactCastNames.some((c) => identityKey(c) === identityKey(name)));
+  const aliases = findGenericVisualCastAliases(rawText, exactCastNames).filter((alias) => {
+    if (hasSpecializedObjectAliasIssue && OBJECT_ENTITY_NOUN_PATTERN.test(alias)) return false;
+    if (allMainCharactersPresent && /\b(?:friends?|team|crew|gang|duo|trio)\b/iu.test(alias)) return false;
+    return true;
+  });
   aliases.forEach((alias) => {
     unresolved.push({ kind: "generic_or_group_alias", field, alias });
   });
@@ -817,15 +826,46 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
     });
   }
 
+  const textSources: Array<{ text: string; source: "action" | "narrationText" | "sceneDetails" }> = [
+    { text: normalizedText(input.action), source: "action" },
+    { text: normalizedText(input.narrationText), source: "narrationText" },
+    { text: normalizedText(input.sceneDetails), source: "sceneDetails" },
+  ];
+
+  // If characterNames contains more than 2 characters, but action or narration text is strictly
+  // a 2-character dialogue/interaction and no other main characters are mentioned in action,
+  // sceneDetails, or narrationText, restrict characterNames to the 2 interacting characters so
+  // Agnes receives only their reference images.
+  if (characterNames.length > 2 && mainCharacterNames.length >= 2) {
+    const dialogueMatch = normalizedText(input.action).match(DIALOGUE_INTERACTION_PATTERN)
+      ?? normalizedText(input.narrationText).match(DIALOGUE_INTERACTION_PATTERN);
+    if (dialogueMatch) {
+      const char1Res = resolveSafeMainCharacterAlias(dialogueMatch[1]!, mainCharacterNames);
+      const char2Res = resolveSafeMainCharacterAlias(dialogueMatch[2]!, mainCharacterNames);
+      if (
+        char1Res.status === "unique"
+        && char2Res.status === "unique"
+        && identityKey(char1Res.canonicalName) !== identityKey(char2Res.canonicalName)
+      ) {
+        const pairKeys = new Set([identityKey(char1Res.canonicalName), identityKey(char2Res.canonicalName)]);
+        const otherMainMentioned = mainCharacterNames.some((name) => {
+          if (pairKeys.has(identityKey(name))) return false;
+          return textSources.some(({ text }) => containsExactRosterOrAlias(text, name));
+        });
+        if (!otherMainMentioned) {
+          const pruned = characterNames.filter((name) => pairKeys.has(identityKey(name)));
+          if (pruned.length === 2) {
+            characterNames.length = 0;
+            characterNames.push(...pruned);
+          }
+        }
+      }
+    }
+  }
+
   // If characterNames is empty, detect and heal characters mentioned in
   // action, narrationText, or sceneDetails.
   if (characterNames.length === 0 && mainCharacterNames.length > 0) {
-    const textSources: Array<{ text: string; source: "action" | "narrationText" | "sceneDetails" }> = [
-      { text: normalizedText(input.action), source: "action" },
-      { text: normalizedText(input.narrationText), source: "narrationText" },
-      { text: normalizedText(input.sceneDetails), source: "sceneDetails" },
-    ];
-
     const detected = new Map<string, { canonicalName: string; speciesOrType: string; source: "action" | "narrationText" | "sceneDetails" }>();
 
     for (const { text, source } of textSources) {
@@ -847,6 +887,22 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
             canonicalName: resolution.canonicalName,
             speciesOrType: resolution.speciesOrType,
             source,
+          });
+        }
+      }
+    }
+
+    // If no individual character was singled out, check if group indicators like "the friends" appear.
+    // If so, heal characterNames with all main characters (up to 5).
+    if (detected.size === 0) {
+      const groupSource = textSources.find(({ text }) => GROUP_FRIENDS_PATTERN.test(text));
+      if (groupSource) {
+        for (const canonicalName of mainCharacterNames.slice(0, 5)) {
+          const match = canonicalName.match(SAFE_MAIN_CHARACTER_PATTERN);
+          detected.set(identityKey(canonicalName), {
+            canonicalName,
+            speciesOrType: match ? match[2]!.toLocaleLowerCase() : "",
+            source: groupSource.source,
           });
         }
       }
@@ -1157,8 +1213,8 @@ export function canonicalizeSceneCast<TScene extends SceneCastLike>(
     }
   }
 
-  auditGenericAliases(next.action, "action", exactCastNames, unresolved);
-  auditGenericAliases(next.sceneDetails, "sceneDetails", exactCastNames, unresolved);
+  auditGenericAliases(next.action, "action", exactCastNames, unresolved, mainCharacterNames);
+  auditGenericAliases(next.sceneDetails, "sceneDetails", exactCastNames, unresolved, mainCharacterNames);
 
   const changed = !sameValue(input, next);
   return {

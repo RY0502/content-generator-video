@@ -22,19 +22,25 @@ Generate or resume exactly one episode. State, local files, and receipts are aut
 - A series has 1-5 uniquely named main characters. Never create more than five.
 - Generate images only for reusable character portraits under clear names like character_name.png.
 - Main-character appearance comes from Agnes image references. Prompts contain exact character names, never a character sheet or appearance paragraph. Send only portraits for visible main characters in characterNames order.
+- Cast presence: "The friends" includes ALL main characters (<=5). In 2-figure dialogue (Sunny says to Pip), characterNames lists ONLY those 2 so Agnes gets only their 2 reference images; other elements are text-locked.
+- Locked negative bibles remain active across all generations to prevent defects.
 - One scene = one narrationText = one Groq WAV = one Agnes request = one normalized final clip.
 - Agnes receives an integer 4-12 second request; the measured WAV is authoritative. Provider audio is removed and downloaded video is trimmed to the exact WAV duration. Never stretch clips.
 - Static QA checks durable rows, request/reference bindings, files, codec, dimensions, durations, and duplicate files; no Gemini/AnyAPI analysis call; never requests a QA rerender.
 
 ### Story and scene quality
 
-Author one coherent 24-scene preschool adventure (~2 minutes runtime) for ages 4-8 in a single write_episode_script_chunk call following assigned title/premise from get_next_episode with one naturally integrated learning idea:
+Author one coherent 24-scene preschool adventure (~2 minutes runtime) for ages 4-8 in a single write_episode_script_chunk call following assigned title/premise from get_next_episode with one naturally integrated learning idea using Story-First:
+1. FULL NARRATIVE: In authoringPlan.narrativeScript, write a complete 400-800 word continuous prose story before splitting scenes. Avoid filler and repeated beats.
+2. LOCKED SETTINGS: Register 3-5 distinct backgrounds with detailed elements in authoringPlan.settingRegistry. Reuse settingId and environmentDescription verbatim until location changes.
+3. SUPPORTING BIBLE: Lock 3-4 key supporting entities in authoringPlan.supportingEntityBible; reuse text descriptors verbatim in supportingEntities.
+4. 12-SECOND SCENE DECOMPOSITION: Split freely into scenes meeting the 12s target (10-16 spoken words narration, <=170 chars), omitting or retrofitting minor transitions if needed.
 - Stage 1 (1-4) Wonder: Clubhouse, friends in action, introduce situation.
 - Stage 2 (5-8) Problem: Premise quest revealed. Club begins search.
 - Stage 3 (9-16) Teamwork & Obstacle: Investigate clues, hit obstacles. Friends combine talents. Do not solve early.
 - Stage 4 (17-20) Climax: Cooperative breakthrough to reach/retrieve/solve.
 - Stage 5 (21-24) Celebration & Insight: Joyful reunion, return item, warm insight.
-Pacing: scenes 5-20 focus on multi-stage problem solving (no early resolve). Avoid filler and repeated beats. Limit celebration to scenes 22-24.
+Pacing: scenes 5-20 focus on multi-stage problem solving (no early resolve). Limit celebration to scenes 22-24.
 
 Every scene has sceneNumber, narrationText, environmentDescription, action, and characterNames (1-3 visible stored figures). Provide supportingEntities and non-empty continuityAnchors in every scene; sceneDetails, cameraAngle, and lighting are creative guidance, not semantic pass/fail tests. Do not write characterVisuals or appearance descriptions.
 Narration: 1-2 sentences, target 10-16 spoken words (<=160 raw chars); hard limits are 20 spoken words and 200 raw characters. Include expressive quoted dialogue in third-person narration (e.g. "Look up there!" chirped Sunny.). Only an actual WAV over 12 seconds triggers narration-only repair.

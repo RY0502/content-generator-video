@@ -3874,4 +3874,80 @@ describe("scriptRefinementTool", () => {
     expect(result.pass).toBe(false);
     expect(result.issues.join(" ")).toContain("Scene 23 is the 3rd consecutive scene consisting of a character quote attribution");
   });
+
+  it("accepts authoringPlan with narrativeScript and settingRegistry and auto-populates environment from settingId", async () => {
+    const fixture = chunkStateForEpisode();
+    const tool = buildEpisodeScriptChunkTool(fixture.state);
+
+    const settingRegistry = [
+      {
+        id: "meadow_bridge",
+        name: "Meadow Creek Bridge",
+        environmentDescription: "Inside the meadow creek: two peeled birch logs spanning the rushing blue water with woven green-vine railings and flat grey river-stone footings under bright morning sun.",
+        defaultLighting: "Bright morning sunshine casting sharp ripples on the clear stream.",
+        continuityAnchors: ["Bridge: two peeled birch logs spanning the creek with woven green-vine railings"],
+      },
+    ];
+
+    const plan = {
+      ...chunkAuthoringPlan(),
+      narrativeScript: "One sunny morning, the friends set out to build a safe bridge across the rushing meadow creek so the tired ladybug could return to her garden home. Pip gathered sturdy river stones while Sunny carried strong wild vines. Working together patiently, they laid the birch logs and tied the vine railings securely. With joyful cheers, the friends guided the ladybug across the finished bridge to safety.",
+      settingRegistry,
+    };
+
+    const scenes = chunkScenes(1, 4).map((s) => ({
+      ...s,
+      settingId: "meadow_bridge",
+      environmentDescription: settingRegistry[0].environmentDescription,
+      lighting: undefined,
+      continuityAnchors: [],
+    }));
+
+    const result = JSON.parse(await (tool as any).call({
+      operation: "start",
+      episodeId: 17,
+      targetSceneCount: 24,
+      authoringPlan: plan,
+      scenes,
+    }));
+
+    expect(result.status).toBe("script_chunk_staged");
+    const stored = fixture.getCurrentDraft();
+    expect(stored.scriptJson.authoring.plan.narrativeScript).toBe(plan.narrativeScript);
+    expect(stored.scriptJson.authoring.plan.settingRegistry).toHaveLength(1);
+    expect(stored.scriptJson.scenes[0].environmentDescription).toBe(settingRegistry[0].environmentDescription);
+    expect(stored.scriptJson.scenes[0].lighting).toBe(settingRegistry[0].defaultLighting);
+    expect(stored.scriptJson.scenes[0].continuityAnchors).toEqual(settingRegistry[0].continuityAnchors);
+  });
+
+  it("flags unknown settingId when settingRegistry is supplied to validateEpisodeScript", () => {
+    const roster = ["Mia"];
+    const script = validFiveMinuteScript(24);
+    script.scenes[0]!.settingId = "unknown_mysterious_cavern";
+
+    const settingRegistry = [
+      {
+        id: "clubhouse_room",
+        name: "Clubhouse Room",
+        environmentDescription: "Inside the clubhouse: wooden play table in center with colorful storybooks.",
+        continuityAnchors: [],
+      },
+    ];
+
+    const result = validateEpisodeScript(
+      script,
+      DEFAULT_PRODUCTION_MIN_SCENES,
+      DEFAULT_PRODUCTION_MAX_SCENES,
+      5,
+      roster,
+      {
+        productionSceneContract: true,
+        deferAggregateMinimums: true,
+        settingRegistry,
+      },
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain('Scene 1 references unknown settingId "unknown_mysterious_cavern"');
+  });
 });

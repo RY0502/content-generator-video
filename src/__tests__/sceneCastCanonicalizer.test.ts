@@ -551,4 +551,90 @@ describe("sceneCastCanonicalizer", () => {
       expect.objectContaining({ name: "Pebble the Turtle", visualForm: "real_creature", speciesOrType: "turtle" }),
     );
   });
+
+  it("heals 'the friends' to all main characters when no individual is singled out", () => {
+    const input = baseScene({
+      sceneNumber: 5,
+      narrationText: "The friends gathered along the grassy bank, gazing across the wide blue creek.",
+      action: "The friends gather together along the bank, looking out across the sparkling water.",
+      characterNames: [],
+      characterVisuals: [],
+      supportingEntities: [],
+      sceneDetails: "All the friends stand side by side on the lush green bank.",
+    });
+
+    const mainCharacterNames = [
+      "Pip the Ant",
+      "Nibbles the Hamster",
+      "Sunny the Sparrow",
+      "Pebble the Turtle",
+      "Chip the Squirrel",
+    ];
+
+    const result = canonicalizeSceneCast(input, { mainCharacterNames });
+
+    expect(result.scene.characterNames).toEqual(mainCharacterNames);
+    expect(result.scene.characterVisuals).toHaveLength(5);
+    expect(result.audit.applied.filter((a) => a.kind === "healed_character_name")).toHaveLength(5);
+  });
+
+  it("restricts characterNames to only the 2 participants when dialogue interaction occurs", () => {
+    const input = baseScene({
+      sceneNumber: 8,
+      narrationText: "Sunny chirped softly: 'Be careful on the stones, Pip!'",
+      action: "Sunny said to Pip that the bridge was too slippery to cross alone.",
+      characterNames: [
+        "Pip the Ant",
+        "Nibbles the Hamster",
+        "Sunny the Sparrow",
+        "Pebble the Turtle",
+        "Chip the Squirrel",
+      ],
+      characterVisuals: [],
+      supportingEntities: [],
+      sceneDetails: "Sunny perches on a low branch, leaning down toward Pip on the mossy rock.",
+    });
+
+    const mainCharacterNames = [
+      "Pip the Ant",
+      "Nibbles the Hamster",
+      "Sunny the Sparrow",
+      "Pebble the Turtle",
+      "Chip the Squirrel",
+    ];
+
+    const result = canonicalizeSceneCast(input, { mainCharacterNames });
+
+    expect(result.scene.characterNames).toEqual(["Pip the Ant", "Sunny the Sparrow"]);
+    expect(result.scene.characterVisuals).toHaveLength(2);
+    expect(((result.scene.characterVisuals as any[]) ?? []).map((v: any) => v.name)).toEqual([
+      "Pip the Ant",
+      "Sunny the Sparrow",
+    ]);
+  });
+
+  it("heals empty characterNames to only the 2 dialogue participants when a dialogue interaction occurs", () => {
+    const input = baseScene({
+      sceneNumber: 9,
+      narrationText: "Sunny asked Pip if he could carry the golden acorn.",
+      action: "Sunny asked Pip to hold the heavy golden acorn.",
+      characterNames: [],
+      characterVisuals: [],
+      supportingEntities: [],
+      sceneDetails: "Sunny extends a wing offering the acorn to Pip.",
+    });
+
+    const mainCharacterNames = [
+      "Pip the Ant",
+      "Nibbles the Hamster",
+      "Sunny the Sparrow",
+      "Pebble the Turtle",
+      "Chip the Squirrel",
+    ];
+
+    const result = canonicalizeSceneCast(input, { mainCharacterNames });
+
+    expect(result.scene.characterNames).toEqual(["Pip the Ant", "Sunny the Sparrow"]);
+    expect(result.scene.characterVisuals).toHaveLength(2);
+  });
 });
