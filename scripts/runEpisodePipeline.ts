@@ -130,6 +130,14 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
           args: [videoUrl, JSON.stringify(receipt), seriesId, episodeNumber, sceneNumber],
         });
         console.log(`  -> [Agnes Sync] Scene ${sceneNumber} completed on Agnes! Updated in Turso.`);
+      } else if (data.status === "failed") {
+        pending++;
+        const failMsg = typeof data.error === "object" ? data.error?.message || JSON.stringify(data.error) : String(data.error || "task_failed");
+        await tursoClient.execute({
+          sql: "UPDATE agnes_scene_generations SET status = 'pending', provider_task_id = NULL, error = ? WHERE series_id = ? AND episode_number = ? AND scene_number = ?",
+          args: [failMsg, seriesId, episodeNumber, sceneNumber],
+        });
+        console.log(`  -> [Agnes Sync] Scene ${sceneNumber} task permanently failed on Agnes: ${failMsg}. Reset to pending for fresh resubmission.`);
       } else {
         inProgress++;
         console.log(`  -> [Agnes Sync] Scene ${sceneNumber} status=${data.status}, progress=${data.progress}%`);

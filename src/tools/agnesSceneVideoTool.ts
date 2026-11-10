@@ -1163,7 +1163,16 @@ class AccountRequestGate {
 }
 
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null) {
+    if ("message" in error && typeof (error as any).message === "string") {
+      return (error as any).message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch { }
+  }
+  return String(error);
 }
 
 function retryableNextRun(error: unknown): boolean {
@@ -2036,14 +2045,22 @@ function isSubmissionCandidate(
   row: AgnesSceneGenerationRow,
   envelope: AgnesSceneReceiptEnvelope,
 ): boolean {
+  if (row.status === "completed") return false;
   const task = activeTask(envelope);
   // A terminal provider failure has a definite outcome, so a replacement is
   // safe on a later invocation even though the durable row is marked failed.
   if (task?.status === "failed") return true;
   if (row.status === "pending" && !task) return true;
-  // Includes old rows that crashed after persisting status=submitted but before
-  // a task receipt. submitOne applies the stale lease before allowing a POST.
-  return !task && latestAttempt(envelope)?.state === "submitting";
+  if (!task) {
+    const attempt = latestAttempt(envelope);
+    if (attempt?.state === "definite_rejection" && !attempt.retrySafe) return false;
+    // Includes old rows that crashed after persisting status=submitted but before
+    // a task receipt. submitOne applies the stale lease before allowing a POST.
+    if (attempt?.state === "submitting") return true;
+    if (attempt?.state === "definite_rejection" && attempt.retrySafe) return true;
+    if (["queued", "submitted"].includes(row.status)) return true;
+  }
+  return false;
 }
 
 async function submitOneInternal(
