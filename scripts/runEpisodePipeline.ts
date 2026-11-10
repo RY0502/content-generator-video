@@ -67,15 +67,36 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
 
     const attempts = receipt.attempts ?? [];
     const lastAttempt = attempts[attempts.length - 1] ?? {};
-    const accountId = lastAttempt?.accountId || "account-1";
-    const apiKey = AGNES_ACCOUNTS[accountId] || AGNES_ACCOUNTS["account-1"] || CONFIG.agnesAccounts[0]?.apiKey || "";
+    const preferredAccountId = lastAttempt?.accountId || "account-1";
 
     try {
-      const res = await fetch(`https://apihub.agnes-ai.com/v1/videos/${taskId}`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
+      let res: Response | null = null;
+      let matchingAccount = CONFIG.agnesAccounts.find((a) => a.accountId === preferredAccountId) || CONFIG.agnesAccounts[0];
 
-      if (!res.ok) {
+      if (matchingAccount?.apiKey) {
+        res = await fetch(`https://apihub.agnes-ai.com/v1/videos/${taskId}`, {
+          headers: { Authorization: `Bearer ${matchingAccount.apiKey}` },
+        });
+      }
+
+      if (!res || !res.ok) {
+        // Try all other accounts in case the task was submitted under a different key
+        for (const account of CONFIG.agnesAccounts) {
+          if (account.accountId === preferredAccountId) continue;
+          try {
+            const probeRes = await fetch(`https://apihub.agnes-ai.com/v1/videos/${taskId}`, {
+              headers: { Authorization: `Bearer ${account.apiKey}` },
+            });
+            if (probeRes.ok) {
+              res = probeRes;
+              matchingAccount = account;
+              break;
+            }
+          } catch { }
+        }
+      }
+
+      if (!res || !res.ok) {
         inProgress++;
         continue;
       }
@@ -86,8 +107,9 @@ async function syncRemoteTaskStatus(seriesId: number, episodeNumber: number): Pr
       if (data.status === "completed" && videoUrl) {
         completed++;
         lastAttempt.state = "accepted";
-        const keyLabel = lastAttempt.keyLabel || "key-1";
+        const keyLabel = matchingAccount?.keyLabel || lastAttempt.keyLabel || "key-1";
         const keyFingerprint = lastAttempt.keyFingerprint || "0".repeat(64);
+        lastAttempt.accountId = matchingAccount?.accountId || preferredAccountId;
         lastAttempt.keyLabel = keyLabel;
         lastAttempt.keyFingerprint = keyFingerprint;
         lastAttempt.task = {
