@@ -16,6 +16,7 @@
     "db:cleanup:neon:selective": "tsx scripts/selectiveCleanupNeon.ts",
     "db:migrate-signatures": "tsx scripts/migrateCharacterSignaturePrompts.ts",
     "episode:scheduler-skip": "tsx scripts/setEpisodeSchedulerSkip.ts",
+    "pipeline:submit": "tsx scripts/runEpisodePipeline.ts",
     "smoke:one-minute": "tsx scripts/smokeOneMinuteEpisode.ts",
     "test": "vitest run",
     "postinstall": "node scripts/patchLanggraphSdk.cjs"

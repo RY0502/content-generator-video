@@ -1845,7 +1845,7 @@ describe("three-phase Agnes scene workflow", () => {
       submissionIntervalMs: 0,
       probeMediaDuration: vi.fn(async () => 5.2),
     });
-    client.retrieveVideo.mockImplementationOnce(async () => task("video-2", "completed"));
+    client.retrieveVideo.mockImplementationOnce(async () => task("video-2", "completed") as any);
     const resubmitted = JSON.parse(await (submitNext as any).func({ seriesId: 7, episodeNumber: 2 }));
     expect(resubmitted.status).toBe("submitted");
     expect(client.submitVideo).toHaveBeenCalledTimes(2);
