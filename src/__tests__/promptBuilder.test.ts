@@ -6,6 +6,8 @@ import {
   buildSeriesKeyArtPrompt,
   buildSeriesKeyArtVideoPrompt,
   buildStylizedScenePrompt,
+  isSupportingProp,
+  partitionSupportingEntities,
   resolveCameraPreset,
   resolveSceneLightingProfile,
   TEMPORAL_STABILITY_NEGATIVE_BIBLE,
@@ -35,6 +37,104 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("head-to-toe");
     expect(prompt).toContain("Mia");
     expect(prompt).not.toContain("anthropomorphic living");
+  });
+
+  it("classifies supporting entities correctly as animate figures or inanimate props", () => {
+    expect(isSupportingProp("String bridge: two peeled birch logs tied with yellow twine")).toBe(true);
+    expect(isSupportingProp("Handkerchief: red silk square with white polka dots")).toBe(true);
+    expect(isSupportingProp("Picnic basket: woven wicker basket with handle")).toBe(true);
+    expect(isSupportingProp("Rescue raft: three pine logs tied with green vines")).toBe(true);
+    expect(isSupportingProp("Ant leader: tiny black ant with a shiny chestnut head")).toBe(false);
+    expect(isSupportingProp("Lost mouse: tiny grey field mouse with round pink ears")).toBe(false);
+    expect(isSupportingProp("Clockwork owl: tiny tin bird that clicks and blinks")).toBe(false);
+
+    const partitioned = partitionSupportingEntities([
+      "Ant leader: tiny black ant",
+      "String bridge: two birch logs",
+      "Lost mouse: tiny grey field mouse",
+      "Handkerchief: red silk square",
+    ]);
+    expect(partitioned.figures).toEqual([
+      "Ant leader: tiny black ant",
+      "Lost mouse: tiny grey field mouse",
+    ]);
+    expect(partitioned.props).toEqual([
+      "String bridge: two birch logs",
+      "Handkerchief: red silk square",
+    ]);
+  });
+
+  it("separates inanimate supporting props from visible cast count and locks them under focal props", () => {
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Toby the Teddy Bear", "Pip the Toy Robot"],
+      environmentDescription: "The wide nursery floor leading to the open closet.",
+      action: "Toby and Pip place the wooden blocks carefully to complete the bridge.",
+      narrationText: "Toby held the log steady while Pip tied the last twine knot across the bridge.",
+      cameraAngle: "medium",
+      lighting: "soft moonlight and warm nightlight glow",
+      supportingEntities: [
+        "String bridge: two peeled birch logs spanning the creek with woven yellow twine railings and flat river-stone footings",
+      ],
+      continuityAnchors: ["Nursery layout: toy chest on left, alphabet blocks in center."],
+    });
+
+    // Inanimate bridge MUST NOT be counted in visible figure count
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS");
+    expect(prompt).toContain("[Toby the Teddy Bear] × 1; [Pip the Toy Robot] × 1");
+    expect(prompt).not.toContain("[String bridge] × 1");
+
+    // Camera must frame 2 figures, not 3
+    expect(prompt).toContain("Keep all 2 figures readable and separate");
+
+    // Count and trajectory lock must apply only to the 2 living figures
+    expect(prompt).toContain("COUNT AND TRAJECTORY LOCK — keep those same 2 ledger identities throughout");
+
+    // Bridge MUST appear in Focal Props & Structures in Subject and Setting
+    expect(prompt).toContain("FOCAL PROPS & STRUCTURES — [String bridge]: two peeled birch logs");
+    expect(prompt).toContain("strictly no eyes, face, mouth, limbs, or creature anatomy");
+
+    // Bridge MUST appear in Inanimate Continuity and Focal Prop & Structure Lock
+    expect(prompt).toContain("INANIMATE CONTINUITY");
+    expect(prompt).toContain("String bridge: two peeled birch logs");
+    expect(prompt).toContain("FOCAL PROP & STRUCTURE LOCK");
+
+    // Final duplication guard must only list the 2 living figures
+    expect(prompt).toContain("FINAL DUPLICATION GUARD — render exactly: [Toby the Teddy Bear] × 1; [Pip the Toy Robot] × 1. Total on-screen figure count is 2.");
+  });
+
+  it("correctly partitions mixed supporting entities with both a living character and an inanimate prop", () => {
+    const prompt = buildStylizedScenePrompt({
+      characterNames: ["Toby the Teddy Bear"],
+      environmentDescription: "Under the wooden bed near the wall baseboard.",
+      action: "Toby offers a piece of dried fruit to the little mouse beside the string bridge.",
+      narrationText: "Toby smiled gently as the tiny mouse peeked out from behind the bridge.",
+      cameraAngle: "medium",
+      lighting: "warm amber nightlight glow",
+      supportingEntities: [
+        "Lost mouse: tiny matte grey felt field mouse with round pink ears and two identical round black bead eyes",
+        "String bridge: two peeled birch logs tied with yellow twine railings",
+      ],
+      continuityAnchors: ["Under-bed geography: dusty floorboards with lost crayons and wooden spools."],
+    });
+
+    // Living mouse is counted as a figure (+ Toby = 2 figures). Bridge is NOT counted as a figure.
+    expect(prompt).toContain("VISIBLE CAST — EXACTLY 2 FIGURES, NO OTHERS");
+    expect(prompt).toContain("[Toby the Teddy Bear] × 1; [Lost mouse] × 1");
+    expect(prompt).not.toContain("[String bridge] × 1");
+
+    // Mouse is in Supporting Identity References
+    expect(prompt).toContain("SUPPORTING IDENTITY REFERENCES — [Lost mouse] × 1: tiny matte grey felt field mouse");
+    expect(prompt).toContain("SUPPORTING FIGURE COUNT LOCK");
+
+    // Bridge is in Focal Props & Structures
+    expect(prompt).toContain("FOCAL PROPS & STRUCTURES — [String bridge]: two peeled birch logs tied with yellow twine railings. These are inanimate objects/structures: strictly no eyes, face, mouth, limbs, or creature anatomy.");
+
+    // Bridge is in Inanimate Continuity
+    expect(prompt).toContain("INANIMATE CONTINUITY");
+    expect(prompt).toContain("String bridge: two peeled birch logs");
+
+    // Final duplication guard has total 2 figures
+    expect(prompt).toContain("FINAL DUPLICATION GUARD — render exactly: [Toby the Teddy Bear] × 1; [Lost mouse] × 1. Total on-screen figure count is 2.");
   });
 
   it("includes recurring supporting entities and single-moment guidance in scene prompts", () => {

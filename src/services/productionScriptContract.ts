@@ -1,5 +1,6 @@
 import { inspectEpisodeNarrationManifest } from "./narrationContract.js";
 import { containsExactRosterOrAlias } from "./sceneCastCanonicalizer.js";
+import { partitionSupportingEntities } from "../promptBuilder.js";
 
 /** Agnes accepts at most five named portrait references in one scene request. */
 export const MAX_SCENE_MAIN_CHARACTER_COUNT = 5;
@@ -267,7 +268,11 @@ export function inspectProductionScript(
       issues,
       false,
     );
-    const supportingNames = supportingEntities.map(supportingEntityName);
+    const { figures: supportingFigures, originalIndices } = partitionSupportingEntities(supportingEntities);
+    const supportingNames = supportingFigures.map((entity, figureIdx) => {
+      const origIndex = originalIndices.figures[figureIdx] ?? figureIdx;
+      return supportingEntityName(entity, origIndex);
+    });
     const allCastNames = [...characterNames, ...supportingNames];
     if (new Set(allCastNames.map((name) => name.toLocaleLowerCase())).size !== allCastNames.length) {
       issues.push(
@@ -282,6 +287,7 @@ export function inspectProductionScript(
       false,
     );
     validateFocalPropContinuity(scene, label, issues);
+    validatePropAnthropomorphization(scene, label, issues);
   });
 
   return {
@@ -327,6 +333,41 @@ export function validateFocalPropContinuity(
         issues.push(
           `${label} action/narration features focal structure/container "${noun}", but neither continuityAnchors nor environmentDescription defines it. Multi-scene structures and containers must have a locked visual descriptor in continuityAnchors to prevent visual morphing across scenes.`,
         );
+      }
+    }
+  }
+}
+
+const PROP_ANTHROPOMORPHIZATION_PATTERNS: RegExp[] = [
+  /\b(?:eyes?|eyeballs?|eyelashes?)\b/i,
+  /\b(?:mouths?|lips?|teeth|smiles?|smiling|grins?|grinning|frowns?|frowning)\b/i,
+  /\b(?:arms?|hands?|fingers?|legs?|feet|foot|toes?|limbs?)\b/i,
+  /\b(?:faces?|cheeks?|noses?|snouts?|ears?)\b/i,
+  /\b(?:speaks?|speaking|talks?|talking|whispers?|cries?|crying)\b/i,
+];
+
+export function validatePropAnthropomorphization(
+  scene: Record<string, unknown>,
+  label: string,
+  issues: string[],
+): void {
+  const rawEntities = Array.isArray(scene.supportingEntities)
+    ? scene.supportingEntities.filter((e): e is string => typeof e === "string")
+    : [];
+  if (rawEntities.length === 0) return;
+
+  const { props } = partitionSupportingEntities(rawEntities);
+  for (const prop of props) {
+    const desc = prop.includes(":") ? prop.slice(prop.indexOf(":") + 1).trim() : "";
+    if (!desc) continue;
+    const propName = prop.split(":", 1)[0]?.trim() || "Prop";
+    for (const pattern of PROP_ANTHROPOMORPHIZATION_PATTERNS) {
+      const match = pattern.exec(desc);
+      if (match) {
+        issues.push(
+          `${label} supporting prop "${propName}" contains forbidden creature/human anatomy token "${match[0]}" in its description ("${desc}"). Inanimate props and structures must have physical blueprints only, with strictly no eyes, face, limbs, or creature anatomy.`,
+        );
+        break;
       }
     }
   }

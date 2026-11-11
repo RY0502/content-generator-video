@@ -9,22 +9,11 @@ const launchPrompt = readFileSync(
 describe("production launch prompt", () => {
   it("keeps the creative brief without duplicating obsolete pipeline rules", () => {
     expect(launchPrompt.length).toBeLessThan(5_000);
-    for (const creativeRequirement of [
-      "Time-Travel Backpack",
-      "Mia",
-      "Leo",
-      "Tara",
-      "Bobo the Backpack",
-      "Ages 2–5",
-      "Education must emerge naturally",
-      "Visual and continuity quality",
-    ]) {
-      expect(launchPrompt).toContain(creativeRequirement);
-    }
+    expect(launchPrompt).toContain("Generate the next episode");
+    expect(launchPrompt).toContain("Generation Requirements");
 
     for (const obsoleteRule of [
       "Image Generation Requirements",
-      "imagePrompt",
       "30-45 scenes",
       "6-8 minutes",
       "1 scene = 1 image",

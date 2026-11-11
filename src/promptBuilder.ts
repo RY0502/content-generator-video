@@ -35,9 +35,9 @@ export interface StylizedImageSpec {
 
 /** Visual style — the single most important series-level appearance anchor. */
 const STYLE_BIBLE =
-  "SERIES LOOK LOCK: modern 2D hand-painted children's storybook animation; matte painted surfaces, " +
+  "SERIES LOOK LOCK: modern 2D hand-painted animated storybook style; matte painted surfaces, " +
   "soft brush texture, clean rounded shapes, simple facial planes, large expressive eyes, readable silhouettes, " +
-  "child-friendly proportions, and vibrant natural colors. Lock linework, two-tone painterly shading, texture density, " +
+  "appealing proportions, and vibrant natural colors. Lock linework, two-tone painterly shading, texture density, " +
   "color grade, and proportions across scenes. 16:9 landscape.";
 
 /** Character/color lock belongs in Agnes's final consistency section. */
@@ -74,6 +74,7 @@ const NEGATIVE_BIBLE =
   "NEGATIVE: no text/captions/logos/watermarks; panels/split-screen/collage; mirrors/reflections; portraits/statues/screens; " +
   "silhouettes/crowds/unlisted figures; no humans in animal scenes; no gender/age change, wrong anatomy, " +
   "fused/missing parts, unlisted wardrobe/accessories/markings, chimera traits, or cropped identity features; " +
+  "no creature anatomy (eyes, face, limbs, expressions) on described inanimate props or structures; " +
   "no live-action/photoreal presenter, host, narrator, talking head, overlay, or medium change. " +
   `${CHARACTER_INTEGRITY_NEGATIVE_BIBLE}`;
 
@@ -195,7 +196,7 @@ export function buildStylizedImagePrompt(spec: StylizedImageSpec): string {
   }
   parts.push(spec.cameraAngle ?? "straight-on to slight 3/4 angle camera");
   parts.push(spec.framing ?? "medium close-up");
-  if (spec.kidsFriendly) parts.push("gentle, non-threatening presence, bright inviting colors, appealing and safe-looking for a 4-8 year old audience");
+  if (spec.kidsFriendly) parts.push("gentle, non-threatening presence, bright inviting colors, appealing and safe-looking for a family audience");
   if (spec.ultraCuteMode) parts.push("warm expressive eyes with a friendly glint, endearing and approachable overall look");
   parts.push(CONSISTENCY_BLOCK);
   return parts.join(", ");
@@ -421,15 +422,104 @@ function buildCreatureIdentityGuard(characterVisuals: SceneCharacterVisual[] | u
   ].filter(Boolean).join(" ");
 }
 
+/**
+ * Inanimate structural and prop nouns that indicate an entity is an object/structure
+ * rather than a living, sentient figure.
+ */
+const INANIMATE_PROP_PATTERNS: RegExp[] = [
+  /\b(?:bridges?|rafts?|ladders?|treehouses?|shelters?|huts?|houses?)\b/i,
+  /\b(?:refrigerator|fridge|freezer|appliances?|stoves?|ovens?)\b/i,
+  /\b(?:baskets?|handkerchiefs?|blankets?|cloth|clothes|towels?|sheets?|curtains?)\b/i,
+  /\b(?:ribbons?|strings?|twines?|ropes?|threads?|yarns?|wires?|cables?)\b/i,
+  /\b(?:boxes|box|crates?|containers?|jars?|bottles?|cans?|pots?|bowls?|cups?|plates?)\b/i,
+  /\b(?:carts?|wagons?|barrows?|sleds?|sledges?|carriages?)\b/i,
+  /\b(?:keys?|doors?|gates?|portals?|windows?|locks?)\b/i,
+  /\b(?:kites?|boats?|ships?|canoes?|kayaks?|tents?)\b/i,
+  /\b(?:maps?|balloons?|clocks?|watches?|lanterns?|lamps?|torches?|flashlights?|umbrellas?|socks?|shoes?|boots?)\b/i,
+  /\b(?:planks?|boards?|logs?|poles?|sticks?|branches?|stones?|pebbles?|rocks?|fences?|rails?|railings?)\b/i,
+  /\b(?:structures?|props?|contraptions?|mechanisms?|blueprints?|tools?)\b/i,
+  // Nature items
+  /\b(?:nests?|feathers?|shells?|mushrooms?|flowers?|berries|berry|acorns?|seeds?|leaves|leaf|pinecones?)\b/i,
+  // Quest, treasure, and symbolic items
+  /\b(?:crowns?|medals?|badges?|scrolls?|coins?|gems?|crystals?|orbs?|compasses?|compass|telescopes?)\b/i,
+  // Musical instruments
+  /\b(?:drums?|flutes?|bells?|horns?|whistles?|tambourines?)\b/i,
+  // Food items
+  /\b(?:cakes?|cookies?|pies?|sandwiches|sandwich|soups?|puddings?|apples?|bread)\b/i,
+  // Furniture
+  /\b(?:chairs?|tables?|desks?|beds?|benches?|stools?|shelves|shelf)\b/i,
+];
+
+/**
+ * Animate creature/character tokens that indicate a living or sentient being,
+ * even if inanimate materials or prop words appear nearby.
+ */
+const ANIMATE_FIGURE_PATTERNS: RegExp[] = [
+  /\b(?:mouse|mice|rat|rats|rabbit|rabbits|bunny|bunnies|bear|bears|fox|foxes|badger|badgers|owl|owls|bird|birds|sparrow|sparrows|ant|ants|bee|bees|beetle|beetles|butterfly|butterflies|caterpillar|caterpillars|frog|frogs|toad|toads|squirrel|squirrels|chipmunk|chipmunks|hedgehog|hedgehogs|mole|moles|deer|fawn|fawns|puppy|puppies|dog|dogs|kitten|kittens|cat|cats|dragon|dragons|dinosaur|dinosaurs|duck|ducks|goose|geese|hen|hens|rooster|roosters|pig|pigs|horse|horses|cow|cows|sheep|lamb|lambs|monkey|monkeys|snail|snails|slug|slugs|mammoths?|elephants?|lions?|tigers?|wolves|wolf)\b/i,
+  /\b(?:creatures?|monsters?|fairies|fairy|elves|elf|gnomes?|person|people|humans?|boy|boys|girl|girls|child|children|kids?|dolls?|robots?|plush|stuffed\s+animal)\b/i,
+  /\b(?:leaders?|guides?|friends?|visitors?|helpers?|companions?|elders?|queens?|kings?|princes?|princess(?:es)?|heroes|hero|villains?|guards?|shoppers?|bakers?|drivers?)\b/i,
+  /\b(?:speaks?|talking|speaking|smiles?|smiling|cries?|crying|walks?|walking|runs?|running|crawls?|crawling|hops?|hopping|flies?|flying|swims?|swimming|sentient|living|alive)\b/i,
+];
+
+export function isSupportingProp(descriptor: string): boolean {
+  const clean = descriptor.trim();
+  if (!clean) return false;
+
+  // If descriptor has a "Name: Description" format, check the name prefix specifically:
+  // if the name itself is an inanimate prop (e.g. "String bridge", "Picnic basket", "Red wagon"),
+  // it is intended as a prop.
+  if (clean.includes(":")) {
+    const colonIndex = clean.indexOf(":");
+    const namePart = clean.slice(0, colonIndex).trim();
+    if (INANIMATE_PROP_PATTERNS.some((pattern) => pattern.test(namePart))
+      && !ANIMATE_FIGURE_PATTERNS.slice(0, 3).some((pattern) => pattern.test(namePart))) {
+      return true;
+    }
+  }
+
+  if (ANIMATE_FIGURE_PATTERNS.some((pattern) => pattern.test(clean))) {
+    return false;
+  }
+  if (INANIMATE_PROP_PATTERNS.some((pattern) => pattern.test(clean))) {
+    return true;
+  }
+  return false;
+}
+
+export function partitionSupportingEntities(entities: readonly string[]): {
+  figures: string[];
+  props: string[];
+  originalIndices: { figures: number[]; props: number[] };
+} {
+  const figures: string[] = [];
+  const props: string[] = [];
+  const figureIndices: number[] = [];
+  const propIndices: number[] = [];
+  entities.forEach((entity, index) => {
+    if (isSupportingProp(entity)) {
+      props.push(entity);
+      propIndices.push(index);
+    } else {
+      figures.push(entity);
+      figureIndices.push(index);
+    }
+  });
+  return { figures, props, originalIndices: { figures: figureIndices, props: propIndices } };
+}
+
 function buildExactCastLedger(
   characterNames: string[] | undefined,
   characterCount: number,
-  supportingEntities: readonly string[],
+  supportingFigures: readonly string[],
+  supportingFigureIndices?: readonly number[],
 ): string {
   const mainNames = Array.from({ length: characterCount }, (_, index) => (
     characterNames?.[index]?.replace(/\s+/g, " ").trim() || `Character ${index + 1}`
   ));
-  const supportingNames = supportingEntities.map(supportingEntityName);
+  const supportingNames = supportingFigures.map((entity, idx) => {
+    const origIndex = supportingFigureIndices?.[idx] ?? idx;
+    return supportingEntityName(entity, origIndex);
+  });
   const names = [...mainNames, ...supportingNames];
   if (names.length === 0) return "";
 
@@ -522,14 +612,38 @@ export function buildStylizedScenePrompt(params: {
   const rawContinuityAnchors = (params.continuityAnchors ?? [])
     .map((anchor) => anchor.replace(/\s+/g, " ").trim())
     .filter(Boolean);
-  const anchorSettingSummary = rawContinuityAnchors.length > 0
-    ? ` | PERSISTENT SCENE ANCHORS: ${rawContinuityAnchors.join("; ")}.`
-    : "";
-  const envLayer = `SETTING — ${environment}${anchorSettingSummary}`;
 
   const normalizedSupportingEntities = (params.supportingEntities ?? [])
     .map((entity) => entity.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+
+  const { figures: supportingFigures, props: supportingProps, originalIndices } =
+    partitionSupportingEntities(normalizedSupportingEntities);
+
+  // Combine raw continuity anchors and supporting props into inanimate continuity locks
+  const combinedAnchors = [
+    ...rawContinuityAnchors,
+    ...supportingProps.map((prop, propIdx) => {
+      const origIndex = originalIndices.props[propIdx] ?? propIdx;
+      const name = supportingEntityName(prop, origIndex);
+      const desc = prop.includes(":") ? prop.slice(prop.indexOf(":") + 1).trim() : prop;
+      return `${name}: ${desc}`;
+    }),
+  ];
+  const uniqueInanimateAnchors: string[] = [];
+  const seenAnchorPrefixes = new Set<string>();
+  for (const anchor of combinedAnchors) {
+    const prefix = (anchor.includes(":") ? anchor.slice(0, anchor.indexOf(":")) : anchor).trim().toLowerCase();
+    if (!seenAnchorPrefixes.has(prefix)) {
+      seenAnchorPrefixes.add(prefix);
+      uniqueInanimateAnchors.push(anchor);
+    }
+  }
+
+  const anchorSettingSummary = uniqueInanimateAnchors.length > 0
+    ? ` | PERSISTENT SCENE ANCHORS: ${uniqueInanimateAnchors.join("; ")}.`
+    : "";
+  const envLayer = `SETTING — ${environment}${anchorSettingSummary}`;
 
   const exactNames = (params.characterNames ?? [])
     .map((name) => name.replace(/\s+/g, " ").trim())
@@ -545,19 +659,23 @@ export function buildStylizedScenePrompt(params: {
   if (new Set(normalizedCharacterNames.map((name) => name.toLocaleLowerCase())).size !== normalizedCharacterNames.length) {
     throw new Error("Scene visible cast must contain each main character exactly once.");
   }
-  const supportingNames = normalizedSupportingEntities.map(supportingEntityName);
-  const allCastNames = [...normalizedCharacterNames, ...supportingNames];
+  const supportingFigureNames = supportingFigures.map((entity, figureIdx) => {
+    const origIndex = originalIndices.figures[figureIdx] ?? figureIdx;
+    return supportingEntityName(entity, origIndex);
+  });
+  const allCastNames = [...normalizedCharacterNames, ...supportingFigureNames];
   if (new Set(allCastNames.map((name) => name.toLocaleLowerCase())).size !== allCastNames.length) {
     throw new Error("Scene visible cast must contain each main or supporting figure exactly once.");
   }
 
   const charCount = normalizedCharacterNames.length;
-  const supportingCount = normalizedSupportingEntities.length;
+  const supportingCount = supportingFigures.length;
   const totalFigureCount = charCount + supportingCount;
   const castLedger = buildExactCastLedger(
     normalizedCharacterNames,
     charCount,
-    normalizedSupportingEntities,
+    supportingFigures,
+    originalIndices.figures,
   );
   const charLayer = charCount > 0
     ? `REFERENCE-CONDITIONED MAIN CAST — ${normalizedCharacterNames.map((name) => `[${name}]`).join("; ")}. ` +
@@ -566,14 +684,28 @@ export function buildStylizedScenePrompt(params: {
       ? "MAIN-CAST EXCLUSION — no main-series character is visible; only the supporting figures in the ledger appear."
       : "EMPTY-SCENE LOCK — exactly zero people, animals, creatures, living objects, silhouettes, or other figures.";
 
-  // SUBJECT — episode-local supporting entities with explicit single-instance locks.
-  const supportingEntities = normalizedSupportingEntities
-    .map((entity, index) => `[${supportingEntityName(entity, index)}] × 1: ${entity.includes(":") ? entity.slice(entity.indexOf(":") + 1).trim() : entity}`)
+  // SUBJECT — episode-local supporting figures with explicit single-instance locks.
+  const supportingEntities = supportingFigures
+    .map((entity, figureIdx) => {
+      const origIndex = originalIndices.figures[figureIdx] ?? figureIdx;
+      return `[${supportingEntityName(entity, origIndex)}] × 1: ${entity.includes(":") ? entity.slice(entity.indexOf(":") + 1).trim() : entity}`;
+    })
     .join(" | ");
   const supportingLayer = supportingEntities
     ? `SUPPORTING IDENTITY REFERENCES — ${supportingEntities}. ` +
       "SUPPORTING FIGURE COUNT LOCK — each supporting figure listed above appears exactly once as a single continuous body; " +
       "never duplicate, clone, split, or fork any supporting figure."
+    : "";
+
+  // SUBJECT — episode-local supporting props/structures with locked physical blueprints.
+  const supportingPropsText = supportingProps
+    .map((prop, propIdx) => {
+      const origIndex = originalIndices.props[propIdx] ?? propIdx;
+      return `[${supportingEntityName(prop, origIndex)}]: ${prop.includes(":") ? prop.slice(prop.indexOf(":") + 1).trim() : prop}`;
+    })
+    .join(" | ");
+  const supportingPropsLayer = supportingPropsText
+    ? `FOCAL PROPS & STRUCTURES — ${supportingPropsText}. These are inanimate objects/structures: strictly no eyes, face, mouth, limbs, or creature anatomy.`
     : "";
 
   const isExplicitlyNonHuman = (params.characterVisuals ?? []).length > 0 && !(params.characterVisuals ?? []).some(
@@ -597,15 +729,15 @@ export function buildStylizedScenePrompt(params: {
     : "";
 
   // CONSISTENCY — episode-local recurring props/setup and environment continuity.
-  const continuityAnchors = rawContinuityAnchors
+  const continuityAnchors = uniqueInanimateAnchors
     .map((anchor, index) => `[Anchor ${index + 1}]: ${anchor}`)
     .join(" | ");
   const continuityLayer = continuityAnchors
     ? `INANIMATE CONTINUITY — ${continuityAnchors}. These anchors never authorize another figure.`
     : "";
 
-  const focalPropLock = rawContinuityAnchors.length > 0
-    ? "FOCAL PROP & STRUCTURE LOCK — preserve the exact materials, architecture, colors, textures, and construction stage of every described anchor; never alter materials, redesign, morph, or substitute a different structure style between shots."
+  const focalPropLock = uniqueInanimateAnchors.length > 0
+    ? "FOCAL PROP & STRUCTURE LOCK — preserve the exact materials, architecture, colors, textures, and construction stage of every described anchor and focal prop; never alter materials, redesign, morph, or substitute a different structure style between shots."
     : "";
 
   // ENVIRONMENT CONTINUITY — lock the setting so secondary environmental
@@ -654,6 +786,7 @@ export function buildStylizedScenePrompt(params: {
     castLedger,
     charLayer,
     supportingLayer,
+    supportingPropsLayer,
     envLayer,
   ].filter(Boolean).join("\n");
   const cameraLayer = buildSceneCameraLayer(params.cameraAngle, totalFigureCount);
@@ -743,7 +876,7 @@ export function buildSeriesKeyArtPrompt(params: {
     "Characters occupy the centre-bottom of the composition, with title text above or overlaid.",
     "Rich detailed background suggesting the show's world.",
     "Vibrant saturated colors with natural tone, clean composition, professional polish.",
-    "Warm friendly atmosphere, appealing to ages 4-8.",
+    "Warm friendly atmosphere, appealing to a wide audience.",
     "16:9 landscape aspect ratio.",
     "No logos. No watermarks. No UI elements beyond the series title.",
     "No scary elements. No dark shadows. No photorealism.",
@@ -797,7 +930,7 @@ export function buildEpisodeKeyArtPrompt(params: {
     "Main character occupies the centre-bottom of the composition, large and clearly visible, with episode title above.",
     "Background suggests the episode's setting and story.",
     "Vibrant saturated colors with natural tone, clean composition, professional polish.",
-    "Warm friendly atmosphere, appealing to ages 4-8.",
+    "Warm friendly atmosphere, appealing to a wide audience.",
     "16:9 landscape aspect ratio.",
     "No logos. No watermarks. No UI elements beyond the episode title.",
     "No scary elements. No dark shadows. No photorealism.",

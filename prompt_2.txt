@@ -62,27 +62,30 @@ The children enter Pencil City, where a broken graphite bridge has stopped all t
 
 If the Season 1 episode list has not been generated yet, generate a varied 25-episode list first. Then create the next episode.
 
-* Target age 5–8
-* Rich narration with dialogue, feelings, humor, and sensory detail
-* Avoid filler
-* Choose the best-fit preschool story pattern
-* Keep exactly **1 scene = 1 image = 1 narration clip**
-* Split multiple important actions into separate scenes
+* **Target Episode Runtime: 3-4 minutes (180-240 seconds)** across **20-24 scenes** (each scene ~8-12 seconds, 10-16 spoken words).
+* **Story-First Progressive Narrative:** Author the complete continuous progressive narrative story (500-900 words) in `authoringPlan.narrativeScript` first before splitting scenes. One single, unique story with strictly NO filler, NO repeated beats, and NO circular dialogue loops to pad time.
+* **12-Second Scene Splitting:** Split freely into 20-24 scenes meeting the 12-second target per scene.
+* **Cast Presence & Reference Images:** Max 5 main characters. When narration mentions "the friends", include all active main characters. In 2-character dialogue, list ONLY those 2 in `characterNames` so Agnes receives only their reference images.
+* **Supporting Entities & Physical Blueprints:**
+  - Inanimate props and structures (e.g. pencil bridge, refrigerator shelf, ladder, cart) must have a concrete, locked blueprint (materials, deck, railing, posts, colors) repeated verbatim across all scenes. Inanimate structures never have creature anatomy (strictly no eyes, face, mouth, limbs, or expressions).
+  - Supporting characters must have concrete physical specs (e.g. "two identical round black bead eyes", matte felt body). Banned: "mismatched eyes", "button body", "odd buttons". Anti-feature bleeding: supporting characters must never borrow wardrobe, colors, or motifs from main characters.
 * Maintain character and environment consistency
+* Keep exactly **1 scene = 1 video = 1 narration clip**
+* Split multiple important actions into separate scenes
 
 For every scene provide:
 
 * sceneNumber
 * location
 * timeOfDay
-* characters
+* characterNames
 * supportingEntities
-* visualAction
+* continuityAnchors
+* action
 * emotion
-* imagePrompt
-* narration
-* estimatedDurationSeconds
-* soundEffects
-* musicMood
+* sceneDetails
+* cameraAngle
+* lighting
+* narrationText
 
 Generate the next episode now.

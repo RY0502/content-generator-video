@@ -310,8 +310,8 @@ describe("productionScriptContract", () => {
     const scene = script.scenes[0]!;
     scene.characterNames = ["Pip the Ant"];
     scene.supportingEntities = [
-      "Stable: tall green trees with thick foliage",
-      "Stable: friendly animal sounds echoing gently",
+      "Stable Master: tall green mantis",
+      "Stable Master: friendly animal sounds echoing gently",
     ];
 
     let result = inspectProductionScript(script, ["Pip the Ant"]);
@@ -361,5 +361,38 @@ describe("productionScriptContract", () => {
       "Sunny the Sparrow",
     ]);
     expect(result.pass).toBe(true);
+  });
+
+  it("partitions supporting entities so inanimate props do not collide with cast members", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = ["Pip the Ant"];
+    scene.supportingEntities = [
+      "String bridge: two peeled birch logs tied with yellow twine",
+    ];
+    scene.action = "Pip walks carefully toward the bridge.";
+    scene.narrationText = "Pip saw the bridge ahead.";
+    scene.continuityAnchors = ["Bridge blueprint: two birch logs"];
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(true);
+  });
+
+  it("rejects supporting props that contain forbidden creature anatomy in their description", () => {
+    const script = productionScript();
+    const scene = script.scenes[0]!;
+    scene.characterNames = ["Pip the Ant"];
+    scene.supportingEntities = [
+      "String bridge: a wooden bridge with two big round eyes and smiling mouth",
+    ];
+    scene.action = "Pip walks across the bridge.";
+    scene.narrationText = "Pip crossed the bridge.";
+    scene.continuityAnchors = ["Bridge blueprint: two birch logs"];
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain(
+      'Scene 1 supporting prop "String bridge" contains forbidden creature/human anatomy token',
+    );
   });
 });

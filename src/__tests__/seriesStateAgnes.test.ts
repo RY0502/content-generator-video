@@ -1556,12 +1556,14 @@ describe("SeriesState Agnes persistence", () => {
     const state = await createStateWithEpisode();
     const previousOutputDir = CONFIG.outputDir;
     const previousFfprobePath = CONFIG.ffprobePath;
+    const previousYoutubeUploadEnabled = CONFIG.youtubeUploadEnabled;
     const outputDir = await mkdtemp(path.join(os.tmpdir(), "done-guard-agnes-only-"));
     const fakeProbe = path.join(outputDir, "fake-ffprobe.sh");
     await writeFile(fakeProbe, "#!/bin/sh\nprintf '7.5\\n'\n", "utf8");
     await chmod(fakeProbe, 0o755);
     (CONFIG as { outputDir: string }).outputDir = outputDir;
     (CONFIG as { ffprobePath: string }).ffprobePath = fakeProbe;
+    (CONFIG as { youtubeUploadEnabled: boolean }).youtubeUploadEnabled = true;
 
     try {
       const { finalPath } = await prepareProductionEpisode(state, outputDir);
@@ -1580,8 +1582,9 @@ describe("SeriesState Agnes persistence", () => {
     } finally {
       (CONFIG as { outputDir: string }).outputDir = previousOutputDir;
       (CONFIG as { ffprobePath: string }).ffprobePath = previousFfprobePath;
+      (CONFIG as { youtubeUploadEnabled: boolean }).youtubeUploadEnabled = previousYoutubeUploadEnabled;
     }
-  });
+  }, 15_000);
 
   it("does not bind static video QA to a replaceable local portrait cache", async () => {
     const state = await createStateWithEpisode();

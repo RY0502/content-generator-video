@@ -20,8 +20,11 @@ async function cleanupTursoTables(): Promise<void> {
     const tables = [
       "youtube_upload_receipts",
       "episode_video_outputs",
+      "agnes_scene_generation_history",
       "agnes_scene_generations",
+      "episode_script_pending_chunks",
       "episode_script_drafts",
+      "agnes_account_rate_state",
       "key_art",
       "character_sheets",
       "episodes",
