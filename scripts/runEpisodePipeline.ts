@@ -11,6 +11,7 @@ import {
 } from "../src/tools/agnesSceneVideoTool.js";
 import { buildAgnesVideoQaTool } from "../src/tools/agnesVideoQaTool.js";
 import { buildEpisodeAssemblyTool } from "../src/tools/episodeAssemblyTool.js";
+import { pauseVm } from "../src/services/vmPauseService.js";
 import { createClient } from "@libsql/client";
 
 dotenv.config();
@@ -315,6 +316,7 @@ function parseCliArgs(): {
   maxCycles?: number;
   cooldownMs?: number;
   promptPath?: string;
+  noPause?: boolean;
 } {
   const args = process.argv.slice(2);
   let seriesId: number | undefined;
@@ -323,11 +325,14 @@ function parseCliArgs(): {
   let maxCycles: number | undefined;
   let cooldownMs: number | undefined;
   let promptPath: string | undefined;
+  let noPause = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--watch" || arg === "-w" || arg === "--loop") {
       watch = true;
+    } else if (arg === "--no-pause") {
+      noPause = true;
     } else if (arg === "--series" || arg === "-s") {
       seriesId = Number(args[++i]);
     } else if (arg.startsWith("--series=")) {
@@ -355,7 +360,7 @@ function parseCliArgs(): {
     }
   }
 
-  return { seriesId, episodeNumber, watch, maxCycles, cooldownMs, promptPath };
+  return { seriesId, episodeNumber, watch, maxCycles, cooldownMs, promptPath, noPause };
 }
 
 export async function runEpisodePipeline(options: {
@@ -365,6 +370,7 @@ export async function runEpisodePipeline(options: {
   maxCycles?: number;
   cooldownMs?: number;
   promptPath?: string;
+  noPause?: boolean;
 } = {}): Promise<void> {
   const seriesState = new SeriesState();
   await seriesState.initialize();
@@ -540,8 +546,21 @@ export async function runEpisodePipeline(options: {
 
 if (process.argv[1]?.replace(/\\/g, "/").endsWith("runEpisodePipeline.ts")) {
   const cliArgs = parseCliArgs();
-  runEpisodePipeline(cliArgs).catch((err) => {
-    console.error("Pipeline failed:", err);
-    process.exit(1);
-  });
+  runEpisodePipeline(cliArgs)
+    .catch((err) => {
+      console.error("Pipeline failed:", err);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      if (cliArgs.noPause) {
+        console.log("[Pipeline] Skipping VM pause (--no-pause passed).");
+        return;
+      }
+      try {
+        console.log("[Pipeline] Processing complete. Requesting VM pause...");
+        await pauseVm();
+      } catch (err: any) {
+        console.warn(`[Pipeline] VM pause request could not be completed: ${err.message}`);
+      }
+    });
 }
