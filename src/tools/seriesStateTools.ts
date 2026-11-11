@@ -642,7 +642,7 @@ export function buildSeriesStateTools(
             ? {
                 ...scriptValidation,
                 nextAction:
-                  "Resume Agnes video pipeline in order: 1. Call verify_agnes_scene_videos to check progress and retry pending clips. 2. When all are completed, call download_agnes_scene_videos. 3. Call qa_agnes_episode_videos. 4. Call assemble_episode_video only after QA passes.",
+                  "Resume Agnes video pipeline in order: 1. Call submit_agnes_scene_videos to submit titles and scenes through the scheduler. 2. Call verify_agnes_scene_videos to check progress and retry pending clips. 3. When all are completed, call download_agnes_scene_videos. 4. Call qa_agnes_episode_videos. 5. Call assemble_episode_video only after QA passes.",
               }
             : scriptValidation,
         scriptDraft,

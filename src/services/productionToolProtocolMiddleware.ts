@@ -669,6 +669,27 @@ function bootstrapToolAfterReceipt(
     }
   }
 
+  if (lastToolName === "submit_agnes_scene_videos") {
+    return seriesId === null
+      ? null
+      : {
+          toolName: "verify_agnes_scene_videos",
+          expectedArgs: null,
+        };
+  }
+
+  if (lastToolName === "verify_agnes_scene_videos") {
+    if (status === "ready_to_download" || status === "completed") {
+      return seriesId === null
+        ? null
+        : {
+            toolName: "download_agnes_scene_videos",
+            expectedArgs: null,
+          };
+    }
+    return null;
+  }
+
   return null;
 }
 
