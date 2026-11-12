@@ -28,6 +28,9 @@ describe("production system prompt", () => {
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Do not write characterVisuals or appearance descriptions");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("1-5 uniquely named main characters");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("never a character sheet or appearance paragraph");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("FOCAL OBJECT, QUEST ITEM & RECURRING PROP CONTINUITY");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("VISUAL CO-PRESENCE LOCK");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("LOCKED VISUAL BLUEPRINT");
     expect(SYSTEM_PROMPT_EXTENSION).not.toContain("ages 4-8");
     expect(SYSTEM_PROMPT_EXTENSION).not.toContain("at least 750 spoken words");
     expect(SYSTEM_PROMPT_EXTENSION).not.toContain("at least 300 measured narration seconds");
@@ -66,6 +69,6 @@ describe("production system prompt", () => {
     const enabledPrompt = buildSystemPromptExtension(true);
     expect(enabledPrompt).toContain("Only its durable success receipt may mark the episode done");
     expect(enabledPrompt).toContain("call upload_to_youtube once with the canonical seriesId and episodeNumber");
-    expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(9_500);
+    expect(SYSTEM_PROMPT_EXTENSION.length).toBeLessThan(12_000);
   });
 });

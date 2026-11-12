@@ -88,6 +88,56 @@ describe("Focal Prop and Construction Continuity Contract", () => {
     expect(issues[0]).toContain('focal structure/container "laundry basket"');
   });
 
+  it("rejects scenes where action features a focal prop (sock) but anchors and supportingEntities omit it", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 9,
+      action: "Toby the Teddy Bear and Lulu gently carried the sock to a soft patch of blanket.",
+      narrationText: "The team moved the sock carefully to a safer spot.",
+      environmentDescription: "A soft carpeted bedroom floor with shadows.",
+      continuityAnchors: ["wooden bed frame with blue sheet"],
+      supportingEntities: [],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 9", issues);
+
+    expect(issues.length).toBe(1);
+    expect(issues[0]).toContain('focal prop "sock"');
+    expect(issues[0]).toContain("neither supportingEntities nor continuityAnchors defines it");
+  });
+
+  it("passes scenes when the focal prop (sock) is declared in supportingEntities", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 9,
+      action: "Toby the Teddy Bear and Lulu gently carried the sock to a soft patch of blanket.",
+      narrationText: "The team moved the sock carefully to a safer spot.",
+      environmentDescription: "A soft carpeted bedroom floor with shadows.",
+      continuityAnchors: ["wooden bed frame with blue sheet"],
+      supportingEntities: ["navy blue knitted sock: soft wool sock with two white stripes"],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 9", issues);
+
+    expect(issues.length).toBe(0);
+  });
+
+  it("permits searching scenes where an unfound item is missing before characters find it", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 2,
+      action: "Zoom the Toy Car sweeps under the nightstand while Buttons watches.",
+      narrationText: "Zoom dashed under the nightstand, hoping to spot the blue sock.",
+      environmentDescription: "A soft carpeted bedroom floor with shadows.",
+      continuityAnchors: ["wooden nightstand with brass drawer handles"],
+      supportingEntities: [],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 2", issues);
+
+    expect(issues.length).toBe(0);
+  });
+
   it("adds FOCAL PROP & STRUCTURE LOCK to promptBuilder when continuity anchors are present", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Pip"],

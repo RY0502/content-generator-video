@@ -395,4 +395,37 @@ describe("productionScriptContract", () => {
       'Scene 1 supporting prop "String bridge" contains forbidden creature/human anatomy token',
     );
   });
+
+  it("enforces visual co-presence when narration or action mentions a registered supporting figure", () => {
+    const script = productionScript();
+    // Scene 5 mentions a registered guest mouse in narration, but supportingEntities is empty
+    script.scenes[4]!.supportingEntities = [];
+    script.scenes[4]!.narrationText = "Pip made sure the new home was safe and comfortable for the mouse.";
+    script.scenes[4]!.action = "Pip checked the grassy clearing for warmth.";
+
+    // Register mouse in scene 6 so it is a registered supporting entity in the script
+    script.scenes[5]!.supportingEntities = [
+      "tiny toy mouse: miniature gray felt toy mouse with two round black bead eyes",
+    ];
+    script.scenes[5]!.narrationText = "Pip smiled warmly at the tiny toy mouse resting peacefully.";
+    script.scenes[5]!.action = "Pip gently placed a seed beside the mouse.";
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain(
+      'Scene 5 action/narration mentions supporting figure "tiny toy mouse" but it is omitted from supportingEntities',
+    );
+  });
+
+  it("passes visual co-presence when registered supporting figure is included in supportingEntities", () => {
+    const script = productionScript();
+    script.scenes[4]!.supportingEntities = [
+      "tiny toy mouse: miniature gray felt toy mouse with two round black bead eyes",
+    ];
+    script.scenes[4]!.narrationText = "Pip made sure the new home was safe and comfortable for the mouse.";
+    script.scenes[4]!.action = "Pip checked the grassy clearing for the mouse.";
+
+    const result = inspectProductionScript(script, ["Pip the Ant"]);
+    expect(result.pass).toBe(true);
+  });
 });

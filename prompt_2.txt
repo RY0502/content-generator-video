@@ -67,8 +67,13 @@ If the Season 1 episode list has not been generated yet, generate a varied 25-ep
 * **12-Second Scene Splitting:** Split freely into 20-24 scenes meeting the 12-second target per scene.
 * **Cast Presence & Reference Images:** Max 5 main characters. When narration mentions "the friends", include all active main characters. In 2-character dialogue, list ONLY those 2 in `characterNames` so Agnes receives only their reference images.
 * **Supporting Entities & Physical Blueprints:**
-  - Inanimate props and structures (e.g. pencil bridge, refrigerator shelf, ladder, cart) must have a concrete, locked blueprint (materials, deck, railing, posts, colors) repeated verbatim across all scenes. Inanimate structures never have creature anatomy (strictly no eyes, face, mouth, limbs, or expressions).
+  - Focal props, quest items, and structures (e.g. pencil bridge, refrigerator shelf, ladder, cart, key, map): Define a locked visual blueprint (materials, colors, railing/deck/shape) repeated verbatim across all scenes. Inanimate structures/props never have creature anatomy (strictly no eyes, face, mouth, limbs, or expressions).
   - Supporting characters must have concrete physical specs (e.g. "two identical round black bead eyes", matte felt body). Banned: "mismatched eyes", "button body", "odd buttons". Anti-feature bleeding: supporting characters must never borrow wardrobe, colors, or motifs from main characters.
+* **Visual Co-Presence Lock (Audio & Action Synchronization):**
+  - What the audience hears in narration and what characters do in action MUST be visually present in the scene manifest so Agnes renders it.
+  - If narration or action mentions or depicts interacting with a supporting creature or figure, it MUST be listed in `supportingEntities` with its locked descriptor. Never omit a supporting character while narration or action describes them!
+  - If narration or action mentions or depicts carrying, holding, examining, watching over, or using a focal prop, that prop MUST be listed in `supportingEntities` (if movable/held) or `continuityAnchors` (if stationary).
+  - Do NOT list guest entities in scenes where they are not physically present.
 * Maintain character and environment consistency
 * Keep exactly **1 scene = 1 video = 1 narration clip**
 * Split multiple important actions into separate scenes

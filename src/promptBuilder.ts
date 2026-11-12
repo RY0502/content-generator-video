@@ -435,7 +435,8 @@ const INANIMATE_PROP_PATTERNS: RegExp[] = [
   /\b(?:carts?|wagons?|barrows?|sleds?|sledges?|carriages?)\b/i,
   /\b(?:keys?|doors?|gates?|portals?|windows?|locks?)\b/i,
   /\b(?:kites?|boats?|ships?|canoes?|kayaks?|tents?)\b/i,
-  /\b(?:maps?|balloons?|clocks?|watches?|lanterns?|lamps?|torches?|flashlights?|umbrellas?|socks?|shoes?|boots?)\b/i,
+  /\b(?:maps?|balloons?|clocks?|watches?|lanterns?|lamps?|torches?|flashlights?|umbrellas?|socks?|stockings?|shoes?|boots?|gloves?|mittens?|scarves|scarf|hats?|caps?)\b/i,
+  /\b(?:books?|notebooks?|diaries|diary|scrolls?|letters?|envelopes?|paintings?|drawings?)\b/i,
   /\b(?:planks?|boards?|logs?|poles?|sticks?|branches?|stones?|pebbles?|rocks?|fences?|rails?|railings?)\b/i,
   /\b(?:structures?|props?|contraptions?|mechanisms?|blueprints?|tools?)\b/i,
   // Nature items
@@ -455,7 +456,7 @@ const INANIMATE_PROP_PATTERNS: RegExp[] = [
  * even if inanimate materials or prop words appear nearby.
  */
 const ANIMATE_FIGURE_PATTERNS: RegExp[] = [
-  /\b(?:mouse|mice|rat|rats|rabbit|rabbits|bunny|bunnies|bear|bears|fox|foxes|badger|badgers|owl|owls|bird|birds|sparrow|sparrows|ant|ants|bee|bees|beetle|beetles|butterfly|butterflies|caterpillar|caterpillars|frog|frogs|toad|toads|squirrel|squirrels|chipmunk|chipmunks|hedgehog|hedgehogs|mole|moles|deer|fawn|fawns|puppy|puppies|dog|dogs|kitten|kittens|cat|cats|dragon|dragons|dinosaur|dinosaurs|duck|ducks|goose|geese|hen|hens|rooster|roosters|pig|pigs|horse|horses|cow|cows|sheep|lamb|lambs|monkey|monkeys|snail|snails|slug|slugs|mammoths?|elephants?|lions?|tigers?|wolves|wolf)\b/i,
+  /\b(?:mouse|mice|rat|rats|rabbit|rabbits|bunny|bunnies|bear|bears|fox|foxes|badger|badgers|owl|owls|bird|birds|sparrow|sparrows|ant|ants|bee|bees|beetle|beetles|ladybugs?|ladybirds?|crickets?|firefl(?:y|ies)|butterfly|butterflies|caterpillar|caterpillars|frog|frogs|toad|toads|squirrel|squirrels|chipmunk|chipmunks|hedgehog|hedgehogs|mole|moles|deer|fawn|fawns|puppy|puppies|dog|dogs|kitten|kittens|cat|cats|dragon|dragons|dinosaur|dinosaurs|duck|ducks|goose|geese|hen|hens|rooster|roosters|pig|pigs|horse|horses|cow|cows|sheep|lamb|lambs|monkey|monkeys|snail|snails|slug|slugs|mammoths?|elephants?|lions?|tigers?|wolves|wolf)\b/i,
   /\b(?:creatures?|monsters?|fairies|fairy|elves|elf|gnomes?|person|people|humans?|boy|boys|girl|girls|child|children|kids?|dolls?|robots?|plush|stuffed\s+animal)\b/i,
   /\b(?:leaders?|guides?|friends?|visitors?|helpers?|companions?|elders?|queens?|kings?|princes?|princess(?:es)?|heroes|hero|villains?|guards?|shoppers?|bakers?|drivers?)\b/i,
   /\b(?:speaks?|talking|speaking|smiles?|smiling|cries?|crying|walks?|walking|runs?|running|crawls?|crawling|hops?|hopping|flies?|flying|swims?|swimming|sentient|living|alive)\b/i,
