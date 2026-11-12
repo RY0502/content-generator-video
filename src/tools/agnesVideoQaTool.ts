@@ -26,6 +26,7 @@ import { canonicalizeSceneCast } from "../services/sceneCastCanonicalizer.js";
 import { canonicalCharacterImageName } from "../providers/convexCharacterReferenceStore.js";
 import type { AgnesSceneGenerationRow, SeriesState } from "../state/seriesState.js";
 import { AGNES_MAX_REFERENCE_IMAGES } from "../providers/agnes/index.js";
+import { partitionSupportingEntities } from "../promptBuilder.js";
 import {
   VIDEO_DURATION_TOLERANCE_SECONDS,
   createAgnesVideoRequestDigest,
@@ -424,8 +425,11 @@ async function buildQaAssets(params: {
       : sceneNumber === AGNES_SERIES_KEY_ART_TRACKING_SCENE
         ? rosterNames
         : promptMap.names;
+    const scriptSupportingFigures = scriptScene
+      ? partitionSupportingEntities(scriptScene.supportingEntities).figures
+      : [];
     const expectedLedgerCast = scriptScene
-      ? [...scriptScene.characterNames, ...scriptScene.supportingEntities.map(supportingEntityName)]
+      ? [...scriptScene.characterNames, ...scriptSupportingFigures.map(supportingEntityName)]
       : expectedMainCast;
     const asset: QaAsset = {
       sceneNumber,

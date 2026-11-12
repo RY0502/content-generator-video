@@ -400,4 +400,29 @@ describe("qa_agnes_episode_videos static audit", () => {
       expect.objectContaining({ code: "normalized_duration_matches_audio" }),
     ]));
   });
+
+  it("partitions supporting entities so inanimate props do not corrupt expectedLedgerCast", async () => {
+    const { state, probeMedia } = await fixture();
+    // Scene 1 has an inanimate prop in supportingEntities
+    state.getEpisodeByNumber.mockResolvedValueOnce({
+      title: "The Glowing Map",
+      scriptJson: {
+        scenes: [
+          {
+            sceneNumber: 1,
+            narrationText: "Mia watches the red ribbon flutter in the gentle breeze today.",
+            characterNames: ["Mia"],
+            supportingEntities: ["red ribbon: bright red woven ribbon with slight sheen"],
+          },
+        ],
+      },
+    });
+
+    const tool = buildAgnesVideoQaTool(state as any, { probeMedia });
+    const result = JSON.parse(await (tool as any).call({ seriesId: 7, episodeNumber: 2 }));
+
+    // Scene 1 should pass exact_cast_ledger_matches_script because red ribbon is a prop
+    const scene1Failure = (result.failures ?? []).find((f: any) => f.sceneNumber === 1);
+    expect(scene1Failure).toBeUndefined();
+  });
 });
