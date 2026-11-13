@@ -28,7 +28,11 @@ export type NarrationTextIssueCode =
   // Kept in the public union for compatibility with older consumers. The
   // current contract no longer emits or enforces a per-scene minimum.
   | "too_few_spoken_words"
-  | "too_many_spoken_words";
+  | "too_many_spoken_words"
+  | "trailing_incomplete_punctuation"
+  | "missing_terminal_punctuation"
+  | "unbalanced_quotes"
+  | "unquoted_dialogue";
 
 export interface NarrationTextIssue {
   code: NarrationTextIssueCode;
@@ -103,6 +107,39 @@ export function inspectNarrationText(
         `${NARRATION_MAX_SPOKEN_WORDS} to leave headroom under the 12-second audio limit. ` +
         `Shorten this scene's narration sentence to ${NARRATION_MAX_SPOKEN_WORDS} words or fewer (target 10-16 words). Do not list all character names in narration.`,
     });
+  }
+  if (options.production && text.trim() && spokenWordCount > 0 && !isSyntheticNarrationPlaceholder(text)) {
+    const cleaned = stripNarrationVocalDirections(text).trim();
+    const trailingIncomplete = cleaned.match(/[,:;\-\u2013\u2014]$/);
+    if (trailingIncomplete) {
+      issues.push({
+        code: "trailing_incomplete_punctuation",
+        message: `Narration text ends with incomplete trailing punctuation ("${trailingIncomplete[0]}"); narration sentences must end with terminal punctuation (. ! ?).`,
+      });
+    } else if (!/[.!?]["'”’]?$/.test(cleaned)) {
+      issues.push({
+        code: "missing_terminal_punctuation",
+        message: "Narration text must end with complete terminal punctuation (. ! ?).",
+      });
+    }
+
+    const doubleQuotes = (text.match(/"/g) || []).length;
+    if (doubleQuotes % 2 !== 0) {
+      issues.push({
+        code: "unbalanced_quotes",
+        message: "Narration text contains unbalanced double quotation marks.",
+      });
+    }
+
+    const unquotedDialogueMatch = text.match(
+      /\b(?:Got it|Fixed|Look|Wait|Hurry|Stop|Yes|No|Good night|Watch out|Found it|Come on|Be careful)\s+(?:he|she|[A-Z][a-z]+)\s+(?:chirps?|cheers?|whispers?|says?|cries?|shouts?|yells?|exclaims?|calls?)\b/i,
+    );
+    if (unquotedDialogueMatch && !text.includes('"') && !text.includes('“')) {
+      issues.push({
+        code: "unquoted_dialogue",
+        message: `Narration text contains dialogue without quotation marks ("${unquotedDialogueMatch[0]}"); dialogue must be enclosed in quotation marks.`,
+      });
+    }
   }
 
   return {

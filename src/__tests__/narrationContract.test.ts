@@ -93,4 +93,25 @@ describe("narrationContract", () => {
     expect(invalid.issues.join(" ")).toContain("production minimum");
     expect(invalid.issues.join(" ")).toContain("at most 20");
   });
+
+  it("lints narration sentence punctuation, quotes, and dialogue in production", () => {
+    const trailingComma = inspectNarrationText("We need more ribbons for the long tear,", { production: true });
+    expect(trailingComma.pass).toBe(false);
+    expect(trailingComma.issues.map((i) => i.code)).toContain("trailing_incomplete_punctuation");
+
+    const missingPeriod = inspectNarrationText("Pip measures ribbon almost there", { production: true });
+    expect(missingPeriod.pass).toBe(false);
+    expect(missingPeriod.issues.map((i) => i.code)).toContain("missing_terminal_punctuation");
+
+    const unbalanced = inspectNarrationText('Toby said, "Look over there!', { production: true });
+    expect(unbalanced.pass).toBe(false);
+    expect(unbalanced.issues.map((i) => i.code)).toContain("unbalanced_quotes");
+
+    const unquotedDialogue = inspectNarrationText("Pip ties firm knot Fixed Toby cheers.", { production: true });
+    expect(unquotedDialogue.pass).toBe(false);
+    expect(unquotedDialogue.issues.map((i) => i.code)).toContain("unquoted_dialogue");
+
+    const validDialogue = inspectNarrationText('Pip ties a firm knot. "Fixed!" Toby cheered.', { production: true });
+    expect(validDialogue.pass).toBe(true);
+  });
 });

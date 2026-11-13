@@ -138,6 +138,57 @@ describe("Focal Prop and Construction Continuity Contract", () => {
     expect(issues.length).toBe(0);
   });
 
+  it("rejects focal props (kite) when defined only in environmentDescription and missing in supportingEntities/anchors", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 8,
+      action: "Toby holds the kite steady while Pip examines the torn tail.",
+      narrationText: "Toby held the kite steady.",
+      environmentDescription: "Inside the bedroom where the colorful kite rests on the carpet.",
+      continuityAnchors: ["carpet floor area"],
+      supportingEntities: [],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 8", issues);
+
+    expect(issues.length).toBe(1);
+    expect(issues[0]).toContain('focal prop "kite"');
+    expect(issues[0]).toContain("neither supportingEntities nor continuityAnchors defines it");
+  });
+
+  it("rejects focal props with stub anchors lacking a locked visual blueprint", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 8,
+      action: "Toby holds the kite steady while Pip examines the torn tail.",
+      narrationText: "Toby held the kite steady.",
+      environmentDescription: "Inside the bedroom floor.",
+      continuityAnchors: ["kite from toy chest"],
+      supportingEntities: [],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 8", issues);
+
+    expect(issues.length).toBe(1);
+    expect(issues[0]).toContain('focal prop "kite" is referenced in action/narration without a locked visual blueprint');
+  });
+
+  it("passes focal props with a locked visual blueprint in supportingEntities", () => {
+    const issues: string[] = [];
+    const scene = {
+      sceneNumber: 8,
+      action: "Toby holds the kite steady while Pip examines the torn tail.",
+      narrationText: "Toby held the kite steady.",
+      environmentDescription: "Inside the bedroom floor.",
+      continuityAnchors: ["carpet floor area"],
+      supportingEntities: ["kite: diamond-shaped paper kite with colorful geometric patterns and wooden cross struts"],
+    };
+
+    validateFocalPropContinuity(scene, "Scene 8", issues);
+
+    expect(issues.length).toBe(0);
+  });
+
   it("adds FOCAL PROP & STRUCTURE LOCK to promptBuilder when continuity anchors are present", () => {
     const prompt = buildStylizedScenePrompt({
       characterNames: ["Pip"],

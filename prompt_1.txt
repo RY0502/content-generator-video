@@ -20,9 +20,9 @@ Choose the best-fit pattern for this episode.
 Do not force the standard 8-beat formula unless it is clearly the best fit.
 
 Important requirements:
-- Target Episode Runtime: 3-4 minutes (180-240 seconds) across 20-24 scenes (each ~8-12 seconds, 10-16 spoken words).
-- Story-First Progressive Narrative: Write full continuous 500-900 word story in authoringPlan.narrativeScript first before splitting into scenes. One single, unique story with strictly no filler, no repeated beats, no dialogue loops.
-- 12-Second Scene Splitting: Split freely into 20-24 scenes meeting the 12s target per scene.
+- Target Episode Runtime: ~2 minutes (120-150 seconds) across 24 scenes (each ~8-12 seconds, 10-16 spoken words).
+- Story-First Progressive Narrative: Write full continuous 400-800 word story in authoringPlan.narrativeScript first before splitting into scenes. One single, unique story with strictly no filler, no repeated beats, no dialogue loops.
+- 12-Second Scene Splitting: Split freely into 24 scenes meeting the 12s target per scene.
 - Cast presence: Max 5 main characters. "The friends" includes all active main characters. In 2-figure dialogue, list ONLY those 2 in characterNames so Agnes receives only their reference images.
 - Supporting entities & blueprints: Lock physical blueprints for focal props, quest items, and structures (materials, colors, railing/deck/shape) repeated verbatim across scenes (inanimate structures strictly have no creature anatomy); lock concrete specs for supporting figures ("two identical round black bead eyes"), no ambiguous descriptors ("mismatched eyes", "button body"), and no feature bleeding from main characters.
 - Visual co-presence lock: What the audience hears in narration and what characters do in action MUST be visually present in the scene manifest. If narration or action mentions or depicts interacting with a creature (e.g. mouse, snail) or focal prop (e.g. bridge, raft, basket), it MUST be included in supportingEntities (or continuityAnchors). Do NOT list unmentioned/absent guest entities.

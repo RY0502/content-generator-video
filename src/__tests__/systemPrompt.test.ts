@@ -19,8 +19,8 @@ describe("production system prompt", () => {
       expect(SYSTEM_PROMPT_EXTENSION, requiredDetail).toContain(requiredDetail);
     }
 
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("20-24 scene adventure");
-    expect(SYSTEM_PROMPT_EXTENSION).toContain("3-4 minutes runtime");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("24-scene adventure");
+    expect(SYSTEM_PROMPT_EXTENSION).toContain("~2 minutes runtime");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("ANTI-FEATURE BLEEDING");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("one naturally integrated learning idea");
     expect(SYSTEM_PROMPT_EXTENSION).toContain("Avoid filler and repeated beats");

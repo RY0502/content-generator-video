@@ -363,6 +363,9 @@ export function validateFocalPropContinuity(
         continue;
       }
       const nounTokens = noun.split(/\s+/);
+      const combinedDefinedText = isStructure
+        ? `${envText} ${anchorsText} ${supportingText}`
+        : `${anchorsText} ${supportingText}`;
       const hasNoun = nounTokens.every((token) => combinedDefinedText.includes(token));
       if (!hasNoun) {
         if (isStructure) {
@@ -372,6 +375,25 @@ export function validateFocalPropContinuity(
         } else {
           issues.push(
             `${label} action/narration features focal prop "${noun}", but neither supportingEntities nor continuityAnchors defines it. Multi-scene props and quest items must have a locked visual descriptor in supportingEntities or continuityAnchors to prevent visual morphing or absence across scenes.`,
+          );
+        }
+      } else if (!isStructure) {
+        // Also verify that the prop defined in supportingEntities or continuityAnchors actually has a locked visual blueprint (not just a stub like "kite from chest")
+        const matchingSupporting = rawSupporting.filter((e) => pattern.test(e));
+        const matchingAnchors = rawAnchors.filter((a) => pattern.test(a));
+        const allMatching = [...matchingSupporting, ...matchingAnchors];
+        const hasBlueprint = allMatching.some((entry) => {
+          if (entry.includes(":")) {
+            const afterColon = entry.slice(entry.indexOf(":") + 1).trim();
+            return afterColon.split(/\s+/).length >= 3;
+          }
+          const tokens = entry.trim().split(/\s+/);
+          const hasDetail = /\b(?:wood|wooden|birch|log|logs|vine|vines|stone|stones|wool|knitted|woven|cloth|fabric|paper|plastic|metal|silk|ribbon|stripes?|diamond|red|blue|green|yellow|brass|gold|golden)\b/i.test(entry);
+          return tokens.length >= 5 && hasDetail;
+        });
+        if (!hasBlueprint) {
+          issues.push(
+            `${label} focal prop "${noun}" is referenced in action/narration without a locked visual blueprint in supportingEntities or continuityAnchors. Define its exact physical appearance (materials, colors, patterns, shape; e.g. "${noun}: [detailed appearance]") repeated verbatim across scenes.`,
           );
         }
       }
@@ -519,7 +541,7 @@ export function validateVisualCoPresence(
           }
         }
       } else {
-        const isPresent = entity.nounPattern.test(combinedEnvAndAnchors);
+        const isPresent = entity.nounPattern.test(combinedSupporting) || entity.nounPattern.test(combinedAnchors);
         if (!isPresent) {
           const alreadyFlagged = issues.some((i) => i.startsWith(label) && i.includes(`"${entity.name}"`));
           if (!alreadyFlagged) {

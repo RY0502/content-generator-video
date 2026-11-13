@@ -30,13 +30,13 @@ Generate or resume exactly one episode. State, local files, and receipts are aut
 
 ### Story and scene quality
 
-Author one coherent 20-24 scene adventure (3-4 minutes runtime, 180-240s total) in a single write_episode_script_chunk call following assigned title/premise from get_next_episode with one naturally integrated learning idea using Story-First:
-1. FULL NARRATIVE: In authoringPlan.narrativeScript, write a complete 500-900 word continuous progressive prose story before splitting scenes. Avoid filler and repeated beats; ensure a single, unique, forward-moving story with zero filler or dialogue loops.
+Author one coherent 24-scene adventure (~2 minutes runtime, 120-150s total) in a single write_episode_script_chunk call following assigned title/premise from get_next_episode with one naturally integrated learning idea using Story-First:
+1. FULL NARRATIVE: In authoringPlan.narrativeScript, write a complete 400-800 word continuous progressive prose story before splitting scenes. Avoid filler and repeated beats; ensure a single, unique, forward-moving story with zero filler or dialogue loops.
 2. LOCKED SETTINGS: Register 3-5 distinct backgrounds with detailed elements in authoringPlan.settingRegistry. Reuse settingId and environmentDescription verbatim until location changes.
 3. SUPPORTING BIBLE & PHYSICAL SPEC: Identify all recurring guest figures AND all focal quest props/items (e.g. missing sock, broken kite, lost ribbon, secret map, basket, key, compass, baby bird, tiny mouse). Lock 3-4 key supporting entities in authoringPlan.supportingEntityBible; reuse text descriptors verbatim in supportingEntities across scenes. Partition figures from props:
 - Living characters/creatures: specify concrete materials, colors, species, and exact eye design ("two identical round black bead eyes"). BANNED: "mismatched eyes", "button body", "odd buttons", or ambiguous traits. ANTI-FEATURE BLEEDING: never borrow clothing colors, accessories, or motifs from main characters.
 - Inanimate props/structures: define complete physical blueprint (materials/fabrics, colors, patterns, textures, shape, size; e.g. "navy blue knitted sock: soft navy-blue wool knitted sock with ribbed cuff, two white horizontal toe stripes, and a rounded toe pouch"); strictly identical across all scenes. Inanimate structures/props never have creature anatomy.
-4. 12-SECOND SCENE DECOMPOSITION: Split freely into scenes meeting the 12s target (10-16 spoken words narration, <=170 chars), omitting or retrofitting minor transitions if needed. Ensure the split faithfully segments the single narrative story without repeating actions.
+4. 12-SECOND SCENE DECOMPOSITION: Split freely into 24 scenes meeting the 12s target (10-16 spoken words narration, <=170 chars), omitting or retrofitting minor transitions if needed. Ensure the split faithfully segments the single narrative story without repeating actions.
 - Stage 1 (1-4) Wonder: Clubhouse, friends in action, introduce situation.
 - Stage 2 (5-8) Problem: Premise quest revealed. Club begins search.
 - Stage 3 (9-16) Teamwork & Obstacle: Investigate clues, hit obstacles. Friends combine talents. Do not solve early.
@@ -79,7 +79,7 @@ For daily_limit reply exactly: Only 2 episodes per day can be generated. Stop on
 - audio_repair: rerun episode audio; matching exact-text WAVs are reused.
 - agnes: resume Agnes media in order: 1. submit_agnes_scene_videos, 2. verify_agnes_scene_videos, 3. download_agnes_scene_videos, 4. qa_agnes_episode_videos, then 5. assemble_episode_video. Never assemble before QA passes.
 
-Author through write_episode_script_chunk without visible planning or JSON prose. Call with operation=start, episodeId, targetSceneCount 20-24 (default 24), one compact complete authoringPlan for scenes 1-24 covering the 5 stages, and the complete sequence of scenes 1-24 in a single call. If resuming an existing draft, send the exact next contiguous range. Send real scene objects below 36,000 serialized characters. A plan guides story quality but is not semantically graded. Correct errors immediately. When complete, call refine_episode_script with episodeId/draftRevision only.
+Author through write_episode_script_chunk without visible planning or JSON prose. Call with operation=start, episodeId, targetSceneCount 24, one compact complete authoringPlan for scenes 1-24 covering the 5 stages, and the complete sequence of scenes 1-24 in a single call. If resuming an existing draft, send the exact next contiguous range. Send real scene objects below 36,000 serialized characters. A plan guides story quality but is not semantically graded. Correct errors immediately. When complete, call refine_episode_script with episodeId/draftRevision only.
 
 Call synthesize_episode_narration_audio once. It reuses exact-text audio and reports measured timing. If repair_required, call refine_episode_script with the returned timing evidence; it may shorten narrationText only and preserves every other scene field. Rerun audio after a narration change. Then generate_episode_captions and set status=audio.
 

@@ -62,9 +62,9 @@ The children enter Pencil City, where a broken graphite bridge has stopped all t
 
 If the Season 1 episode list has not been generated yet, generate a varied 25-episode list first. Then create the next episode.
 
-* **Target Episode Runtime: 3-4 minutes (180-240 seconds)** across **20-24 scenes** (each scene ~8-12 seconds, 10-16 spoken words).
-* **Story-First Progressive Narrative:** Author the complete continuous progressive narrative story (500-900 words) in `authoringPlan.narrativeScript` first before splitting scenes. One single, unique story with strictly NO filler, NO repeated beats, and NO circular dialogue loops to pad time.
-* **12-Second Scene Splitting:** Split freely into 20-24 scenes meeting the 12-second target per scene.
+* **Target Episode Runtime: ~2 minutes (120-150 seconds)** across **24 scenes** (each scene ~8-12 seconds, 10-16 spoken words).
+* **Story-First Progressive Narrative:** Author the complete continuous progressive narrative story (400-800 words) in `authoringPlan.narrativeScript` first before splitting scenes. One single, unique story with strictly NO filler, NO repeated beats, and NO circular dialogue loops to pad time.
+* **12-Second Scene Splitting:** Split freely into 24 scenes meeting the 12-second target per scene.
 * **Cast Presence & Reference Images:** Max 5 main characters. When narration mentions "the friends", include all active main characters. In 2-character dialogue, list ONLY those 2 in `characterNames` so Agnes receives only their reference images.
 * **Supporting Entities & Physical Blueprints:**
   - Focal props, quest items, and structures (e.g. pencil bridge, refrigerator shelf, ladder, cart, key, map): Define a locked visual blueprint (materials, colors, railing/deck/shape) repeated verbatim across all scenes. Inanimate structures/props never have creature anatomy (strictly no eyes, face, mouth, limbs, or expressions).
