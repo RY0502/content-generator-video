@@ -999,6 +999,7 @@ async function repairSceneFields(params: {
   const raw = await chatText({
     systemPrompt,
     userText,
+    temperature: 1,
   });
 
   try {
@@ -1012,6 +1013,7 @@ async function repairSceneFields(params: {
         `${userText}\n\n` +
         `Your previous invalid response was:\n${raw}\n\n` +
         `Now return only the corrected JSON object.`,
+      temperature: 1,
     });
     return parseSceneRepairResponse(retryRaw);
   }
@@ -1287,6 +1289,7 @@ async function rewriteScript(params: {
   const raw = await chatText({
     systemPrompt: baseSystemPrompt,
     userText: baseUserText,
+    temperature: 1,
   });
 
   try {
@@ -1303,6 +1306,7 @@ async function rewriteScript(params: {
         `${baseUserText}\n\n` +
         `Your previous invalid response was:\n${raw}\n\n` +
         `Now rewrite it as one valid JSON object only.`,
+      temperature: 1,
     });
 
     return {

@@ -2966,6 +2966,7 @@ describe("scriptRefinementTool", () => {
     });
 
     const request = chatTextMock.mock.calls[0][0];
+    expect(request.temperature).toBe(1);
     expect(request.systemPrompt).toContain("continuityAnchors");
     expect(request.systemPrompt).toContain("characterVisuals");
     expect(request.systemPrompt).toContain("visualForm");

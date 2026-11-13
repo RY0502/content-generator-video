@@ -418,9 +418,17 @@ function getOrchestrator(): FreeTierOrchestrator<LlmInput, string> {
 }
 
 /** Plain text reasoning call (e.g. voice selection). */
-export async function chatText(params: { systemPrompt: string; userText: string }): Promise<string> {
+export async function chatText(params: {
+  systemPrompt: string;
+  userText: string;
+  temperature?: number;
+}): Promise<string> {
   try {
-    return await getOrchestrator().invoke({ system: params.systemPrompt, prompt: params.userText });
+    return await getOrchestrator().invoke({
+      system: params.systemPrompt,
+      prompt: params.userText,
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+    });
   } catch (error) {
     console.error("[chatText] Error during orchestrator invoke:", error);
     throw error;

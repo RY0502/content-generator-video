@@ -166,7 +166,7 @@ describe("production tool protocol middleware", () => {
         function: { name: expectedTool },
       });
       expect(handler.mock.calls[0][0].modelSettings).toEqual({
-        temperature: 0.25,
+        temperature: expectedTool === "write_episode_script_chunk" ? 1 : 0.25,
         parallel_tool_calls: false,
       });
     },

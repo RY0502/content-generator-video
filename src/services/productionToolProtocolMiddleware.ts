@@ -1104,12 +1104,14 @@ export function createProductionToolProtocolMiddleware() {
             function: { name: requiredToolName },
           };
 
+      const isScriptChunkCall = requiredToolName === "write_episode_script_chunk";
       const requiredRequest = {
         ...request,
         toolChoice,
         modelSettings: {
           ...request.modelSettings,
           parallel_tool_calls: false,
+          ...(isScriptChunkCall ? { temperature: 1 } : {}),
         },
       };
       const first = bindAuthoritativeToolCallArgs(
